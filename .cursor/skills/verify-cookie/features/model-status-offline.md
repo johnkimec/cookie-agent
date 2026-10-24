@@ -9,7 +9,7 @@ The menu bar tells John whether the on-device model is up, loading, or down. Wit
 - `status-down` shows the head-with-a-slash glyph while the runtime is `down`, and a send does not start a reply. `status: planned`
 - `status-offline-chat` still completes an on-device reply when the Mac has no network and the runtime is `up`. The status line stays `🐾 Cookie · on-device · Qwen3.6`. `status: planned`
 - `status-local-only` keeps `Local-only mode` checked in every one of those states. `status: planned`
-- `status-core` makes the core report `up`, accept a push to `loading` and `down`, refuse `chat.send` with `Runtime unavailable` in those states, and answer again after `up`. `status: planned`
+- `status-core` makes the core report `up`, accept a push to `loading` and `down`, refuse `chat.send` with `Runtime unavailable` in those states, and answer again after `up`. `status: verified (verify-evidence/m0-real-model-status/transcript.jsonl)`
 
 ## How to get to it (user POV)
 
@@ -22,18 +22,20 @@ The menu bar tells John whether the on-device model is up, loading, or down. Wit
 
 Preconditions:
 
-- Doctor has printed `ok`, `runtime up fake-local`, and `llamaPort 18080`.
+- For the real core, `doctor --core real` has printed `ok`, `server cookie-core`, `runtime up Qwen3.6-35B-A3B`, `llamaPort 18080`, and `sockets loopback`.
+- For the fake-core regression, doctor has printed `ok`, `runtime up fake-local`, and `llamaPort 18080`.
 - The drive uses a fresh `COOKIE_DATA_DIR` and port `18080`.
 - Do not open a connection to `127.0.0.1:8080`.
 
-- **Core states.** Run `.cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-model-status`. Exit code is 0. Stdout contains `loading refused`, `down refused`, and `recovered stop`. The transcript shows `runtime.status` `up` / `fake-local` after `initialize`, then a push to `loading` with `modelId` `Qwen3.6-35B-A3B`, a `chat.send` error code `-32002` and message `Runtime unavailable`, a push to `down` with `modelId` null, the same error, a push back to `up` / `fake-local`, and a `chat.done` `stop`. This command's core half can pass without the menu bar being visible. Leave `status-core` planned until a pull request cites that evidence path. On Linux the stdout also contains `verified-unreachable on Linux: requires macOS`.
+- **Real core states.** Run `.cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-real-model-status --core real`. Exit code is 0. Stdout contains `loading refused`, `down refused`, `recovered stop`, and on Linux `verified-unreachable on Linux: requires macOS`. The transcript shows server `cookie-core`, then `runtime.status` `up` / `Qwen3.6-35B-A3B` after `initialize`, a query that echoes that state, a push to `loading` with `modelId` `Qwen3.6-35B-A3B`, a `chat.send` error code `-32002` and message `Runtime unavailable` with reason `runtime is loading`, a push to `down` with `modelId` null, the same error with reason `runtime is down`, a push back to `up` / `Qwen3.6-35B-A3B`, and a `chat.done` `stop` with usage `inputTokens` 20 / `outputTokens` 11. This command's core half can pass without the menu bar being visible. It does not verify the glyph sub-features.
+- **Fake core states.** Run `.cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-model-status`. Exit code is 0. Stdout contains `loading refused`, `down refused`, and `recovered stop`. The transcript shows `runtime.status` `up` / `fake-local` after `initialize`, then a push to `loading` with `modelId` `Qwen3.6-35B-A3B`, a `chat.send` error code `-32002` and message `Runtime unavailable`, a push to `down` with `modelId` null, the same error, a push back to `up` / `fake-local`, and a `chat.done` `stop`. On Linux the stdout also contains `verified-unreachable on Linux: requires macOS`. This recipe does not replace the real-core transcript cited on `status-core`.
 - **Glyphs, once the app exists.** The unmet precondition on Linux is macOS. Run `.cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon`. Exit code is 2 and stdout is `verified-unreachable on Linux: requires macOS`. When the app exists: `up` with `modelId` `Qwen3.6-35B-A3B` shows the status line `🐾 Cookie · on-device · Qwen3.6` and the badge `on-device` on a reply. `loading` shows the dotted-outline glyph and Return does not add a `cookie` turn. `down` shows the head with a slash, Return does not add a `cookie` turn, and the badge is not `cloud`. `Local-only mode` stays checked in all three states.
 - **No network, model up.** With the runtime `up`, turn the network off and send from `Ask Cookie…`. The reply finishes and the badge reads `on-device`. The status line does not change to a slash. The slash is for `down`, not for a missing network.
 
 ## Gotchas
 
-- The fake core starts at `up` / `fake-local`. That string is not `Qwen3.6`. The menu shows `Qwen3.6` only for `modelId` `Qwen3.6-35B-A3B`.
+- The fake core starts at `up` / `fake-local`. That string is not `Qwen3.6`. The real core's cited transcript starts at `up` / `Qwen3.6-35B-A3B`. The menu shows `Qwen3.6` only for `modelId` `Qwen3.6-35B-A3B`.
 - The character sheet says the offline pose covers "no network (local still works)" and "the model isn't loaded". For M0 the slash means the model is `down`. No network with the model `up` still chats and keeps the on-device status line.
 - Loading in the design doc is about 9 s warm and 27 s cold on the M1 Max. The check is the glyph and the refused send, not those durations.
 - A `runtime.status` line inside the chat-streaming transcript does not verify this feature. The chat drive never enters `loading` or `down`.
-- Do not curl or open port `8080` to see if John's model is up. The doctor checks the fake core's own file descriptors instead.
+- Do not curl or open port `8080` to see if John's model is up. The fake-core doctor checks that process's own file descriptors (`sockets none`). The real-core doctor allows a socket only when its peer is `127.0.0.1:18080` (`sockets loopback`).

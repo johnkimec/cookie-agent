@@ -142,7 +142,7 @@ These are process environment variables, not JSON-RPC fields.
 | `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. |
 | `COOKIE_FAKE_DELTA_MS` | Fake core only. Milliseconds to wait between deltas so `chat.cancel` can land. `0`–`10000`. Default `0`. |
 
-The fake core opens no sockets and does not dial `llama-server`, whatever the port is.
+The fake core opens no sockets and does not dial `llama-server`, whatever the port is. The real core dials `http://127.0.0.1:$COOKIE_LLAMA_PORT` and only that host.
 
 ## Fake core
 
@@ -159,6 +159,14 @@ I'm here. This reply is from the fake core, with no model loaded.
 ```
 
 That text is a stub so task B can render a stream. It is not a model reply. `serverInfo.name` is `cookie-fake-core`. The first `runtime.status` is `up` / `fake-local`. Task A replaces this process and must report the real runtime instead of copying `fake-local`.
+
+## Real core
+
+```bash
+pnpm core
+```
+
+`serverInfo.name` is `cookie-core`. After `initialize` it probes `GET /health` on the llama port (a 404 falls through to `GET /v1/models`) and sends one `runtime.status`. Reachable is `up` / `Qwen3.6-35B-A3B`. Unreachable is `down` with `modelId` null, and `chat.send` then returns `-32002` instead of waiting. A shell `runtime.status` push still updates the core's view. One reply at a time: a second `chat.send` is `-32003`. `chat.cancel` aborts the HTTP request.
 
 ## TypeScript
 

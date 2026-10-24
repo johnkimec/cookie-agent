@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import { main } from "./index.js";
+import { CORE_SERVER_NAME } from "./index.ts";
 
-it("exits the skeleton entrypoint cleanly", () => {
-  expect(main()).toBe(0);
+it("names the real core and does not start stdio on import", () => {
+  expect(CORE_SERVER_NAME).toBe("cookie-core");
 });

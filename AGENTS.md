@@ -26,7 +26,7 @@ Implementation is allowed, one milestone task per pull request.
 | `core/` | TypeScript agent core. Builds and tests on Linux. |
 | `app/` | Swift shell. macOS only. Today a compile stub. |
 | `protocol/` | JSON-RPC 2.0 schemas, examples, and the M0 spec. Shared by Swift (Codable, not written yet) and TypeScript (`core/src/protocol/`). |
-| `.cursor/skills/verify-cookie/` | Verification skill and M0 feature map. Linux drives the fake core over stdio. The Mac app drive stays unreachable until the shell exists. |
+| `.cursor/skills/verify-cookie/` | Verification skill and M0 feature map. Linux drives the fake core, or the real core with `--core real`, over stdio. The Mac app drive stays unreachable until the shell exists. |
 | `evals/` | Evaluation tasks from the project doc. Not written yet. |
 | `assets/` | Rive file and pose exports. Not covered by Apache-2.0. See `BRAND.md`. |
 | `BRAND.md` | Reservation of Cookie's name and mascot art. |
@@ -47,7 +47,7 @@ pnpm --filter @cookie-agent/core test
 
 `pnpm lint`, `pnpm typecheck`, and `pnpm test` run the same three commands.
 
-`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. See [protocol/README.md](protocol/README.md).
+`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `pnpm core` is the real core: it dials llama-server on `127.0.0.1:$COOKIE_LLAMA_PORT` (default `8080`). `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. `--core fake` is the default. `--core real` drives the real core against a stub on port `18080`. See [protocol/README.md](protocol/README.md).
 
 On a Mac, the shell stub compiles with:
 
