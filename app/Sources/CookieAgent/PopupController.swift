@@ -121,7 +121,8 @@ final class PopupController: NSObject, @unchecked Sendable {
     private func preferredHeight() -> CGFloat {
         let turns = model.conversation.turns
         let draftLines = min(5, max(1, model.conversation.draft.components(separatedBy: "\n").count))
-        let input = max(PopupLayout.collapsedHeight, 28 + CGFloat(draftLines) * 22)
+        let notice: CGFloat = model.conversation.refusalLine(runtime: model.runtime.state) == nil ? 0 : 20
+        let input = max(PopupLayout.collapsedHeight, 28 + CGFloat(draftLines) * 22 + notice)
         guard !turns.isEmpty else { return min(PopupLayout.maxHeight, input) }
         var lines = 0
         for turn in turns {
@@ -233,21 +234,30 @@ struct PopupRoot: View {
     private var inputRow: some View {
         HStack(alignment: .center, spacing: 10) {
             CookiePlaceholder(pose: model.pose)
-            AskField(
-                text: Binding(
-                    get: { model.conversation.draft },
-                    set: { newValue in
-                        var next = model.conversation
-                        next.draft = newValue
-                        model.conversation = next
-                        model.onLayout?()
-                    }
-                ),
-                onSubmit: { model.submit() },
-                onEscape: { model.closePopup() },
-                onEditLast: { model.recallLast() }
-            )
-            .frame(maxWidth: .infinity, minHeight: PopupLayout.mascot, maxHeight: 120)
+            VStack(alignment: .leading, spacing: 4) {
+                AskField(
+                    text: Binding(
+                        get: { model.conversation.draft },
+                        set: { newValue in
+                            var next = model.conversation
+                            next.draft = newValue
+                            model.conversation = next
+                            model.onLayout?()
+                        }
+                    ),
+                    onSubmit: { model.submit() },
+                    onEscape: { model.closePopup() },
+                    onEditLast: { model.recallLast() }
+                )
+                .frame(maxWidth: .infinity, minHeight: PopupLayout.mascot, maxHeight: 120)
+                if let notice = model.conversation.refusalLine(runtime: model.runtime.state) {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(CookieAX.popupRefusal)
+                        .accessibilityLabel(notice)
+                }
+            }
             Button {
                 model.submit()
             } label: {

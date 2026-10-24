@@ -12,6 +12,7 @@ public enum CookieAX {
     public static let popupInput = "cookie.popup.input"
     public static let popupMascot = "cookie.popup.mascot"
     public static let popupSend = "cookie.popup.send"
+    public static let popupRefusal = "cookie.popup.refusal"
     public static func turnYou(_ index: Int) -> String { "cookie.turn.you.\(index)" }
     public static func turnCookie(_ index: Int) -> String { "cookie.turn.cookie.\(index)" }
     public static func badge(_ index: Int) -> String { "cookie.badge.on-device.\(index)" }
@@ -27,6 +28,14 @@ public enum CookieCopy {
     public static let you = "you"
     public static let cookie = "cookie"
     public static let qwenShort = "Qwen3.6"
+    /// Placeholder menu copy, pending John's review.
+    public static let startingModel = "🐾 Cookie · starting model…"
+    /// Placeholder menu copy, pending John's review.
+    public static let modelOffline = "🐾 Cookie · model offline"
+    /// Placeholder refusal copy, pending John's review.
+    public static let modelNotReady = "Cookie's model isn't ready yet."
+    /// Placeholder refusal copy, pending John's review.
+    public static let stillAnswering = "Cookie's still answering."
 }
 
 public enum PopupLayout {
@@ -125,8 +134,15 @@ public func displayModelID(_ modelID: String?) -> String? {
     return modelID
 }
 
-public func statusLine(modelID: String?) -> String {
-    let base = "🐾 Cookie · on-device"
-    guard let shown = displayModelID(modelID) else { return base }
-    return "\(base) · \(shown)"
+public func statusLine(runtime: RuntimeState, modelID: String?) -> String {
+    switch runtime {
+    case .loading:
+        return CookieCopy.startingModel
+    case .down:
+        return CookieCopy.modelOffline
+    case .up:
+        let base = "🐾 Cookie · on-device"
+        guard let shown = displayModelID(modelID) else { return base }
+        return "\(base) · \(shown)"
+    }
 }

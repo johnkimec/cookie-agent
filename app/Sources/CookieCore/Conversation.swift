@@ -30,9 +30,15 @@ public struct ChatTurn: Equatable, Sendable, Identifiable {
     }
 }
 
+public enum SendRefusal: Equatable, Sendable {
+    case notReady
+    case inFlight
+    case tooLong
+}
+
 public enum SendPreparation: Equatable, Sendable {
     case ignore
-    case refused
+    case refused(SendRefusal)
     case send(text: String)
 }
 
@@ -43,6 +49,7 @@ public struct PopupConversation: Equatable, Sendable {
     public var replyInFlight: Bool
     public var inflightMessageID: String?
     public var cookieTextStarted: Bool
+    public var refusal: SendRefusal?
 
     public init(
         turns: [ChatTurn] = [],
@@ -50,7 +57,8 @@ public struct PopupConversation: Equatable, Sendable {
         draftSavedAt: Date? = nil,
         replyInFlight: Bool = false,
         inflightMessageID: String? = nil,
-        cookieTextStarted: Bool = false
+        cookieTextStarted: Bool = false,
+        refusal: SendRefusal? = nil
     ) {
         self.turns = turns
         self.draft = draft
@@ -58,12 +66,37 @@ public struct PopupConversation: Equatable, Sendable {
         self.replyInFlight = replyInFlight
         self.inflightMessageID = inflightMessageID
         self.cookieTextStarted = cookieTextStarted
+        self.refusal = refusal
+    }
+
+    /// Quiet line under the field. Shown only while the reason still applies.
+    /// Placeholder copy, pending John's review.
+    public func refusalLine(runtime: RuntimeState) -> String? {
+        switch refusal {
+        case .notReady where runtime != .up:
+            return CookieCopy.modelNotReady
+        case .inFlight where replyInFlight:
+            return CookieCopy.stillAnswering
+        default:
+            return nil
+        }
     }
 
     public mutating func prepareSend(runtime: RuntimeState) -> SendPreparation {
         if draft.isEmpty { return .ignore }
-        if draft.count > 100_000 { return .refused }
-        if runtime != .up || replyInFlight { return .refused }
+        if draft.count > 100_000 {
+            refusal = .tooLong
+            return .refused(.tooLong)
+        }
+        if runtime != .up {
+            refusal = .notReady
+            return .refused(.notReady)
+        }
+        if replyInFlight {
+            refusal = .inFlight
+            return .refused(.inFlight)
+        }
+        refusal = nil
         let text = draft
         draft = ""
         draftSavedAt = nil
@@ -115,6 +148,9 @@ public struct PopupConversation: Equatable, Sendable {
         replyInFlight = false
         cookieTextStarted = false
         inflightMessageID = nil
+        if refusal == .inFlight {
+            refusal = nil
+        }
         if let index = turns.lastIndex(where: { $0.role == .cookie && $0.streaming }) {
             turns[index].streaming = false
             if !turns[index].text.isEmpty {
@@ -139,6 +175,12 @@ public struct PopupConversation: Equatable, Sendable {
     public mutating func recallLastUserText() {
         guard let last = turns.last(where: { $0.role == .you }) else { return }
         draft = last.text
+    }
+
+    public mutating func noteRuntime(_ state: RuntimeState) {
+        if state == .up, refusal == .notReady {
+            refusal = nil
+        }
     }
 
     public mutating func noteClose(at date: Date) {

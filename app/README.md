@@ -28,7 +28,7 @@ export COOKIE_CORE_COMMAND="pnpm --filter @cookie-agent/core fake-core"
 
 `COOKIE_CORE_COMMAND` is optional. The default is that same `pnpm` invocation, split on whitespace, run via `/usr/bin/env`. `COOKIE_CORE_CWD` defaults to the repo root when `pnpm-workspace.yaml` can be found by walking up from the working directory.
 
-If `COOKIE_DATA_DIR` is unset, the shell creates a directory under the temporary directory and passes that to the child. It does not create `~/Library/Application Support/Cookie`. If `COOKIE_LLAMA_PORT` is unset, the shell sets `18080` so an accidental launch does not use port `8080`. An explicit port is passed through.
+If `COOKIE_DATA_DIR` is unset, the shell creates a directory under the temporary directory and passes that to the child. It does not create `~/Library/Application Support/Cookie`. That temporary default moves to Application Support when memory lands. If `COOKIE_LLAMA_PORT` is unset or empty, the shell leaves it unset. The core then uses the product default `8080`. Verification must export `18080` itself. An explicit port, including `8080`, is passed through.
 
 `swift test --package-path app` builds the tests. `swift run --package-path app CookieAgent` runs the same executable without the bundle. The bundle's display name is Cookie. The file name is `Cookie Agent.app`.
 
@@ -47,6 +47,7 @@ Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another ap
 | Input | `cookie.popup.input` | `Ask Cookie…` |
 | Mascot | `cookie.popup.mascot` | `Cookie, listening`, `Cookie, thinking`, `Cookie, talking`, or `Cookie, offline` |
 | Send mark | `cookie.popup.send` | `⏎` |
+| Refusal line | `cookie.popup.refusal` | `Cookie's model isn't ready yet.` or `Cookie's still answering.` |
 | You turn | `cookie.turn.you.<n>` | `you` |
 | Cookie turn | `cookie.turn.cookie.<n>` | `cookie` |
 | Badge | `cookie.badge.on-device.<n>` | `on-device` |

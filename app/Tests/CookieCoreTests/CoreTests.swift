@@ -29,12 +29,16 @@ final class PresentationTests: XCTestCase {
 
     func testStatusLine() {
         XCTAssertEqual(
-            statusLine(modelID: "Qwen3.6-35B-A3B"),
+            statusLine(runtime: .up, modelID: "Qwen3.6-35B-A3B"),
             "🐾 Cookie · on-device · Qwen3.6"
         )
-        XCTAssertEqual(statusLine(modelID: "fake-local"), "🐾 Cookie · on-device · fake-local")
-        XCTAssertEqual(statusLine(modelID: nil), "🐾 Cookie · on-device")
-        XCTAssertEqual(statusLine(modelID: ""), "🐾 Cookie · on-device")
+        XCTAssertEqual(statusLine(runtime: .up, modelID: "fake-local"), "🐾 Cookie · on-device · fake-local")
+        XCTAssertEqual(statusLine(runtime: .up, modelID: nil), "🐾 Cookie · on-device")
+        XCTAssertEqual(statusLine(runtime: .up, modelID: ""), "🐾 Cookie · on-device")
+        XCTAssertEqual(statusLine(runtime: .loading, modelID: "Qwen3.6-35B-A3B"), "🐾 Cookie · starting model…")
+        XCTAssertEqual(statusLine(runtime: .loading, modelID: nil), "🐾 Cookie · starting model…")
+        XCTAssertEqual(statusLine(runtime: .down, modelID: nil), "🐾 Cookie · model offline")
+        XCTAssertEqual(statusLine(runtime: .down, modelID: "fake-local"), "🐾 Cookie · model offline")
     }
 
     func testAccessibilityIdentifiersAndLayout() {
@@ -47,6 +51,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieAX.popupInput, "cookie.popup.input")
         XCTAssertEqual(CookieAX.popupMascot, "cookie.popup.mascot")
         XCTAssertEqual(CookieAX.popupSend, "cookie.popup.send")
+        XCTAssertEqual(CookieAX.popupRefusal, "cookie.popup.refusal")
         XCTAssertEqual(CookieAX.turnYou(0), "cookie.turn.you.0")
         XCTAssertEqual(CookieAX.turnCookie(1), "cookie.turn.cookie.1")
         XCTAssertEqual(CookieAX.badge(0), "cookie.badge.on-device.0")
@@ -65,10 +70,15 @@ final class PresentationTests: XCTestCase {
 final class ConversationTests: XCTestCase {
     func testRefusedSendAddsNoTurn() {
         var chat = PopupConversation(draft: "hello")
-        XCTAssertEqual(chat.prepareSend(runtime: .down), .refused)
-        XCTAssertEqual(chat.prepareSend(runtime: .loading), .refused)
+        XCTAssertEqual(chat.prepareSend(runtime: .down), .refused(.notReady))
+        XCTAssertEqual(chat.refusalLine(runtime: .down), "Cookie's model isn't ready yet.")
+        XCTAssertEqual(chat.prepareSend(runtime: .loading), .refused(.notReady))
+        XCTAssertEqual(chat.refusalLine(runtime: .loading), "Cookie's model isn't ready yet.")
         XCTAssertEqual(chat.draft, "hello")
         XCTAssertTrue(chat.turns.isEmpty)
+        chat.noteRuntime(.up)
+        XCTAssertNil(chat.refusalLine(runtime: .up))
+        XCTAssertEqual(chat.draft, "hello")
         var empty = PopupConversation()
         XCTAssertEqual(empty.prepareSend(runtime: .up), .ignore)
     }
@@ -79,8 +89,10 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(chat.turns.map(\.role), [.you])
         XCTAssertTrue(chat.replyInFlight)
         chat.draft = "second"
-        XCTAssertEqual(chat.prepareSend(runtime: .up), .refused)
+        XCTAssertEqual(chat.prepareSend(runtime: .up), .refused(.inFlight))
         XCTAssertEqual(chat.draft, "second")
+        XCTAssertEqual(chat.refusalLine(runtime: .up), "Cookie's still answering.")
+        XCTAssertEqual(chat.turns.map(\.role), [.you])
 
         chat.applyDelta(ChatDeltaParams(
             conversationId: "conv-1",
@@ -108,6 +120,7 @@ final class ConversationTests: XCTestCase {
         XCTAssertFalse(chat.replyInFlight)
         XCTAssertFalse(chat.turns[1].streaming)
         XCTAssertEqual(chat.turns[1].badge, CookieCopy.onDevice)
+        XCTAssertNil(chat.refusalLine(runtime: .up))
 
         chat.draft = ""
         chat.recallLastUserText()
@@ -146,7 +159,7 @@ final class LaunchTests: XCTestCase {
         let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
         XCTAssertEqual(dataDir, temp.appendingPathComponent("cookie-agent-42", isDirectory: true).path)
         XCTAssertFalse(dataDir.contains("Application Support"))
-        XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "18080")
+        XCTAssertNil(launch.environment["COOKIE_LLAMA_PORT"])
         XCTAssertEqual(launch.arguments, ["pnpm", "--filter", "@cookie-agent/core", "fake-core"])
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/not-a-repo")
     }
@@ -170,6 +183,37 @@ final class LaunchTests: XCTestCase {
             ["node", "--experimental-strip-types", "src/fake-core.ts"]
         )
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/cookie-repo")
+    }
+
+    func testUnsetAndEmptyPortStayUnset() {
+        let temp = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        let cwd = URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true)
+        let unset = CoreLaunch.resolve(
+            environment: ["OTHER": "kept"],
+            currentDirectory: cwd,
+            temporaryDirectory: temp,
+            pid: 1
+        )
+        XCTAssertNil(unset.environment["COOKIE_LLAMA_PORT"])
+        XCTAssertEqual(unset.environment["OTHER"], "kept")
+
+        let empty = CoreLaunch.resolve(
+            environment: ["COOKIE_LLAMA_PORT": ""],
+            currentDirectory: cwd,
+            temporaryDirectory: temp,
+            pid: 2
+        )
+        XCTAssertNil(empty.environment["COOKIE_LLAMA_PORT"])
+    }
+
+    func testProductPortIsPassedThrough() {
+        let launch = CoreLaunch.resolve(
+            environment: ["COOKIE_LLAMA_PORT": "8080"],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
+            pid: 3
+        )
+        XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "8080")
     }
 
     func testFindRepoWalksToWorkspace() {

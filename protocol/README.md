@@ -138,7 +138,7 @@ These are process environment variables, not JSON-RPC fields.
 
 | Variable | Meaning |
 | --- | --- |
-| `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). Verification sets `18080` and must not use `8080`. |
+| `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). The shell leaves an unset or empty value unset so the core can apply that default. Verification sets `18080` and must not use `8080`. |
 | `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. |
 | `COOKIE_FAKE_DELTA_MS` | Fake core only. Milliseconds to wait between deltas so `chat.cancel` can land. `0`–`10000`. Default `0`. |
 

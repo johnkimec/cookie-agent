@@ -7,9 +7,9 @@ public struct CoreLaunch: Equatable, Sendable {
     public var environment: [String: String]
 
     public static let defaultCommand = "pnpm --filter @cookie-agent/core fake-core"
-    /// Product default is 8080. M0 does not supervise llama-server, and an
-    /// unset port must not fall through to John's listener.
-    public static let safeLlamaPort = "18080"
+    /// Product default is 8080, applied by the core when this variable is
+    /// absent (contract decision 8). The shell must not substitute the
+    /// verification port 18080. Verification exports 18080 itself.
 
     public init(
         executable: String,
@@ -34,8 +34,8 @@ public struct CoreLaunch: Equatable, Sendable {
             let dir = temporaryDirectory.appendingPathComponent("cookie-agent-\(pid)", isDirectory: true)
             env["COOKIE_DATA_DIR"] = dir.path
         }
-        if env["COOKIE_LLAMA_PORT"]?.isEmpty ?? true {
-            env["COOKIE_LLAMA_PORT"] = safeLlamaPort
+        if env["COOKIE_LLAMA_PORT"]?.isEmpty ?? false {
+            env.removeValue(forKey: "COOKIE_LLAMA_PORT")
         }
         let command = env["COOKIE_CORE_COMMAND"].flatMap { $0.isEmpty ? nil : $0 } ?? defaultCommand
         let parts = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)

@@ -39,6 +39,6 @@ Preconditions:
 
 - The full menu in the UI spec also lists `Ask about this window…`, `Today's brief`, `Memory…`, and `Settings…`. Those are later milestones. M0's menu is the status line, `Ask Cookie…`, `Local-only mode`, and `Quit Cookie`.
 - `Local-only mode` is the item's name. The check mark is state, not part of the label.
-- The status line uses the ellipsis character in neighbouring items (`Ask Cookie…`), and the middle dot in `Cookie · on-device · Qwen3.6`. Do not accept three ASCII dots or a hyphen as the same string.
+- The status line uses the ellipsis character in neighbouring items (`Ask Cookie…`), and the middle dot in `Cookie · on-device · Qwen3.6`. Do not accept three ASCII dots or a hyphen as the same string. While loading, the status item reads `🐾 Cookie · starting model…`. While down, it reads `🐾 Cookie · model offline`. Both are placeholder copy pending John's review. The glyph and VoiceOver label do not change with that copy.
 - Do not drive a Cookie that was already in the menu bar. Start the app under test with a fresh `COOKIE_DATA_DIR` and `COOKIE_LLAMA_PORT=18080`.
 - Template images only. The menu bar does not run the Rive animation.

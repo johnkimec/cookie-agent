@@ -44,7 +44,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     var statusText: String {
-        CookieCore.statusLine(modelID: runtime.modelId)
+        CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
     }
 
     func start() {
@@ -186,6 +186,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             var next = self.conversation
             switch event {
             case .runtime(let status):
+                next.noteRuntime(status.state)
+                self.conversation = next
                 self.runtime = status
             case .delta(let delta):
                 next.applyDelta(delta)
