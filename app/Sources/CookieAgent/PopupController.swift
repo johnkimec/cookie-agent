@@ -19,9 +19,8 @@ final class CookiePanel: NSPanel {
 final class PopupHostingView: NSHostingView<PopupRoot> {
     private var publishingChildren = false
 
-    override var isAccessibilityElement: Bool {
-        get { false }
-        set {}
+    override func isAccessibilityElement() -> Bool {
+        false
     }
 
     override func accessibilityChildren() -> [Any]? {
