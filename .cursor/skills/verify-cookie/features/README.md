@@ -7,10 +7,10 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 ## Baseline preconditions
 
 - Repository root, Node 22, pnpm 10, and `pnpm install` already run.
-- The core under test is the fake core (`pnpm fake-core`), which speaks protocol `0.1` and does not load a model.
+- The default core under test is the fake core (`pnpm fake-core`), which speaks protocol `0.1` and does not load a model. `--core real` selects the real core (`pnpm core`) and a stub on port `18080`.
 - Set `COOKIE_DATA_DIR` to a new temporary directory for every run. The helper does this itself.
 - Set `COOKIE_LLAMA_PORT=18080`. Never use `8080`. That is the product default and may be John's real `llama-server`.
-- Run `.cursor/skills/verify-cookie/bin/drive-core doctor` and require `ok`, `protocolVersion 0.1`, `runtime up fake-local`, `llamaPort 18080`, and `sockets none`.
+- Run `.cursor/skills/verify-cookie/bin/drive-core doctor` and require `ok`, `protocolVersion 0.1`, `runtime up fake-local`, `llamaPort 18080`, and `sockets none`. For the real core, run `doctor --core real` and require `server cookie-core`, `runtime up Qwen3.6-35B-A3B`, and `sockets loopback`.
 - Never drive a core or a Mac app this run did not start. Do not point `COOKIE_DATA_DIR` at John's Application Support folder.
 
 ## Driving conventions
@@ -19,8 +19,8 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - Treat every command as literal. Keep quoted names and flags unchanged.
 - Drive the core with `.cursor/skills/verify-cookie/bin/drive-core`.
 - On macOS, drive the menu and popup with `.cursor/skills/verify-cookie/bin/drive-mac` and the accessibility identifiers in the feature files (`cookie.menu.ask`, `cookie.popup.input`, and the labels `Ask Cookie…`, `Local-only mode`, `Quit Cookie`, `Cookie, thinking`). `drive-core` does not launch the GUI. Mac proof is pending until that recipe's evidence is captured. Do not click by coordinate.
-- One short-lived fake core per drive. It exits on `shutdown`.
-- Restore nothing in the user's home directory. The fake core writes no files there.
+- One short-lived core per drive. It exits on `shutdown`. `--core real` also stops its stub.
+- Restore nothing in the user's home directory. Neither core writes files there in M0. The real core keeps history in memory.
 - Do not remove proof artifacts during cleanup.
 
 ## Proof and skip reporting

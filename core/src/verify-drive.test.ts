@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { isCookieMessage, messageErrors } from "./protocol/validate.ts";
+import { decodeProcAddress } from "./verify-drive.ts";
 
 const exec = promisify(execFile);
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -35,6 +36,10 @@ function run(args: string[], runtimeDir: string) {
 }
 
 describe("verify-cookie drive-core", () => {
+  it("decodes a little-endian /proc/net/tcp address", () => {
+    expect(decodeProcAddress("0100007F:46A0")).toBe("127.0.0.1:18080");
+  });
+
   it("doctors the fake core", async () => {
     const root = await runtime();
     const result = await run(["doctor"], root);
@@ -99,6 +104,48 @@ describe("verify-cookie drive-core", () => {
       expect(survived).toBe(transcript);
       expect(await readFile(join(evidence, "command.txt"), "utf8")).toContain(
         "drive chat-streaming --evidence",
+      );
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it("doctors and drives the real core against the llama stub", async () => {
+    const root = await runtime();
+    const doctor = await run(["doctor", "--core", "real"], root);
+    expect(doctor.stderr).toBe("");
+    expect(doctor.stdout).toContain("ok\n");
+    expect(doctor.stdout).toContain("server cookie-core\n");
+    expect(doctor.stdout).toContain("runtime up Qwen3.6-35B-A3B\n");
+    expect(doctor.stdout).toContain("llamaPort 18080\n");
+    expect(doctor.stdout).toContain("sockets loopback\n");
+
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const chat = await run(
+        ["drive", "chat-streaming", "--evidence", evidence, "--core", "real"],
+        root,
+      );
+      expect(chat.stdout).toContain("deltas 3\n");
+      expect(chat.stdout).toContain("finishReason stop\n");
+      expect(chat.stdout).toContain("cancelled true\n");
+      expect(chat.stdout).toContain("modelAborted true\n");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      for (const line of transcript.split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        const entry = JSON.parse(line) as { message: unknown };
+        expect(
+          isCookieMessage(entry.message),
+          messageErrors(entry.message),
+        ).toBe(true);
+      }
+      expect(await readFile(join(evidence, "command.txt"), "utf8")).toContain(
+        "--core real",
       );
     } finally {
       await rm(evidence, { recursive: true, force: true });
