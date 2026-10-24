@@ -49,6 +49,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compile drive-mac AppleScript
+        run: .cursor/skills/verify-cookie/bin/compile-drive-mac-scripts
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 

@@ -132,30 +132,36 @@ APPLESCRIPT
 
 # One line per identified element: identifier, role, value. Never coerce
 # `entire contents` to a string (error -1700).
+# A handler is compiled outside the caller's tell. `attribute` is only a
+# System Events term, so axid and axtext tell System Events themselves.
 dump_popup_ax() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
-  try
-    return value of attribute "AXIdentifier" of elem
-  on error
-    return ""
-  end try
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
 end axid
 
 on axtext(elem)
-  set oldDelims to AppleScript's text item delimiters
-  try
-    set rawValue to value of elem
-    if class of rawValue is list then
-      set AppleScript's text item delimiters to " "
-      set rawValue to rawValue as text
-    end if
-    set AppleScript's text item delimiters to oldDelims
-    return rawValue as text
-  on error
-    set AppleScript's text item delimiters to oldDelims
-    return ""
-  end try
+  tell application "System Events"
+    set oldDelims to AppleScript's text item delimiters
+    try
+      set rawValue to value of elem
+      if class of rawValue is list then
+        set AppleScript's text item delimiters to " "
+        set rawValue to rawValue as text
+      end if
+      set AppleScript's text item delimiters to oldDelims
+      return rawValue as text
+    on error
+      set AppleScript's text item delimiters to oldDelims
+      return ""
+    end try
+  end tell
 end axtext
 
 tell application "System Events"
@@ -220,11 +226,13 @@ PY
 send_chat() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
-  try
-    return value of attribute "AXIdentifier" of elem
-  on error
-    return ""
-  end try
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
 end axid
 
 tell application "System Events"
@@ -282,36 +290,40 @@ APPLESCRIPT
 cookie_turn_value() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
-  try
-    return value of attribute "AXIdentifier" of elem
-  on error
-    return ""
-  end try
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
 end axid
 
 on axtext(elem)
-  set oldDelims to AppleScript's text item delimiters
-  try
-    set rawValue to value of elem
-    if class of rawValue is list then
-      set AppleScript's text item delimiters to " "
-      set rawValue to rawValue as text
-    end if
-    set AppleScript's text item delimiters to oldDelims
-    set asText to rawValue as text
-    if asText is not "" and asText is not "cookie" then return asText
-  on error
-    set AppleScript's text item delimiters to oldDelims
-  end try
-  try
-    set named to name of elem as text
-    if named is not "" and named is not "cookie" then return named
-  end try
-  try
-    set described to description of elem as text
-    if described is not "" and described is not "cookie" then return described
-  end try
-  return ""
+  tell application "System Events"
+    set oldDelims to AppleScript's text item delimiters
+    try
+      set rawValue to value of elem
+      if class of rawValue is list then
+        set AppleScript's text item delimiters to " "
+        set rawValue to rawValue as text
+      end if
+      set AppleScript's text item delimiters to oldDelims
+      set asText to rawValue as text
+      if asText is not "" and asText is not "cookie" then return asText
+    on error
+      set AppleScript's text item delimiters to oldDelims
+    end try
+    try
+      set named to name of elem as text
+      if named is not "" and named is not "cookie" then return named
+    end try
+    try
+      set described to description of elem as text
+      if described is not "" and described is not "cookie" then return described
+    end try
+    return ""
+  end tell
 end axtext
 
 tell application "System Events"
@@ -350,11 +362,13 @@ APPLESCRIPT
 close_popup() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
-  try
-    return value of attribute "AXIdentifier" of elem
-  on error
-    return ""
-  end try
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
 end axid
 
 tell application "System Events"

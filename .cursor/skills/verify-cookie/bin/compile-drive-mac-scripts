@@ -1,0 +1,89 @@
+#!/bin/bash
+# Compile every AppleScript embedded in drive-mac.
+# A handler that uses System Events terms outside
+# `tell application "System Events"` fails here (error -2741) instead of
+# on a Mac during drive-mac.
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' "verified-unreachable on Linux: requires macOS"
+  exit 2
+fi
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+SOURCE="$ROOT/drive-mac"
+if [[ ! -f "$SOURCE" ]]; then
+  echo "missing $SOURCE" >&2
+  exit 1
+fi
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+python3 - "$SOURCE" "$tmpdir" <<'PY'
+import pathlib, sys
+
+source = pathlib.Path(sys.argv[1]).read_text()
+out_dir = pathlib.Path(sys.argv[2])
+lines = source.splitlines()
+blocks = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if "<<'APPLESCRIPT'" in line:
+        i += 1
+        buf = []
+        while i < len(lines) and lines[i] != "APPLESCRIPT":
+            buf.append(lines[i])
+            i += 1
+        if i >= len(lines):
+            sys.exit("unterminated APPLESCRIPT heredoc")
+        blocks.append("\n".join(buf) + "\n")
+    elif "osascript_run -e " in line:
+        rest = line.split("osascript_run -e ", 1)[1]
+        if not rest.startswith("'"):
+            sys.exit("expected a single-quoted osascript -e script")
+        end = rest.find("'", 1)
+        if end < 0:
+            sys.exit("unterminated osascript -e script")
+        blocks.append(rest[1:end] + "\n")
+    i += 1
+if not blocks:
+    sys.exit("no AppleScript embedded in drive-mac")
+for n, block in enumerate(blocks, 1):
+    (out_dir / f"script-{n}.applescript").write_text(block)
+print(f"extracted {len(blocks)}")
+PY
+
+fail=0
+count=0
+for script in "$tmpdir"/script-*.applescript; do
+  count=$((count + 1))
+  err="$tmpdir/compile.err"
+  : >"$err"
+  if osacompile -o /dev/null "$script" 2>"$err"; then
+    echo "compiled $script"
+    continue
+  fi
+  # Some macOS versions will not write a compiled script to /dev/null.
+  # A syntax error fails this second compile too.
+  if osacompile -o "$tmpdir/compiled.scpt" "$script" 2>>"$err"; then
+    rm -f "$tmpdir/compiled.scpt"
+    echo "compiled $script"
+    continue
+  fi
+  echo "compile failed: $script" >&2
+  cat "$err" >&2
+  echo "-----" >&2
+  cat "$script" >&2
+  fail=1
+done
+
+if [[ "$count" -lt 1 ]]; then
+  echo "no scripts extracted" >&2
+  exit 1
+fi
+if [[ "$fail" != "0" ]]; then
+  exit 1
+fi
+echo "compiled $count AppleScripts"

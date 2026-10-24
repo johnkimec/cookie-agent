@@ -41,5 +41,6 @@ Preconditions:
 - ⌥Space is the default in the UI spec and it is rebindable later. M0's check is the default binding.
 - Escape closes the popup. The UI spec does not define Escape as cancel. A streaming reply is not proven cancelled by closing the panel until a later decision says so.
 - The panel is non-activating, so it may not be the frontmost accessibility app. Target the label `Ask Cookie…`, not "the frontmost window".
+- An `osascript` handler does not inherit `tell application "System Events"`. `value of attribute "AXIdentifier"` in that handler is a compile error (`-2741`). The handler tells System Events itself.
 - Clicking outside does not close the panel when an action card is pending. M0 has no action cards, so a click outside closes it.
 - Another app may already own ⌥Space. If the popup does not open, say which app took the hotkey. Do not remap John's shortcut to force the check.
