@@ -1,7 +1,11 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createLlamaServerProvider, readLlamaPort } from "./model/llama.ts";
+import {
+  createLlamaServerProvider,
+  readLlamaPort,
+  readThinking,
+} from "./model/llama.ts";
 import { DEFAULT_MODEL_ID } from "./protocol/types.ts";
 import {
   STUB_INPUT_TOKENS,
@@ -86,6 +90,7 @@ describe("llama-server provider", () => {
     expect(body?.chat_template_kwargs).toMatchObject({
       enable_thinking: false,
     });
+    expect(body?.reasoning_effort).toBe("none");
 
     const abort = new AbortController();
     const slow = provider.streamChat({
@@ -105,6 +110,37 @@ describe("llama-server provider", () => {
     expect(saw).toBeGreaterThan(0);
     await waitFor(() => stub.chats.some((chat) => chat.aborted));
     expect(stub.chats.some((chat) => chat.aborted)).toBe(true);
+  });
+
+  it("reads COOKIE_THINKING and sends it on the chat request", async () => {
+    expect(readThinking({})).toBe(false);
+    expect(readThinking({ COOKIE_THINKING: "" })).toBe(false);
+    expect(readThinking({ COOKIE_THINKING: "0" })).toBe(false);
+    expect(readThinking({ COOKIE_THINKING: "1" })).toBe(true);
+    expect(() => readThinking({ COOKIE_THINKING: "yes" })).toThrow(
+      /COOKIE_THINKING/,
+    );
+
+    const stub = await startLlamaStub(0);
+    closers.push(stub.close);
+    const provider = createLlamaServerProvider({
+      port: stub.port,
+      thinking: readThinking({ COOKIE_THINKING: "1" }),
+    });
+    const stream = provider.streamChat({
+      system: "Be brief.",
+      messages: [{ role: "user", content: "hello" }],
+      abortSignal: new AbortController().signal,
+    });
+    for await (const _part of stream.textDeltas) {
+      // Drain so the request body is recorded.
+    }
+    await stream.completion;
+    const body = stub.chats[0]?.body;
+    expect(body?.chat_template_kwargs).toMatchObject({
+      enable_thinking: true,
+    });
+    expect(body?.reasoning_effort).toBeUndefined();
   });
 });
 

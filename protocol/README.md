@@ -90,7 +90,7 @@ Both are notifications.
 | `length` | The model hit its output limit. The fake core does not emit this. |
 | `error` | The reply failed after it had started. The fake core does not emit this. |
 
-`usage.inputTokens` and `usage.outputTokens` are non-negative integers. The real core reports the model's counts. The fake core counts whitespace-separated words. On cancel, `outputTokens` counts only chunks already sent.
+`usage.inputTokens` and `usage.outputTokens` are non-negative integers. The real core reports the model's counts. The fake core counts whitespace-separated words. Usage after a cancel is best-effort and may be zero. The real core does not estimate token counts from text it already sent.
 
 ### `chat.cancel`
 
@@ -139,7 +139,8 @@ These are process environment variables, not JSON-RPC fields.
 | Variable | Meaning |
 | --- | --- |
 | `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). Verification sets `18080` and must not use `8080`. |
-| `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. |
+| `COOKIE_THINKING` | Real core only. `0` or `1`. Default `0`. `0` turns Qwen thinking off (`reasoning` `none`, and `chat_template_kwargs.enable_thinking` false). `1` leaves thinking on. Any other value makes the process exit 1 before it speaks protocol. |
+| `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. The real core does not read it in M0. |
 | `COOKIE_FAKE_DELTA_MS` | Fake core only. Milliseconds to wait between deltas so `chat.cancel` can land. `0`–`10000`. Default `0`. |
 
 The fake core opens no sockets and does not dial `llama-server`, whatever the port is. The real core dials `http://127.0.0.1:$COOKIE_LLAMA_PORT` and only that host.
@@ -166,7 +167,7 @@ That text is a stub so task B can render a stream. It is not a model reply. `ser
 pnpm core
 ```
 
-`serverInfo.name` is `cookie-core`. After `initialize` it probes `GET /health` on the llama port (a 404 falls through to `GET /v1/models`) and sends one `runtime.status`. Reachable is `up` / `Qwen3.6-35B-A3B`. Unreachable is `down` with `modelId` null, and `chat.send` then returns `-32002` instead of waiting. A shell `runtime.status` push still updates the core's view. One reply at a time: a second `chat.send` is `-32003`. `chat.cancel` aborts the HTTP request.
+`serverInfo.name` is `cookie-core`. After `initialize` it probes `GET /health` on the llama port (a 404 falls through to `GET /v1/models`) and sends one `runtime.status`. Reachable is `up` / `Qwen3.6-35B-A3B`. Unreachable is `down` with `modelId` null, and `chat.send` then returns `-32002` instead of waiting. A shell `runtime.status` push still updates the core's view. While that view is `up` and was set in the last 5 seconds, by a shell push or by the core's own probe, `chat.send` does not probe again before the ack. An older `up` is probed again. A connection error on the stream still sets status to `down`. One reply at a time: a second `chat.send` is `-32003`. `chat.cancel` aborts the HTTP request. A completion with no text is `chat.done` `stop` and no deltas. Thinking follows `COOKIE_THINKING` (default off).
 
 ## TypeScript
 

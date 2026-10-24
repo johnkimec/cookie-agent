@@ -1,8 +1,9 @@
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
-import { AgentCore } from "./agent-core.ts";
+import { AgentCore, RUNTIME_FRESH_MS } from "./agent-core.ts";
 import { createAiSdkProvider } from "./model/ai-sdk-provider.ts";
+import { createLlamaServerProvider } from "./model/llama.ts";
 import type { ModelProvider } from "./model/provider.ts";
 import { protocolErrors } from "./protocol/errors.ts";
 import { DEFAULT_MODEL_ID, type RuntimeState } from "./protocol/types.ts";
@@ -11,6 +12,7 @@ import {
   isRecord,
   messageErrors,
 } from "./protocol/validate.ts";
+import { startLlamaStub } from "./verify-llama-stub.ts";
 
 const INPUT_TOKENS = 11;
 const OUTPUT_TOKENS = 4;
@@ -100,7 +102,10 @@ function scriptedProvider(options: {
   return { provider, model };
 }
 
-function harnessFor(provider: ModelProvider, probeTimeoutMs = 200): Harness {
+function harnessFor(
+  provider: ModelProvider,
+  options: { probeTimeoutMs?: number; now?: () => number } = {},
+): Harness {
   const harness: Harness = {
     messages: [],
     logs: [],
@@ -109,7 +114,8 @@ function harnessFor(provider: ModelProvider, probeTimeoutMs = 200): Harness {
   };
   harness.core = new AgentCore({
     provider,
-    probeTimeoutMs,
+    probeTimeoutMs: options.probeTimeoutMs ?? 200,
+    now: options.now,
     emit: (message) => {
       expect(isCookieMessage(message), messageErrors(message)).toBe(true);
       harness.messages.push(message);
@@ -413,6 +419,157 @@ describe("agent core", () => {
     expect(harness.messages.every((message) => isCookieMessage(message))).toBe(
       true,
     );
+  });
+
+  it("finishes an empty completion with stop and no deltas", async () => {
+    const { provider } = scriptedProvider({ parts: [] });
+    const harness = harnessFor(provider);
+    await ready(harness);
+    send(harness, chatSend("2", "say nothing"));
+    await waitFor(harness, () =>
+      harness.messages.some(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    );
+    expect(deltasOf(harness.messages)).toEqual([]);
+    expect(
+      harness.messages.find(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    ).toMatchObject({
+      params: {
+        finishReason: "stop",
+        usage: { inputTokens: INPUT_TOKENS, outputTokens: OUTPUT_TOKENS },
+      },
+    });
+    expect(harness.messages.every((message) => isCookieMessage(message))).toBe(
+      true,
+    );
+  });
+
+  it("skips the pre-ack probe while up is fresh, including after a shell push", async () => {
+    let probes = 0;
+    let clock = 1_000;
+    const { provider } = scriptedProvider({
+      parts: ["ok"],
+      probe: async () => {
+        probes += 1;
+        return "up";
+      },
+    });
+    const harness = harnessFor(provider, { now: () => clock });
+    await ready(harness);
+    expect(probes).toBe(1);
+
+    send(harness, chatSend("2", "fresh"));
+    await waitFor(harness, () =>
+      harness.messages.some(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    );
+    expect(probes).toBe(1);
+
+    clock += RUNTIME_FRESH_MS;
+    send(harness, {
+      jsonrpc: "2.0",
+      method: "runtime.status",
+      params: { state: "up", modelId: DEFAULT_MODEL_ID },
+    });
+    send(harness, chatSend("3", "pushed"));
+    await waitFor(
+      harness,
+      () =>
+        harness.messages.filter(
+          (message) => isRecord(message) && message.method === "chat.done",
+        ).length === 2,
+    );
+    expect(probes).toBe(1);
+  });
+
+  it("probes again when up is older than 5 seconds", async () => {
+    let probes = 0;
+    let clock = 1_000;
+    const { provider } = scriptedProvider({
+      parts: ["ok"],
+      probe: async () => {
+        probes += 1;
+        return probes === 1 ? "up" : "down";
+      },
+    });
+    const harness = harnessFor(provider, { now: () => clock });
+    await ready(harness);
+    expect(probes).toBe(1);
+
+    clock += RUNTIME_FRESH_MS;
+    send(harness, chatSend("2", "stale"));
+    await waitFor(harness, () =>
+      harness.messages.some(
+        (message) => isRecord(message) && message.id === "2",
+      ),
+    );
+    expect(probes).toBe(2);
+    expect(
+      harness.messages.find(
+        (message) => isRecord(message) && message.id === "2",
+      ),
+    ).toMatchObject({
+      error: {
+        code: protocolErrors.runtimeUnavailable.code,
+        message: protocolErrors.runtimeUnavailable.message,
+      },
+    });
+    expect(
+      harness.messages.filter(
+        (message) =>
+          isRecord(message) &&
+          message.method === "runtime.status" &&
+          isRecord(message.params) &&
+          message.params.state === "down",
+      ).length,
+    ).toBe(1);
+    expect(
+      harness.messages.some(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    ).toBe(false);
+  });
+
+  it("marks the runtime down when a fresh send's connection fails", async () => {
+    const stub = await startLlamaStub(0);
+    const provider = createLlamaServerProvider({ port: stub.port });
+    const harness = harnessFor(provider);
+    await ready(harness);
+    await stub.close();
+    send(harness, chatSend("2", "hello"));
+    await waitFor(harness, () =>
+      harness.messages.some(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    );
+    const status = harness.messages.find(
+      (message) =>
+        isRecord(message) &&
+        message.method === "runtime.status" &&
+        isRecord(message.params) &&
+        message.params.state === "down",
+    );
+    const done = harness.messages.find(
+      (message) => isRecord(message) && message.method === "chat.done",
+    );
+    expect(status).toMatchObject({
+      params: { state: "down", modelId: null },
+    });
+    expect(done).toMatchObject({
+      params: {
+        finishReason: "error",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    });
+    expect(harness.messages.indexOf(status)).toBeLessThan(
+      harness.messages.indexOf(done),
+    );
+    expect(deltasOf(harness.messages)).toEqual([]);
+    expect(harness.exitCode).toBeNull();
   });
 
   it("lets the shell push loading and down, then chat again when up", async () => {

@@ -39,6 +39,12 @@ import {
 const MAX_LINE_BYTES = 1_048_576;
 const ZERO_USAGE: ModelUsage = { inputTokens: 0, outputTokens: 0 };
 
+/**
+ * A status of `up` set more recently than this (a shell push or this
+ * core's own probe) is fresh enough to ack `chat.send` without probing.
+ */
+export const RUNTIME_FRESH_MS = 5_000;
+
 interface Flight {
   conversationId: string;
   messageId: string;
@@ -52,6 +58,8 @@ export interface AgentCoreOptions {
   provider: ModelProvider;
   /** Milliseconds a runtime probe may take before the core calls it down. */
   probeTimeoutMs?: number;
+  /** Clock for the fresh-status window. Tests pass a fake. */
+  now?: () => number;
   emit?: (message: unknown) => void;
   log?: (line: string) => void;
   exit?: (code: number) => void;
@@ -68,6 +76,7 @@ type ParamSchema =
 
 export class AgentCore {
   readonly probeTimeoutMs: number;
+  private readonly now: () => number;
   private readonly provider: ModelProvider;
   private readonly memory = new ConversationMemory();
   private readonly emitMessage: (message: unknown) => void;
@@ -79,6 +88,8 @@ export class AgentCore {
   private readonly stopped = new AbortController();
   private phase: "new" | "ready" | "stopping" = "new";
   private runtime: RuntimeStatus;
+  /** `now()` when `runtime` was last set by a probe or a shell push. */
+  private runtimeSetAt = Number.NEGATIVE_INFINITY;
   private runtimeGeneration = 0;
   private inflight: Flight | null = null;
   private accepting = false;
@@ -88,6 +99,7 @@ export class AgentCore {
   constructor(options: AgentCoreOptions) {
     this.provider = options.provider;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 1000;
+    this.now = options.now ?? (() => Date.now());
     this.serverName = options.serverName ?? CORE_SERVER_NAME;
     this.serverVersion = options.serverVersion ?? CORE_SERVER_VERSION;
     this.ownsStdio = options.emit === undefined;
@@ -222,6 +234,7 @@ export class AgentCore {
       state: status.state,
       modelId: status.modelId ?? null,
     };
+    this.runtimeSetAt = this.now();
   }
 
   private onInitialize(id: string, params: unknown): void {
@@ -295,6 +308,10 @@ export class AgentCore {
       this.emit(rpcError(id, "chatInProgress", { method: "chat.send" }));
       return;
     }
+    if (this.runtimeIsFresh()) {
+      this.startFlight(id, body);
+      return;
+    }
     this.accepting = true;
     const generation = this.runtimeGeneration;
     let probed: RuntimeState;
@@ -328,11 +345,17 @@ export class AgentCore {
         }),
       );
       return;
+    } else {
+      this.applyProbe(probed);
     }
     if (this.inflight !== null) {
       this.emit(rpcError(id, "chatInProgress", { method: "chat.send" }));
       return;
     }
+    this.startFlight(id, body);
+  }
+
+  private startFlight(id: string, body: ChatSendParams): void {
     const messageId = `msg-${this.nextMessage}`;
     this.nextMessage += 1;
     const flight: Flight = {
@@ -417,12 +440,20 @@ export class AgentCore {
     }
   }
 
+  private runtimeIsFresh(): boolean {
+    return (
+      this.runtime.state === "up" &&
+      this.now() - this.runtimeSetAt < RUNTIME_FRESH_MS
+    );
+  }
+
   private applyProbe(state: RuntimeState): void {
     if (state === "down") {
       this.runtime = { state: "down", modelId: null };
-      return;
+    } else {
+      this.runtime = { state, modelId: this.provider.modelId };
     }
-    this.runtime = { state, modelId: this.provider.modelId };
+    this.runtimeSetAt = this.now();
   }
 
   private async runStream(flight: Flight): Promise<void> {
@@ -479,17 +510,16 @@ export class AgentCore {
       }
       this.completeStream(flight, outcome.value);
     } catch (error) {
-      this.failStream(flight, error);
+      const outcome = await completion;
+      this.failStream(flight, outcome.ok ? error : outcome.error);
     }
   }
 
   private completeStream(flight: Flight, completion: ModelCompletion): void {
-    if (flight.sent.length === 0) {
-      this.logLine("model returned no text");
-      this.finishFlight(flight, "error", completion.usage);
-      return;
-    }
-    this.finishFlight(flight, completion.finishReason, completion.usage);
+    // Delta text cannot be empty, so a reply with no chunks is still `stop`.
+    const finishReason =
+      flight.sent.length === 0 ? "stop" : completion.finishReason;
+    this.finishFlight(flight, finishReason, completion.usage);
   }
 
   private failStream(flight: Flight, error: unknown): void {

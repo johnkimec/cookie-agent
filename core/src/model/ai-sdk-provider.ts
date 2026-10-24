@@ -17,6 +17,8 @@ export interface AiSdkProviderOptions {
   modelId: string;
   model: LanguageModel;
   probe: (signal: AbortSignal) => Promise<RuntimeState>;
+  /** When false (the default), the model call sets reasoning to `none`. */
+  thinking?: boolean;
 }
 
 /**
@@ -30,23 +32,32 @@ export function createAiSdkProvider(
     modelId: options.modelId,
     probe: options.probe,
     streamChat(args): ModelStream {
+      let providerError: unknown;
       const result = streamText({
         model: options.model,
         system: args.system,
         messages: args.messages,
         abortSignal: args.abortSignal,
         maxRetries: 0,
-        reasoning: "none",
+        reasoning: options.thinking === true ? "provider-default" : "none",
+        onError: ({ error }) => {
+          providerError = error;
+        },
       });
       const completion = Promise.all([result.finishReason, result.usage])
         .then(([finishReason, usage]) =>
           toCompletion(finishReason, usage, args.abortSignal),
         )
         .catch((error: unknown) => {
-          if (args.abortSignal.aborted || isAbortError(error)) {
+          const cause = providerError ?? error;
+          if (
+            args.abortSignal.aborted ||
+            isAbortError(cause) ||
+            isAbortError(error)
+          ) {
             throw toAbortError();
           }
-          throw error;
+          throw cause;
         });
       return {
         textDeltas: result.textStream,

@@ -33,7 +33,8 @@ Preconditions:
 ## Gotchas
 
 - The fake reply and the real-core stub reply are canned text, not a model answer. Assert the chunks and `finishReason`, not that the words answer the question. The real-core joined text is `Hello. This reply is from the local stub, on device.` The fake joined text is the canned fake sentence.
-- A cancelled real-core reply reports usage `{ inputTokens: 0, outputTokens: 0 }`. The stub closes the HTTP request (`modelAborted true`) and does not return a partial token count.
+- A cancelled real-core reply reports usage `{ inputTokens: 0, outputTokens: 0 }`. The stub closes the HTTP request (`modelAborted true`) and does not return a partial token count. Usage after a cancel is best-effort and may be zero. Do not require an estimated token count.
+- A model completion with no text is `chat.done` with `finishReason` `stop` and no `chat.delta`. Delta `text` still has minLength 1, so the core does not emit an empty chunk and does not use `finishReason` `error` for that case.
 - `on-device` is the badge text in the popup wireframe. Do not require the longer privacy sentence `On-device. Nothing left your Mac.` on this surface.
 - The wireframe labels the turns `you` and `cookie` in lowercase.
 - One in-flight reply. A second `chat.send` before `chat.done` is an error, not a second stream.

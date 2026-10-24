@@ -4,7 +4,7 @@ TypeScript agent core for Cookie (Node 22+, AI SDK 7). `src/index.ts` speaks pro
 
 `src/fake-core.ts` is the canned stand-in. Keep it working: the Swift shell is built against it. It does not dial llama-server.
 
-The real core keeps the model behind `src/model/provider.ts`. M0 constructs only the llama-server provider (`COOKIE_LLAMA_PORT`, default `8080`, model id `Qwen3.6-35B-A3B`). There is no hosted provider and no tools. Conversation history is in memory. `chat.cancel` and `shutdown` abort the model request.
+The real core keeps the model behind `src/model/provider.ts`. M0 constructs only the llama-server provider (`COOKIE_LLAMA_PORT`, default `8080`, model id `Qwen3.6-35B-A3B`). Thinking stays off unless `COOKIE_THINKING=1`. There is no hosted provider and no tools. Conversation history is in memory. `chat.cancel` and `shutdown` abort the model request.
 
 ## Commands
 

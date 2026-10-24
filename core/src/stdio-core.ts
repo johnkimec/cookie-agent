@@ -6,21 +6,27 @@
 
 import { createInterface } from "node:readline";
 import { AgentCore } from "./agent-core.ts";
-import { createLlamaServerProvider, readLlamaPort } from "./model/llama.ts";
+import {
+  createLlamaServerProvider,
+  readLlamaPort,
+  readThinking,
+} from "./model/llama.ts";
 
 export function startStdioCore(
   env: NodeJS.ProcessEnv = process.env,
 ): AgentCore {
   let port: number;
+  let thinking: boolean;
   try {
     port = readLlamaPort(env);
+    thinking = readThinking(env);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "bad port";
+    const detail = error instanceof Error ? error.message : "bad config";
     process.stderr.write(`cookie-core: ${detail}\n`);
     process.exit(1);
   }
   const core = new AgentCore({
-    provider: createLlamaServerProvider({ port }),
+    provider: createLlamaServerProvider({ port, thinking }),
   });
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   process.stdout.on("error", () => {

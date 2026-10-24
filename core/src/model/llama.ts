@@ -9,6 +9,8 @@ export interface LlamaServerOptions {
   port: number;
   modelId?: string;
   fetch?: typeof fetch;
+  /** `COOKIE_THINKING=1`. Default false, which forces thinking off. */
+  thinking?: boolean;
 }
 
 const PRODUCT_HOST = "127.0.0.1";
@@ -23,19 +25,36 @@ export function createLlamaServerProvider(
 ): ModelProvider {
   const modelId = options.modelId ?? DEFAULT_MODEL_ID;
   const port = options.port;
+  const thinking = options.thinking === true;
   const doFetch = options.fetch ?? globalThis.fetch;
   const openai = createOpenAICompatible({
     name: "llama-server",
     baseURL: `http://${PRODUCT_HOST}:${port}/v1`,
     includeUsage: true,
     fetch: doFetch,
-    transformRequestBody: (body) => withThinkingDisabled(body),
+    transformRequestBody: (body) => withThinking(body, thinking),
   });
   return createAiSdkProvider({
     modelId,
     model: openai.chatModel(modelId),
     probe: (signal) => probeLlamaServer(port, signal, doFetch),
+    thinking,
   });
+}
+
+/**
+ * `COOKIE_THINKING=1` leaves Qwen thinking on. Unset, empty, and `0`
+ * turn it off. Any other value is a configuration error.
+ */
+export function readThinking(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.COOKIE_THINKING;
+  if (raw === undefined || raw === "" || raw === "0") {
+    return false;
+  }
+  if (raw === "1") {
+    return true;
+  }
+  throw new Error("COOKIE_THINKING must be 0 or 1");
 }
 
 export function readLlamaPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -55,10 +74,12 @@ export function readLlamaPort(env: NodeJS.ProcessEnv = process.env): number {
 
 /**
  * Qwen3 thinking is on unless the template is told otherwise.
- * Local chat, routing, and gating keep it off. Day planning is later.
+ * `COOKIE_THINKING=0` (the default) sets `enable_thinking` false.
+ * Day planning can set `COOKIE_THINKING=1` without a code change.
  */
-function withThinkingDisabled(
+function withThinking(
   body: Record<string, unknown>,
+  thinking: boolean,
 ): Record<string, unknown> {
   const existing = body.chat_template_kwargs;
   const prior =
@@ -71,7 +92,7 @@ function withThinkingDisabled(
     ...body,
     chat_template_kwargs: {
       ...prior,
-      enable_thinking: false,
+      enable_thinking: thinking,
     },
   };
 }
