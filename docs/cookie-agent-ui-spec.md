@@ -368,6 +368,8 @@ Brand assets are separate from the code. Cookie is your real dog, so keep the na
 
 Repo (decided): github.com/johnkimec/cookie-agent. Homebrew tap: github.com/johnkimec/homebrew-tap. Structure:
 
+Superseded by [D-2026-10-24-13](./cookie-agent.md#decision-log): the foundation layout (`app/`, `core/`, `protocol/`, `evals/`, `assets/`) replaces this sketch.
+
 ```text
 cookie-agent/
 ├─ apps/mac/                 Swift shell (Xcode project / SwiftPM)

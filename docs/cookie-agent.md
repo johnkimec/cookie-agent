@@ -1,6 +1,6 @@
 # Cookie
 
-**Status:** draft - awaiting approval
+**Status:** approved (John Kim, 2026-10-24)
 
 This is the project doc for Cookie. It is the plan John reviews before any product code is written. The technical design follows the decision log, unchanged in its decisions, numbers, and open questions. The companion spec for UI, branding, and packaging is [cookie-agent-ui-spec.md](./cookie-agent-ui-spec.md).
 
@@ -29,6 +29,9 @@ Recorded before any product code, from the technical design and the UI spec.
 | D-2026-10-24-09 | Mascot animation | Rive (`rive-ios`) for Cookie in the popup, onboarding, and Settings. Static template images in the menu bar. Static pose exports in widgets. | Lottie, or SwiftUI-native shapes | Cookie is a state-driven character. Rive's file-level state machine maps onto the nine states. The shell sets one input per app state. A static SwiftUI pose can stand in until `cookie.riv` exists. |
 | D-2026-10-24-10 | Code license | Apache-2.0 for the code, copyright 2026 John Kim. Cookie's name and mascot art are reserved in `BRAND.md` and are not part of the Apache-2.0 grant. | MIT, or GPL-3.0 | The patent grant matches the default model licenses cited for Qwen3.6 and Gemma 4. Closed forks of the code stay allowed. The mascot is John's dog, so the name and art stay out of the grant. |
 | D-2026-10-24-11 | Distribution | Direct download: Developer ID, hardened runtime, notarized DMG, Sparkle updates (EdDSA appcast). Homebrew cask `cookie-agent` in the tap `johnkimec/homebrew-tap`, installed with `brew install --cask johnkimec/tap/cookie-agent`. | Mac App Store, or official `homebrew/cask` on day one | A sandboxed App Store build cannot hold the Accessibility and Apple Events permissions Cookie needs. An own tap has no notability bar. Model weights (about 22 GB) download on first run and are never committed or put in the DMG. |
+| D-2026-10-24-12 | Doc approval | Approved by John Kim on 2026-10-24. Status is `approved (John Kim, 2026-10-24)`. | Leave the doc in draft | John reviewed `docs/cookie-agent.md` in chat and approved it. Implementation may start. |
+| D-2026-10-24-13 | Repo layout | Foundation layout: `app/`, `core/`, `protocol/`, `evals/`, `assets/`. | UI spec sketch: `apps/mac/`, `brand/`, `runtime/`, `scripts/`, `core/test/evals/` | Supersedes the repo tree sketched in `docs/cookie-agent-ui-spec.md` §8.2. That sketch had no earlier log id. It stays in the spec as history. New code uses the foundation paths. |
+| D-2026-10-24-14 | M0 process | Contract-first walking skeleton. JSON-RPC schemas in `protocol/` plus a verification skill `.cursor/skills/verify-cookie/` with a feature map land first. The parallel M0 tasks follow. Each of those PRs updates its feature file with captured evidence. | Build M0 features before the contract and the feature map | The shared contract and the feature map land before parallel M0 work, and each later PR records evidence on its feature file. |
 
 Supersession example, not itself a decision: a later entry would say `Supersedes D-2026-10-24-03` and state the new choice. `D-2026-10-24-03` would remain in the log.
 

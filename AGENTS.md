@@ -12,13 +12,9 @@ Read [docs/cookie-agent.md](docs/cookie-agent.md) before changing product behavi
 
 ## Approval gate
 
-No product implementation until `docs/cookie-agent.md` says approved.
+The Status line at the top of `docs/cookie-agent.md` is the gate. It reads `approved (John Kim, 2026-10-24)`.
 
-The Status line at the top of that file is the gate. It currently reads `draft - awaiting approval`.
-
-- While Status is `draft - awaiting approval`, do not add features, tools, UI, protocol schemas, model calls, or packaging scripts. Fixes to docs, this skeleton, and CI are allowed.
-- When John sets Status to `approved`, implementation may start, one milestone task per pull request.
-- Do not flip Status to `approved` yourself. That change is John's review.
+Implementation is allowed, one milestone task per pull request.
 
 ## Repo map
 
