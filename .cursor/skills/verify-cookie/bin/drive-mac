@@ -1,0 +1,181 @@
+#!/bin/bash
+# Mac recipe for the menu bar and the hotkey popup.
+# Status stays planned until a Mac run writes verify-evidence/.
+# On Linux this is the same reachability stub as drive-core.
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' "verified-unreachable on Linux: requires macOS"
+  exit 2
+fi
+
+feature="${1:-all}"
+if [[ "$feature" == "--evidence" ]]; then
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--evidence dir]" >&2
+  exit 2
+fi
+
+evidence=""
+if [[ "${2:-}" == "--evidence" ]]; then
+  evidence="${3:-}"
+fi
+
+port="${COOKIE_LLAMA_PORT:-}"
+data="${COOKIE_DATA_DIR:-}"
+if [[ "$port" != "18080" ]]; then
+  printf '%s\n' "not-ok" "COOKIE_LLAMA_PORT must be 18080"
+  exit 1
+fi
+if [[ -z "$data" || "$data" == *"Application Support/Cookie"* ]]; then
+  printf '%s\n' "not-ok" "COOKIE_DATA_DIR must be a fresh temp directory, not Application Support"
+  exit 1
+fi
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+APP="${COOKIE_APP:-"$ROOT/dist/Cookie Agent.app"}"
+BIN="$APP/Contents/MacOS/CookieAgent"
+if [[ ! -x "$BIN" ]]; then
+  printf '%s\n' "not-ok" "set COOKIE_APP to Cookie Agent.app (missing $BIN)"
+  exit 1
+fi
+
+export COOKIE_DATA_DIR="$data"
+export COOKIE_LLAMA_PORT=18080
+export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
+export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+
+log() { printf '%s\n' "$*"; }
+
+APP_PID=""
+cleanup() {
+  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
+    kill "$APP_PID" 2>/dev/null || true
+    wait "$APP_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+log "launch $BIN"
+"$BIN" &
+APP_PID=$!
+
+osascript_run() {
+  /usr/bin/osascript "$@"
+}
+
+# System Events names the process after the executable, CookieAgent,
+# when the binary inside the bundle is launched directly.
+read_menu() {
+  osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+    set itemLabel to description of statusItem
+    click statusItem
+    delay 0.4
+    set names to name of menu items of menu 1 of statusItem
+    set frontApp to name of first process whose frontmost is true
+    return itemLabel & linefeed & (names as string) & linefeed & "frontmost " & frontApp
+  end tell
+end tell
+APPLESCRIPT
+}
+
+log "wait for menu bar"
+ready=""
+for _ in $(seq 1 30); do
+  if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+    ready=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ -z "$ready" ]]; then
+  log "not-ok"
+  log "menu bar did not appear"
+  cat /tmp/cookie-drive-mac-menu.err || true
+  exit 1
+fi
+log "menu"
+cat /tmp/cookie-drive-mac-menu.txt
+
+python3 - <<'PY'
+import pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-menu.txt").read_text()
+required = ["Ask Cookie…", "Local-only mode", "Quit Cookie", "🐾 Cookie · on-device · fake-local"]
+missing = [item for item in required if item not in text]
+if missing:
+    print("missing " + ", ".join(missing))
+    sys.exit(1)
+print("menu strings ok")
+PY
+
+if [[ "$feature" == "menu-bar-icon" || "$feature" == "all" ]]; then
+  log "option-click"
+  osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  tell process "CookieAgent"
+    set statusItem to menu bar item 1 of menu bar 2
+    key down option
+    click statusItem
+    key up option
+  end tell
+end tell
+APPLESCRIPT
+  sleep 0.4
+  log "popup-after-option-click"
+  osascript_run <<'APPLESCRIPT' || log "popup read failed; physical option-click may be required"
+tell application "System Events"
+  tell process "CookieAgent"
+    set fields to entire contents
+    return fields as string
+  end tell
+end tell
+APPLESCRIPT
+fi
+
+if [[ "$feature" == "hotkey-popup" || "$feature" == "chat" || "$feature" == "all" ]]; then
+  log "frontmost-before"
+  before="$(osascript_run -e 'tell application "System Events" to get name of first process whose frontmost is true')"
+  log "$before"
+  log "synthetic option-space (Carbon may ignore a synthetic event; press the physical keys if the popup stays closed)"
+  osascript_run -e 'tell application "System Events" to keystroke space using option down' || true
+  sleep 0.4
+  after="$(osascript_run -e 'tell application "System Events" to get name of first process whose frontmost is true')"
+  log "frontmost-after $after"
+  if [[ "$before" != "$after" ]]; then
+    log "frontmost changed; nonactivating check needs a physical ⌥Space"
+  fi
+fi
+
+log "quit via menu"
+osascript_run <<'APPLESCRIPT' || true
+tell application "System Events"
+  tell process "CookieAgent"
+    set statusItem to menu bar item 1 of menu bar 2
+    click statusItem
+    delay 0.3
+    click menu item "Quit Cookie" of menu 1 of statusItem
+  end tell
+end tell
+APPLESCRIPT
+
+if [[ -n "$evidence" ]]; then
+  mkdir -p "$evidence"
+  {
+    printf '%s\n' "drive-mac $feature"
+    printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
+    printf '%s\n' "COOKIE_LLAMA_PORT=$COOKIE_LLAMA_PORT"
+  } > "$evidence/command.txt"
+  cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt" || true
+fi
+
+log "ok"
+log "Mac proof is pending until this transcript is saved under verify-evidence/ and the feature files are updated."

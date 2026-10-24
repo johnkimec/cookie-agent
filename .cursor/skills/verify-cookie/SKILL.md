@@ -1,11 +1,11 @@
 ---
 name: verify-cookie
-description: "Drive Cookie the way John does and capture proof. The TypeScript core is newline-delimited JSON-RPC on stdio (Linux, fake core today). The Mac menu-bar app is macOS only and unreachable until task B. Use when proving M0 behavior, marking a verify-cookie feature verified, or checking a core change against the protocol."
+description: "Drive Cookie the way John does and capture proof. The TypeScript core is newline-delimited JSON-RPC on stdio (Linux, fake core today). The Mac menu-bar app is macOS only. drive-core does not launch it; drive-mac is the recipe and Mac proof is still pending. Use when proving M0 behavior, marking a verify-cookie feature verified, or checking a core change against the protocol."
 ---
 
 # verify-cookie
 
-Drive Cookie and keep the evidence. The core surface works on Linux against the fake core. The Mac app does not exist yet: `app/` is a compile stub, and that surface is `verified-unreachable on Linux: requires macOS`.
+Drive Cookie and keep the evidence. The core surface works on Linux against the fake core. The Mac app is `app/`. `drive-core` does not launch it, so the menu and hotkey drives stay `verified-unreachable on Linux: requires macOS`. Mac proof is pending: run `drive-mac` on a Mac and leave feature statuses `planned` until that evidence exists.
 
 Keep this map honest with `/maintain-verification-skill` when the shell or the real core lands. A passing vitest run is not feature evidence. Evidence is a transcript this skill wrote under `verify-evidence/`.
 
@@ -64,16 +64,26 @@ Core, on Linux or macOS:
 
 `model-status` pushes `loading` with `modelId` `Qwen3.6-35B-A3B`, expects `chat.send` to fail with code `-32002`, pushes `down`, expects the same refusal, pushes `up` / `fake-local`, and expects a recovered `chat.done` `stop`. On Linux its stdout also contains `verified-unreachable on Linux: requires macOS` for the menu-bar half of that feature. Exit 0 means the core half passed. It does not mean the glyphs were seen.
 
-Mac app, not available in this checkout:
+Mac app, recipe only (proof pending):
 
 ```bash
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
 ```
 
-On Linux both exit 2 and stdout is exactly `verified-unreachable on Linux: requires macOS`. On macOS, until task B adds the app, stdout is `verified-unreachable: requires the Mac app from task B` and the exit code is still 2.
+On Linux both exit 2 and stdout is exactly `verified-unreachable on Linux: requires macOS`. On macOS, `drive-core` still exits 2 with `verified-unreachable: requires the Mac app from task B`. That stub does not launch the GUI.
 
-When task B exists, drive that app only with a fresh `COOKIE_DATA_DIR` (a new temp directory) and `COOKIE_LLAMA_PORT=18080`. Never attach to a Cookie already running in John's session. Open the popup from the menu item `Ask Cookie…` or with ⌥Space. The input's accessibility label is `Ask Cookie…`. Read the accessibility tree with `osascript` and System Events, using those labels, not a click coordinate. Capture the popup with `screencapture -x`. The menu bar's VoiceOver label while a reply streams is `Cookie, thinking`. Quit with the menu item `Quit Cookie`. Then run cleanup. Do not mark a Mac sub-feature verified from a core transcript.
+The recipe is `.cursor/skills/verify-cookie/bin/drive-mac`. On Linux it exits 2 with the same unreachable line. On a Mac, package the app, then run the executable yourself or let the script launch it. Do not use `open`. LaunchServices drops the environment.
+
+```bash
+export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"
+export COOKIE_LLAMA_PORT=18080
+export COOKIE_CORE_CWD="$(pwd)"
+export COOKIE_APP="$PWD/dist/Cookie Agent.app"
+.cursor/skills/verify-cookie/bin/drive-mac all
+```
+
+Never attach to a Cookie already running in John's session. The process name is `CookieAgent`. The input's accessibility label is `Ask Cookie…`. Identifiers are listed in `app/README.md` and the feature files. Read them with `osascript` and System Events, not a click coordinate. Capture the popup with `screencapture -x`. The menu bar's VoiceOver label while a reply streams is `Cookie, thinking`. Quit with the menu item `Quit Cookie`. Then run cleanup. Do not mark a Mac sub-feature verified from a core transcript, or from this recipe, until the evidence files are in the pull request. Mac proof is pending; the Principal Engineer runs it.
 
 ## Evidence
 
@@ -124,6 +134,7 @@ Run cleanup after a failed drive too, so a fake core is not left running. Then c
 .cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-model-status
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
+.cursor/skills/verify-cookie/bin/drive-mac all
 .cursor/skills/verify-cookie/bin/drive-core cleanup
 ```
 

@@ -1,33 +1,58 @@
 # app
 
-Swift app shell for Cookie. Not implemented.
+Swift shell for Cookie. macOS 14 or later. Swift 6.
 
-The shell will be a non-sandboxed Swift 6 / SwiftUI app: `MenuBarExtra`, a non-activating `NSPanel` on ⌥Space, a sandboxed WidgetKit extension, App Intents, notifications, and a supervisor for `llama-server`. It is the only process that holds macOS permissions and runs Mac tools. Minimum system: macOS 14.
+The shell is a non-sandboxed menu-bar app. It owns the popup and spawns the core. It does not supervise `llama-server`. The core today is the fake core.
 
-Today this directory is a Swift package with one library target, so macOS CI can `swift build` it. There is no application target and no feature code.
+| Target | What it is |
+| --- | --- |
+| `CookieProtocol` | Codable JSON-RPC 0.1 types and the newline codec. |
+| `CookieCore` | Glyph rules, draft and transcript state, process launch, supervisor. |
+| `CookieAgent` | `MenuBarExtra`, the ⌥Space `NSPanel`, and the placeholder mascot. |
 
-## Planned layout
+Tests are XCTest. They round-trip `protocol/examples/` and, when `pnpm` and Node are on `PATH`, spawn the fake core. Set `COOKIE_REQUIRE_FAKE_CORE=1` to fail instead of skip when those tools are missing. macOS CI does that.
 
-The UI spec sketches this under `apps/mac/`. It lives here as `app/` until the project doc is approved and the two trees are reconciled.
+## Launch on a Mac
 
-```text
-app/
-├── Package.swift                 SwiftPM manifest (library stub, Swift tools 6.0)
-├── Sources/CookieAgentApp/       compile stub only
-├── App/                          planned: MenuBarExtra, popup, settings
-├── Widget/                       planned: WidgetKit extension (sandboxed)
-├── Intents/                      planned: App Intents for the widget and Shortcuts
-└── Resources/                    planned: default persona.md, asset catalog
-```
-
-An Xcode project can wrap this package later. Signing, entitlements, the widget, and the DMG are milestone work, not this skeleton.
-
-## Build
-
-On a Mac, from the repository root:
+From the repository root, with Node 22 and pnpm 10. Run the executable. `open` starts the app through LaunchServices and drops `COOKIE_DATA_DIR`.
 
 ```bash
-swift build --package-path app
+pnpm install
+app/Scripts/package-app.sh
+export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"
+export COOKIE_LLAMA_PORT=18080
+export COOKIE_CORE_CWD="$(pwd)"
+export COOKIE_CORE_COMMAND="pnpm --filter @cookie-agent/core fake-core"
+"dist/Cookie Agent.app/Contents/MacOS/CookieAgent"
 ```
 
-Linux does not build this package. Core tests do not link it. See [AGENTS.md](../AGENTS.md).
+`COOKIE_CORE_COMMAND` is optional. The default is that same `pnpm` invocation, split on whitespace, run via `/usr/bin/env`. `COOKIE_CORE_CWD` defaults to the repo root when `pnpm-workspace.yaml` can be found by walking up from the working directory.
+
+If `COOKIE_DATA_DIR` is unset, the shell creates a directory under the temporary directory and passes that to the child. It does not create `~/Library/Application Support/Cookie`. If `COOKIE_LLAMA_PORT` is unset, the shell sets `18080` so an accidental launch does not use port `8080`. An explicit port is passed through.
+
+`swift test --package-path app` builds the tests. `swift run --package-path app CookieAgent` runs the same executable without the bundle. The bundle's display name is Cookie. The file name is `Cookie Agent.app`.
+
+Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another app may already own that key; the shell logs `RegisterEventHotKey failed` when registration loses.
+
+## Accessibility identifiers
+
+| Control | Identifier | Label |
+| --- | --- | --- |
+| Menu bar icon | `cookie.menu.icon` | `Cookie`, `Cookie, listening`, `Cookie, thinking`, `Cookie, loading`, or `Cookie, offline` |
+| Status line | `cookie.menu.status` | `🐾 Cookie · on-device · …` |
+| Ask Cookie… | `cookie.menu.ask` | `Ask Cookie…` |
+| Local-only mode | `cookie.menu.local-only` | `Local-only mode` |
+| Quit Cookie | `cookie.menu.quit` | `Quit Cookie` |
+| Popup panel | `cookie.popup` | `Ask Cookie…` |
+| Input | `cookie.popup.input` | `Ask Cookie…` |
+| Mascot | `cookie.popup.mascot` | `Cookie, listening`, `Cookie, thinking`, `Cookie, talking`, or `Cookie, offline` |
+| Send mark | `cookie.popup.send` | `⏎` |
+| You turn | `cookie.turn.you.<n>` | `you` |
+| Cookie turn | `cookie.turn.cookie.<n>` | `cookie` |
+| Badge | `cookie.badge.on-device.<n>` | `on-device` |
+
+The Mac recipe is `.cursor/skills/verify-cookie/bin/drive-mac`. It does not run in CI. Feature statuses stay `planned` until that recipe's evidence is captured on a Mac.
+
+## M0 scope
+
+The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no cancel control, no screen chip, and no llama-server supervisor. Escape closes the popup and does not cancel a stream.

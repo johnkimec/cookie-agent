@@ -28,10 +28,11 @@ Preconditions:
 - `COOKIE_LLAMA_PORT` is not `8080`.
 - The Mac app is not running from a previous session.
 
-- **Linux today.** Run `.cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon`. Exit code is 2. Stdout is `verified-unreachable on Linux: requires macOS`.
-- **Status line, once the app exists on macOS.** The same command is the one to extend. Until then the unmet precondition is macOS and the MenuBarExtra from task B. The disabled status item reads `🐾 Cookie · on-device · Qwen3.6` when `runtime.status` is `up` and `modelId` is `Qwen3.6-35B-A3B`. Against the fake core the id is `fake-local`, and the status line shows `fake-local`, not `Qwen3.6`.
-- **Ask and quit.** The menu contains `Ask Cookie…` (shortcut ⌥Space), a checked `Local-only mode`, and `Quit Cookie` (⌘Q). Choosing `Quit Cookie` leaves no Cookie menu-bar item.
-- **Option-click.** Option-click the icon. The popup opens. Its field is labelled `Ask Cookie…`.
+- **Linux today.** Run `.cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon`. Exit code is 2. Stdout is `verified-unreachable on Linux: requires macOS`. `.cursor/skills/verify-cookie/bin/drive-mac menu-bar-icon` exits 2 with that same line on Linux.
+- **Mac proof is pending.** The app is in `app/`. Every status below stays `planned` until the Principal Engineer runs the Mac recipe and writes `verify-evidence/`. Do not mark these verified from a core transcript.
+- **Identifiers.** Menu bar icon `cookie.menu.icon` (VoiceOver `Cookie`, `Cookie, listening`, `Cookie, thinking`, `Cookie, loading`, or `Cookie, offline`). Status line `cookie.menu.status`. `Ask Cookie…` is `cookie.menu.ask`. `Local-only mode` is `cookie.menu.local-only`. `Quit Cookie` is `cookie.menu.quit`.
+- **Mac recipe.** Package with `app/Scripts/package-app.sh`. Use a fresh `COOKIE_DATA_DIR`, `COOKIE_LLAMA_PORT=18080`, and `COOKIE_APP` pointing at `dist/Cookie Agent.app`. Run `.cursor/skills/verify-cookie/bin/drive-mac menu-bar-icon`. Launch the binary inside the bundle, not `open`. The menu contains `Ask Cookie…` (shortcut ⌥Space), a checked `Local-only mode`, and `Quit Cookie` (⌘Q). Against the fake core the disabled status line is `🐾 Cookie · on-device · fake-local`. It reads `🐾 Cookie · on-device · Qwen3.6` only when `runtime.status` is `up` and `modelId` is `Qwen3.6-35B-A3B`. Choosing `Quit Cookie` leaves no Cookie menu-bar item.
+- **Option-click.** Option-click the icon (`cookie.menu.icon`). The popup opens. Its field is labelled `Ask Cookie…` (`cookie.popup.input`).
 - **Thinking.** Send a message (see chat streaming). While deltas are arriving, VoiceOver on the menu-bar item is `Cookie, thinking`, and the glyph is the head plus a small 2-dot mark. After `chat.done`, with the popup still open, the glyph is Listening (ears raised), not Thinking.
 
 ## Gotchas

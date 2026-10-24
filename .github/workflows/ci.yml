@@ -49,11 +49,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Swift package
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Swift package
+        env:
+          COOKIE_REQUIRE_FAKE_CORE: "1"
         run: |
-          if [ -f app/Package.swift ]; then
-            swift --version
-            swift build --package-path app
-          else
-            echo "No Swift package at app/Package.swift; nothing to build."
-          fi
+          swift --version
+          swift test --package-path app
+
+      - name: Package Cookie Agent.app
+        run: app/Scripts/package-app.sh "${{ runner.temp }}/Cookie Agent.app"

@@ -2,7 +2,7 @@
 
 M0 contract between the Swift shell and the TypeScript core. Newline-delimited JSON-RPC 2.0 on stdio. Version `0.1`.
 
-The schema is [`schema/cookie-rpc.schema.json`](schema/cookie-rpc.schema.json). Golden messages are in [`examples/`](examples/). Hand-written TypeScript types live in [`core/src/protocol/types.ts`](../core/src/protocol/types.ts). Swift mirrors them with Codable when task B lands. This directory does not contain Swift.
+The schema is [`schema/cookie-rpc.schema.json`](schema/cookie-rpc.schema.json). Golden messages are in [`examples/`](examples/). Hand-written TypeScript types live in [`core/src/protocol/types.ts`](../core/src/protocol/types.ts). Swift Codable types live in [`app/Sources/CookieProtocol`](../app/Sources/CookieProtocol). This directory does not contain Swift.
 
 The core is the JSON-RPC server. The shell spawns it and is the client. Either side may send `runtime.status` notifications. The core's stdout is protocol only. Logs go to stderr. There is no port on this channel. The core reaches `llama-server` over HTTP on `127.0.0.1`, which is a different channel and is not framed here.
 
@@ -166,7 +166,7 @@ That text is a stub so task B can render a stream. It is not a model reply. `ser
 
 ## Swift
 
-Task B adds Codable types under `app/`. No generator and no Swift code in this milestone. Mirror the JSON keys so synthesized Codable matches, with these exceptions:
+Task B added Codable types under `app/Sources/CookieProtocol`. No generator. This directory still has no Swift. Mirror the JSON keys so synthesized Codable matches, with these exceptions:
 
 - Request `id` is a `String`. Do not send an `Int`. Error responses need `id` to decode as `String?` because parse errors use JSON `null`.
 - Notifications omit `id`. Decode them as a separate type, or as a request type whose `id` is optional and absent.

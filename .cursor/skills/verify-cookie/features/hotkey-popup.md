@@ -28,10 +28,12 @@ Preconditions:
 - No Cookie popup from a previous session is on screen.
 - `COOKIE_DATA_DIR` is a fresh temp directory and `COOKIE_LLAMA_PORT` is `18080`.
 
-- **Linux today.** Run `.cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup`. Exit code is 2. Stdout is `verified-unreachable on Linux: requires macOS`.
-- **Open, once the app exists on macOS.** The same command is the one to extend. The unmet precondition is macOS and the NSPanel from task B. Press ⌥Space. A panel appears in the upper third of the active screen. The text field's accessibility label is `Ask Cookie…`. The previously frontmost app is still frontmost.
-- **Send.** Type a line and press Return. The field submits. Shift-Return does not submit. It adds a line. ⌘K leaves the field empty.
-- **Close.** Press Escape. The panel is gone. Press ⌥Space again within 10 minutes. An unsent draft is still in the field. Click outside the panel. The panel closes. Option-click the menu-bar icon. The panel opens.
+- **Linux today.** Run `.cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup`. Exit code is 2. Stdout is `verified-unreachable on Linux: requires macOS`. `.cursor/skills/verify-cookie/bin/drive-mac hotkey-popup` exits 2 with that same line on Linux.
+- **Mac proof is pending.** The panel is in `app/`. Every status below stays `planned` until the Principal Engineer runs the Mac recipe and writes `verify-evidence/`.
+- **Identifiers.** Panel `cookie.popup`. Field `cookie.popup.input`, label `Ask Cookie…`. Mascot `cookie.popup.mascot` (40 pt; VoiceOver `Cookie, listening`, `Cookie, thinking`, `Cookie, talking`, or `Cookie, offline`). Send mark `cookie.popup.send`, label `⏎`.
+- **Open.** Package with `app/Scripts/package-app.sh`. Fresh `COOKIE_DATA_DIR`, `COOKIE_LLAMA_PORT=18080`, `COOKIE_APP` pointing at `dist/Cookie Agent.app`. Run `.cursor/skills/verify-cookie/bin/drive-mac hotkey-popup`. Press ⌥Space. A panel appears in the upper third of the active screen, 560 pt wide. The text field's accessibility label is `Ask Cookie…`. The previously frontmost app is still frontmost. A synthetic ⌥Space may not reach the global hotkey. If the panel stays closed, press the physical keys and say so. Do not remap the shortcut.
+- **Send.** Type a line and press Return. The field submits. Shift-Return does not submit. It adds a line, up to 5. ⌘K leaves the field empty. Up at the start of the field recalls the last `you` text into the draft and does not delete the turn.
+- **Close.** Press Escape. The panel is gone and the draft is kept. Press ⌥Space again within 10 minutes. The unsent draft is still in the field. After 10 minutes it is cleared. Click outside the panel. The panel closes. Option-click the menu-bar icon. The panel opens.
 - **Screenshot.** `screencapture -x` of that panel shows the 40 pt Cookie at the left of the input row and the label `Ask Cookie…`.
 
 ## Gotchas

@@ -26,6 +26,7 @@ verify-evidence/
 
 # Swift / Xcode
 .build/
+dist/
 .swiftpm/
 DerivedData/
 *.xcodeproj/xcuserdata/
