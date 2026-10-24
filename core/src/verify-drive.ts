@@ -23,6 +23,7 @@ import { mkdir, readdir, readlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CORE_SERVER_NAME } from "./identity.ts";
 import { protocolErrors } from "./protocol/errors.ts";
 import {
   countWords,
@@ -37,9 +38,19 @@ import {
   isRecord,
   messageErrors,
 } from "./protocol/validate.ts";
+import {
+  type LlamaStub,
+  STUB_INPUT_TOKENS,
+  STUB_OUTPUT_TOKENS,
+  STUB_REPLY_CHUNKS,
+  startLlamaStub,
+} from "./verify-llama-stub.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fakeCorePath = join(repoRoot, "core/src/fake-core.ts");
+const realCorePath = join(repoRoot, "core/src/index.ts");
+
+type CoreKind = "fake" | "real";
 const schemaPath = join(repoRoot, "protocol/schema/cookie-rpc.schema.json");
 const llamaPort = "18080";
 const readTimeoutMs = 5000;
@@ -149,11 +160,12 @@ class CoreSession {
     });
   }
 
-  static spawn(dataDir: string, deltaMs: string): CoreSession {
+  static spawn(dataDir: string, deltaMs: string, kind: CoreKind): CoreSession {
     mkdirSync(dataDir, { recursive: true });
+    const entry = kind === "real" ? realCorePath : fakeCorePath;
     const child = spawn(
       process.execPath,
-      ["--experimental-strip-types", fakeCorePath],
+      ["--experimental-strip-types", entry],
       {
         cwd: repoRoot,
         stdio: ["pipe", "pipe", "pipe"],
@@ -272,13 +284,13 @@ function deletableScratch(dir: string): string | null {
   return target;
 }
 
-function cmdlineIsFakeCore(pid: number): boolean {
+function cmdlineIsManagedCore(pid: number): boolean {
   if (pid <= 1 || pid === process.pid) {
     return false;
   }
   try {
     const text = readFileSync(`/proc/${pid}/cmdline`).toString("utf8");
-    return text.includes("fake-core.ts");
+    return text.includes("fake-core.ts") || text.includes("core/src/index.ts");
   } catch {
     return false;
   }
@@ -290,8 +302,8 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-async function killFakeCore(pid: number): Promise<void> {
-  if (!cmdlineIsFakeCore(pid)) {
+async function killManagedCore(pid: number): Promise<void> {
+  if (!cmdlineIsManagedCore(pid)) {
     return;
   }
   try {
@@ -301,7 +313,7 @@ async function killFakeCore(pid: number): Promise<void> {
   }
   const started = Date.now();
   while (Date.now() - started < 500) {
-    if (!cmdlineIsFakeCore(pid)) {
+    if (!cmdlineIsManagedCore(pid)) {
       return;
     }
     await sleep(20);
@@ -368,7 +380,7 @@ async function cleanupAsync(): Promise<number> {
       pid = null;
     }
     if (pid !== null) {
-      await killFakeCore(pid);
+      await killManagedCore(pid);
     }
     rmIfScratch(dataDir);
     try {
@@ -382,12 +394,56 @@ async function cleanupAsync(): Promise<number> {
   return 0;
 }
 
-async function assertNoSockets(pid: number): Promise<void> {
-  if (process.platform !== "linux") {
-    return;
+/**
+ * Decode an address from /proc/net/tcp. IPv4 is little-endian.
+ * `0100007F:46A0` is 127.0.0.1:18080.
+ */
+export function decodeProcAddress(hex: string): string {
+  const [ipHex, portHex] = hex.split(":");
+  if (ipHex === undefined || portHex === undefined) {
+    return hex;
   }
-  const fdDir = `/proc/${pid}/fd`;
-  const entries = await readdir(fdDir);
+  const port = Number.parseInt(portHex, 16);
+  if (!Number.isFinite(port)) {
+    return hex;
+  }
+  if (ipHex.length === 8) {
+    const value = Number.parseInt(ipHex, 16);
+    const b1 = value & 0xff;
+    const b2 = (value >>> 8) & 0xff;
+    const b3 = (value >>> 16) & 0xff;
+    const b4 = (value >>> 24) & 0xff;
+    return `${b1}.${b2}.${b3}.${b4}:${port}`;
+  }
+  return `${ipHex}:${port}`;
+}
+
+async function socketPeers(pid: number): Promise<string[]> {
+  const byInode = new Map<string, string>();
+  for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text = "";
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      const remote = fields[2];
+      const inode = fields[9];
+      if (remote === undefined || inode === undefined || inode === "0") {
+        continue;
+      }
+      byInode.set(inode, decodeProcAddress(remote));
+    }
+  }
+  const peers: string[] = [];
+  let entries: string[] = [];
+  try {
+    entries = await readdir(`/proc/${pid}/fd`);
+  } catch {
+    return peers;
+  }
   for (const entry of entries) {
     // Node wires stdio as socket pairs. Those are fds 0, 1, and 2.
     if (entry === "0" || entry === "1" || entry === "2") {
@@ -395,16 +451,42 @@ async function assertNoSockets(pid: number): Promise<void> {
     }
     let target = "";
     try {
-      target = readlinkSync(join(fdDir, entry));
+      target = readlinkSync(join(`/proc/${pid}/fd`, entry));
     } catch {
       try {
-        target = await readlink(join(fdDir, entry));
+        target = await readlink(join(`/proc/${pid}/fd`, entry));
       } catch {
         continue;
       }
     }
-    if (target.startsWith("socket:")) {
-      throw new Error(`fake core pid ${pid} opened ${target}`);
+    if (!target.startsWith("socket:")) {
+      continue;
+    }
+    const inode = /^socket:\[(\d+)\]$/.exec(target)?.[1];
+    if (inode === undefined) {
+      peers.push(target);
+      continue;
+    }
+    peers.push(byInode.get(inode) ?? target);
+  }
+  return peers;
+}
+
+async function assertSockets(pid: number, kind: CoreKind): Promise<void> {
+  if (process.platform !== "linux") {
+    return;
+  }
+  const peers = await socketPeers(pid);
+  if (kind === "fake") {
+    if (peers.length > 0) {
+      throw new Error(`fake core pid ${pid} opened ${peers.join(" ")}`);
+    }
+    return;
+  }
+  const allowed = new Set([`127.0.0.1:${llamaPort}`, `::1:${llamaPort}`]);
+  for (const peer of peers) {
+    if (!allowed.has(peer)) {
+      throw new Error(`core pid ${pid} opened ${peer}`);
     }
   }
 }
@@ -429,7 +511,19 @@ function initializeMessage(id: string): unknown {
   };
 }
 
-async function initialize(session: CoreSession, id: string): Promise<void> {
+function expectedServer(kind: CoreKind): string {
+  return kind === "real" ? CORE_SERVER_NAME : FAKE_SERVER_NAME;
+}
+
+function expectedModel(kind: CoreKind): string {
+  return kind === "real" ? DEFAULT_MODEL_ID : FAKE_MODEL_ID;
+}
+
+async function initialize(
+  session: CoreSession,
+  id: string,
+  kind: CoreKind,
+): Promise<void> {
   session.send(initializeMessage(id));
   const response = await session.response(id);
   const result = asRecord(response.result, "initialize result");
@@ -437,7 +531,7 @@ async function initialize(session: CoreSession, id: string): Promise<void> {
     throw new Error(`protocolVersion ${String(result.protocolVersion)}`);
   }
   const serverInfo = asRecord(result.serverInfo, "serverInfo");
-  if (serverInfo.name !== FAKE_SERVER_NAME) {
+  if (serverInfo.name !== expectedServer(kind)) {
     throw new Error(`server ${String(serverInfo.name)}`);
   }
   const status = session.side.shift() ?? (await session.next());
@@ -446,16 +540,20 @@ async function initialize(session: CoreSession, id: string): Promise<void> {
     throw new Error("missing runtime.status after initialize");
   }
   const params = asRecord(note.params, "runtime.status params");
-  if (params.state !== "up" || params.modelId !== FAKE_MODEL_ID) {
+  if (params.state !== "up" || params.modelId !== expectedModel(kind)) {
     throw new Error(
       `runtime ${String(params.state)} ${String(params.modelId)}`,
     );
   }
-  await assertNoSockets(session.pid);
+  await assertSockets(session.pid, kind);
 }
 
-async function runChat(session: CoreSession): Promise<string> {
-  await initialize(session, "1");
+async function runChat(
+  session: CoreSession,
+  kind: CoreKind,
+  stub: LlamaStub | null,
+): Promise<string> {
+  await initialize(session, "1", kind);
   const firstText = "hello from verify-cookie";
   session.send({
     jsonrpc: "2.0",
@@ -490,12 +588,15 @@ async function runChat(session: CoreSession): Promise<string> {
     }
     throw new Error(`unexpected ${String(message.method)}`);
   }
-  if (deltas.length !== FAKE_REPLY_CHUNKS.length) {
+  const replyChunks = kind === "real" ? STUB_REPLY_CHUNKS : FAKE_REPLY_CHUNKS;
+  const replyText =
+    kind === "real" ? STUB_REPLY_CHUNKS.join("") : fakeReplyText();
+  if (deltas.length !== replyChunks.length) {
     throw new Error(
-      `expected ${FAKE_REPLY_CHUNKS.length} deltas, got ${deltas.length}`,
+      `expected ${replyChunks.length} deltas, got ${deltas.length}`,
     );
   }
-  if (deltas.join("") !== fakeReplyText()) {
+  if (deltas.join("") !== replyText) {
     throw new Error("deltas did not form the canned reply");
   }
   const doneParams = asRecord(done.params, "chat.done");
@@ -503,10 +604,14 @@ async function runChat(session: CoreSession): Promise<string> {
     throw new Error(`finishReason ${String(doneParams.finishReason)}`);
   }
   const usage = asRecord(doneParams.usage, "usage");
-  if (usage.inputTokens !== countWords(firstText)) {
+  const expectedIn =
+    kind === "real" ? STUB_INPUT_TOKENS : countWords(firstText);
+  const expectedOut =
+    kind === "real" ? STUB_OUTPUT_TOKENS : countWords(replyText);
+  if (usage.inputTokens !== expectedIn) {
     throw new Error(`inputTokens ${String(usage.inputTokens)}`);
   }
-  if (usage.outputTokens !== countWords(fakeReplyText())) {
+  if (usage.outputTokens !== expectedOut) {
     throw new Error(`outputTokens ${String(usage.outputTokens)}`);
   }
 
@@ -548,6 +653,16 @@ async function runChat(session: CoreSession): Promise<string> {
   if (cancelResult.cancelled !== true) {
     throw new Error("chat.cancel did not report cancelled");
   }
+  if (kind === "real") {
+    if (stub === null) {
+      throw new Error("real core drive has no llama stub");
+    }
+    await waitForModelAbort(stub);
+    const encoded = JSON.stringify(stub.chats.map((chat) => chat.messages));
+    if (!encoded.includes(firstText) || !encoded.includes("local stub")) {
+      throw new Error("real core did not send conversation history");
+    }
+  }
 
   session.send({
     jsonrpc: "2.0",
@@ -562,11 +677,25 @@ async function runChat(session: CoreSession): Promise<string> {
   }
   const code = await session.waitForExit();
   if (code !== 0) {
-    throw new Error(`fake core exit ${String(code)}`);
+    throw new Error(`core exit ${String(code)}`);
   }
-  return ["ok", "deltas 3", "finishReason stop", "cancelled true", ""].join(
-    "\n",
-  );
+  const lines = ["ok", "deltas 3", "finishReason stop", "cancelled true"];
+  if (kind === "real") {
+    lines.push("modelAborted true");
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+async function waitForModelAbort(stub: LlamaStub): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < 2000) {
+    if (stub.chats.some((chat) => chat.aborted)) {
+      return;
+    }
+    await sleep(20);
+  }
+  throw new Error("model request was not aborted");
 }
 
 async function expectRuntimeError(
@@ -614,10 +743,14 @@ async function queryStatus(
   return asRecord(response.result, "runtime.status result");
 }
 
-async function runModelStatus(session: CoreSession): Promise<string> {
-  await initialize(session, "1");
+async function runModelStatus(
+  session: CoreSession,
+  kind: CoreKind,
+): Promise<string> {
+  await initialize(session, "1", kind);
+  const modelId = expectedModel(kind);
   const initial = await queryStatus(session, "2");
-  if (initial.state !== "up" || initial.modelId !== FAKE_MODEL_ID) {
+  if (initial.state !== "up" || initial.modelId !== modelId) {
     throw new Error("query did not echo the initial runtime");
   }
   await pushStatus(session, "loading", DEFAULT_MODEL_ID);
@@ -632,7 +765,7 @@ async function runModelStatus(session: CoreSession): Promise<string> {
     throw new Error("runtime did not enter down");
   }
   await expectRuntimeError(session, "6", "while down");
-  await pushStatus(session, "up", FAKE_MODEL_ID);
+  await pushStatus(session, "up", modelId);
   session.send({
     jsonrpc: "2.0",
     id: "7",
@@ -661,7 +794,7 @@ async function runModelStatus(session: CoreSession): Promise<string> {
   await session.response("8");
   const code = await session.waitForExit();
   if (code !== 0) {
-    throw new Error(`fake core exit ${String(code)}`);
+    throw new Error(`core exit ${String(code)}`);
   }
   const macLine =
     process.platform === "linux"
@@ -677,7 +810,7 @@ async function runModelStatus(session: CoreSession): Promise<string> {
   ].join("\n");
 }
 
-async function doctor(): Promise<number> {
+async function doctor(kind: CoreKind): Promise<number> {
   const major = Number(process.versions.node.split(".")[0]);
   if (!Number.isFinite(major) || major < 22) {
     process.stdout.write(`not-ok\nnode ${process.version}\n`);
@@ -692,9 +825,17 @@ async function doctor(): Promise<number> {
   const runDir = join(runtimeRoot(), `doctor-${process.pid}-${Date.now()}`);
   const dataDir = join(runDir, "data");
   rememberScratch(runDir);
-  const session = CoreSession.spawn(dataDir, "0");
+  let stub: LlamaStub | null = null;
+  let session: CoreSession | null = null;
   try {
-    await initialize(session, "1");
+    if (kind === "real") {
+      stub = await startLlamaStub(Number(llamaPort));
+    }
+    session = CoreSession.spawn(dataDir, "0", kind);
+    await initialize(session, "1", kind);
+    if (kind === "real" && (stub === null || stub.healthHits < 1)) {
+      throw new Error("core did not probe /health");
+    }
     const stderr = session.stderrText().trim();
     if (stderr !== "") {
       throw new Error(`stderr: ${stderr}`);
@@ -710,10 +851,10 @@ async function doctor(): Promise<number> {
         "ok",
         `node ${process.version}`,
         `protocolVersion ${PROTOCOL_VERSION}`,
-        `server ${FAKE_SERVER_NAME}`,
-        `runtime up ${FAKE_MODEL_ID}`,
+        `server ${expectedServer(kind)}`,
+        `runtime up ${expectedModel(kind)}`,
         `llamaPort ${llamaPort}`,
-        "sockets none",
+        kind === "real" ? "sockets loopback" : "sockets none",
         "",
       ].join("\n"),
     );
@@ -723,8 +864,11 @@ async function doctor(): Promise<number> {
     process.stdout.write(`not-ok\n${message}\n`);
     return 1;
   } finally {
-    await session.dispose();
-    forgetPid(session.pid);
+    if (session !== null) {
+      await session.dispose();
+      forgetPid(session.pid);
+    }
+    await stub?.close();
   }
 }
 
@@ -764,22 +908,31 @@ async function writeEvidence(
 
 async function driveFeature(
   feature: "chat-streaming" | "model-status",
-  evidenceArg: string,
+  evidence: string,
+  kind: CoreKind,
 ): Promise<number> {
-  const evidenceDir = resolve(repoRoot, evidenceArg);
+  const evidenceDir = resolve(repoRoot, evidence);
   const deltaMs = feature === "chat-streaming" ? "800" : "0";
   const runDir = join(runtimeRoot(), `${feature}-${process.pid}-${Date.now()}`);
   const dataDir = join(runDir, "data");
   rememberScratch(runDir);
-  const session = CoreSession.spawn(dataDir, deltaMs);
-  const args = `drive ${feature} --evidence ${evidenceArg}`;
+  const args =
+    kind === "real"
+      ? `drive ${feature} --evidence ${evidence} --core real`
+      : `drive ${feature} --evidence ${evidence}`;
+  let stub: LlamaStub | null = null;
+  let session: CoreSession | null = null;
   let summary = "not-ok\n";
   let code = 1;
   try {
+    if (kind === "real") {
+      stub = await startLlamaStub(Number(llamaPort));
+    }
+    session = CoreSession.spawn(dataDir, deltaMs, kind);
     summary =
       feature === "chat-streaming"
-        ? await runChat(session)
-        : await runModelStatus(session);
+        ? await runChat(session, kind, stub)
+        : await runModelStatus(session, kind);
     const stderr = session.stderrText().trim();
     if (stderr !== "") {
       throw new Error(`stderr: ${stderr}`);
@@ -790,9 +943,19 @@ async function driveFeature(
     summary = `not-ok\n${message}\n`;
     code = 1;
   } finally {
-    await session.dispose();
-    forgetPid(session.pid);
-    await writeEvidence(evidenceDir, args, dataDir, deltaMs, session, summary);
+    if (session !== null) {
+      await session.dispose();
+      forgetPid(session.pid);
+      await writeEvidence(
+        evidenceDir,
+        args,
+        dataDir,
+        deltaMs,
+        session,
+        summary,
+      );
+    }
+    await stub?.close();
   }
   process.stdout.write(summary);
   return code;
@@ -813,9 +976,9 @@ function usage(): number {
   process.stderr.write(
     [
       "usage:",
-      "  drive-core doctor",
-      "  drive-core drive chat-streaming --evidence <dir>",
-      "  drive-core drive model-status --evidence <dir>",
+      "  drive-core doctor [--core fake|real]",
+      "  drive-core drive chat-streaming --evidence <dir> [--core fake|real]",
+      "  drive-core drive model-status --evidence <dir> [--core fake|real]",
       "  drive-core drive menu-bar-icon",
       "  drive-core drive hotkey-popup",
       "  drive-core cleanup",
@@ -837,10 +1000,26 @@ function evidenceArg(rest: string[]): string | null {
   return value;
 }
 
+function coreKind(args: string[]): CoreKind | null {
+  const index = args.indexOf("--core");
+  if (index < 0) {
+    return "fake";
+  }
+  const value = args[index + 1];
+  if (value === "fake" || value === "real") {
+    return value;
+  }
+  return null;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, feature, ...rest] = argv;
   if (command === "doctor") {
-    return doctor();
+    const kind = coreKind(argv.slice(1));
+    if (kind === null) {
+      return usage();
+    }
+    return doctor(kind);
   }
   if (command === "cleanup") {
     return cleanupAsync();
@@ -858,7 +1037,11 @@ async function main(argv: string[]): Promise<number> {
   if (evidence === null) {
     return usage();
   }
-  return driveFeature(feature, evidence);
+  const kind = coreKind(rest);
+  if (kind === null) {
+    return usage();
+  }
+  return driveFeature(feature, evidence, kind);
 }
 
 function isDirectRun(): boolean {

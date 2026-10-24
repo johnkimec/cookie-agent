@@ -1,11 +1,26 @@
 /**
  * Cookie agent core entrypoint.
  *
- * The JSON-RPC loop, router, and tools are not implemented. This file
- * only gives the package a program that exits 0. See docs/cookie-agent.md.
+ * Direct execution speaks protocol 0.1 on stdio and dials llama-server.
+ * Importing this module does not start the loop. The fake core stays
+ * `src/fake-core.ts` for the Swift shell.
  */
-export function main(): number {
-  return 0;
+
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { startStdioCore } from "./stdio-core.ts";
+
+export { CORE_SERVER_NAME, CORE_SERVER_VERSION } from "./identity.ts";
+export { startStdioCore } from "./stdio-core.ts";
+
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) {
+    return false;
+  }
+  return import.meta.url === pathToFileURL(resolve(entry)).href;
 }
 
-main();
+if (isDirectRun()) {
+  startStdioCore();
+}
