@@ -5,14 +5,62 @@ import SwiftUI
 final class CookiePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// A non-activating panel resigns key as soon as the frontmost app is
+    /// something else. Closing here would dismiss the popup immediately.
+    override func resignKey() {
+        super.resignKey()
+    }
+}
+
+/// SwiftUI's accessibility tree does not always publish an `NSViewRepresentable`
+/// identifier. Identified AppKit subviews are added beside the SwiftUI children
+/// so System Events can see `cookie.popup.input`.
+final class PopupHostingView: NSHostingView<PopupRoot> {
+    private var publishingChildren = false
+
+    override var isAccessibilityElement: Bool {
+        get { false }
+        set {}
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        if publishingChildren {
+            return super.accessibilityChildren()
+        }
+        publishingChildren = true
+        defer { publishingChildren = false }
+        var children = super.accessibilityChildren() ?? []
+        let existing = Set(children.compactMap { ($0 as? NSView).map(ObjectIdentifier.init) })
+        for view in identifiedSubviews(in: self) where !existing.contains(ObjectIdentifier(view)) {
+            children.append(view)
+        }
+        return children
+    }
+}
+
+@MainActor
+private func identifiedSubviews(in root: NSView) -> [NSView] {
+    var found: [NSView] = []
+    func walk(_ view: NSView) {
+        for subview in view.subviews {
+            if !subview.accessibilityIdentifier().isEmpty {
+                found.append(subview)
+            }
+            walk(subview)
+        }
+    }
+    walk(root)
+    return found
 }
 
 final class PopupController: NSObject, @unchecked Sendable {
     private let model: AppModel
     private let panel: CookiePanel
-    private let host: NSHostingView<PopupRoot>
+    private let host: PopupHostingView
     private var monitors: [Any] = []
     private var anchoredTop: CGFloat?
+    private var suppressOutsideCloseUntil = Date.distantPast
 
     init(model: AppModel) {
         self.model = model
@@ -22,7 +70,7 @@ final class PopupController: NSObject, @unchecked Sendable {
             backing: .buffered,
             defer: false
         )
-        host = NSHostingView(rootView: PopupRoot(model: model))
+        host = PopupHostingView(rootView: PopupRoot(model: model))
         super.init()
         panel.isFloatingPanel = true
         panel.level = .floating
@@ -50,8 +98,8 @@ final class PopupController: NSObject, @unchecked Sendable {
             self?.handleKey(event) ?? event
         }
         if let keys { monitors.append(keys) }
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in
-            let point = NSEvent.mouseLocation
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] event in
+            let point = self?.screenPoint(of: event) ?? NSEvent.mouseLocation
             DispatchQueue.main.async {
                 self?.closeIfOutside(point)
             }
@@ -94,11 +142,27 @@ final class PopupController: NSObject, @unchecked Sendable {
         let height = preferredHeight()
         panel.setContentSize(NSSize(width: PopupLayout.width, height: height))
         place(height: height)
-        panel.orderFrontRegardless()
-        panel.makeKey()
+        // Become key without activating Cookie. `orderFrontRegardless` plus
+        // `makeKey` leaves the field unable to take keystrokes.
+        suppressOutsideCloseUntil = Date().addingTimeInterval(0.8)
+        panel.makeKeyAndOrderFront(nil)
+        focusField()
         DispatchQueue.main.async { [weak self] in
             self?.focusField()
         }
+    }
+
+    /// Global event locations are CG top-left coordinates. AppKit frames are
+    /// bottom-left. An AX click does not move the cursor, so `mouseLocation`
+    /// would look outside the panel and dismiss it.
+    private func screenPoint(of event: NSEvent) -> NSPoint {
+        if let window = event.window {
+            return window.convertPoint(toScreen: event.locationInWindow)
+        }
+        guard let cgPoint = event.cgEvent?.location else { return NSEvent.mouseLocation }
+        let height = (NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main)?.frame.height ?? 0
+        guard height > 0 else { return NSEvent.mouseLocation }
+        return NSPoint(x: cgPoint.x, y: height - cgPoint.y)
     }
 
     private func place(height: CGFloat) {
@@ -147,13 +211,17 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 
     private func handleLocalMouse(_ event: NSEvent) -> NSEvent? {
-        if event.modifierFlags.contains(.option),
+        let optionHeld = event.modifierFlags.contains(.option) || NSEvent.modifierFlags.contains(.option)
+        if optionHeld,
            let button = StatusItemAccess.findButton(),
            event.window === button.window {
             model.openPopup()
             return nil
         }
-        if model.popupOpen, let window = event.window, window !== panel {
+        if model.popupOpen,
+           Date() >= suppressOutsideCloseUntil,
+           let window = event.window,
+           window !== panel {
             model.closePopup()
         }
         return event
@@ -166,7 +234,7 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 
     private func closeIfOutside(_ point: NSPoint) {
-        guard model.popupOpen else { return }
+        guard model.popupOpen, Date() >= suppressOutsideCloseUntil else { return }
         if !panel.frame.contains(point) {
             model.closePopup()
         }
@@ -229,6 +297,7 @@ struct PopupRoot: View {
         .frame(width: PopupLayout.width)
         .frame(minHeight: PopupLayout.collapsedHeight)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
     }
 
     private var inputRow: some View {
@@ -249,24 +318,22 @@ struct PopupRoot: View {
                     onEscape: { model.closePopup() },
                     onEditLast: { model.recallLast() }
                 )
+                .accessibilityIdentifier(CookieAX.popupInput)
+                .accessibilityLabel(CookieCopy.ask)
                 .frame(maxWidth: .infinity, minHeight: PopupLayout.mascot, maxHeight: 120)
                 if let notice = model.conversation.refusalLine(runtime: model.runtime.state) {
-                    Text(notice)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier(CookieAX.popupRefusal)
-                        .accessibilityLabel(notice)
+                    IdentifiedText(
+                        text: notice,
+                        identifier: CookieAX.popupRefusal,
+                        label: notice,
+                        font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                        textColor: .secondaryLabelColor
+                    )
                 }
             }
-            Button {
+            IdentifiedButton(title: "⏎", identifier: CookieAX.popupSend) {
                 model.submit()
-            } label: {
-                Text("⏎")
-                    .font(.body)
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier(CookieAX.popupSend)
-            .accessibilityLabel("⏎")
             .help(CookieCopy.ask)
         }
         .padding(.horizontal, 16)
@@ -284,19 +351,25 @@ struct TurnRow: View {
                 .font(.body.monospaced())
                 .foregroundStyle(.secondary)
                 .frame(width: 64, alignment: .leading)
-                .accessibilityIdentifier(identifier)
-                .accessibilityLabel(turn.role.rawValue)
-            Text(turn.text)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
+            IdentifiedText(
+                text: turn.text,
+                identifier: identifier,
+                label: turn.role.rawValue,
+                font: .systemFont(ofSize: NSFont.systemFontSize),
+                textColor: .labelColor
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
             if let badge = turn.badge {
-                Text(badge)
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.quaternary, in: Capsule())
-                    .accessibilityIdentifier(CookieAX.badge(turn.index))
-                    .accessibilityLabel(badge)
+                IdentifiedText(
+                    text: badge,
+                    identifier: CookieAX.badge(turn.index),
+                    label: badge,
+                    font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                    textColor: .labelColor
+                )
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(.quaternary, in: Capsule())
             }
         }
     }
@@ -366,9 +439,10 @@ struct CookiePlaceholder: View {
             }
         }
         .frame(width: PopupLayout.mascot, height: PopupLayout.mascot)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(popupPoseVoiceOver(pose))
-        .accessibilityIdentifier(CookieAX.popupMascot)
+        .accessibilityHidden(true)
+        .background {
+            IdentifiedBox(identifier: CookieAX.popupMascot, label: popupPoseVoiceOver(pose))
+        }
         .opacity(pose == .offline ? 0.55 : 1)
         .help(popupPoseVoiceOver(pose))
     }

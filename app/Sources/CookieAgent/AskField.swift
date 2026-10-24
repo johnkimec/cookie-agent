@@ -15,6 +15,7 @@ struct AskField: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
+        scroll.setAccessibilityElement(false)
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false
@@ -37,6 +38,7 @@ struct AskField: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
+        textView.setAccessibilityElement(true)
         textView.setAccessibilityLabel(CookieCopy.ask)
         textView.setAccessibilityIdentifier(CookieAX.popupInput)
         textView.placeholder = CookieCopy.ask
@@ -93,6 +95,23 @@ final class AskTextView: NSTextView {
     var onEditLast: () -> Void = {}
     var onChange: (String) -> Void = { _ in }
 
+    override func setAccessibilityValue(_ accessibilityValue: Any?) {
+        let text = (accessibilityValue as? String) ?? ""
+        string = text
+        onChange(text)
+        needsDisplay = true
+    }
+
+    override func accessibilityPerformConfirm() -> Bool {
+        onSubmit()
+        return true
+    }
+
+    override func accessibilityPerformCancel() -> Bool {
+        onEscape()
+        return true
+    }
+
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 53 {
@@ -139,5 +158,103 @@ final class AskTextView: NSTextView {
             height: 22
         )
         placeholder.draw(in: rect, withAttributes: attributes)
+    }
+}
+
+/// AppKit label so System Events can read `AXIdentifier`. A SwiftUI `Text`
+/// modifier did not show up in the window's accessibility tree.
+struct IdentifiedText: NSViewRepresentable {
+    var text: String
+    var identifier: String
+    var label: String
+    var font: NSFont
+    var textColor: NSColor
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.isEditable = false
+        field.isSelectable = true
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.font = font
+        field.textColor = textColor
+        field.lineBreakMode = .byWordWrapping
+        field.maximumNumberOfLines = 0
+        field.setAccessibilityElement(true)
+        field.setAccessibilityIdentifier(identifier)
+        field.setAccessibilityLabel(label)
+        field.setAccessibilityValue(text)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        field.font = font
+        field.textColor = textColor
+        field.setAccessibilityIdentifier(identifier)
+        field.setAccessibilityLabel(label)
+        field.setAccessibilityValue(text)
+    }
+}
+
+struct IdentifiedButton: NSViewRepresentable {
+    var title: String
+    var identifier: String
+    var action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.press))
+        button.setButtonType(.momentaryPushIn)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.font = .systemFont(ofSize: NSFont.systemFontSize)
+        button.setAccessibilityElement(true)
+        button.setAccessibilityIdentifier(identifier)
+        button.setAccessibilityLabel(title)
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.title = title
+        button.setAccessibilityIdentifier(identifier)
+        button.setAccessibilityLabel(title)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func press() {
+            action()
+        }
+    }
+}
+
+struct IdentifiedBox: NSViewRepresentable {
+    var identifier: String
+    var label: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.setAccessibilityElement(true)
+        view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityLabel(label)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityLabel(label)
     }
 }
