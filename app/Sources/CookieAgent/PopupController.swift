@@ -13,44 +13,13 @@ final class CookiePanel: NSPanel {
     }
 }
 
-/// SwiftUI's accessibility tree does not always publish an `NSViewRepresentable`
-/// identifier. Identified AppKit subviews are added beside the SwiftUI children
-/// so System Events can see `cookie.popup.input`.
+/// The hosting view is not an element, so System Events walks the AppKit
+/// subviews. Each identifier is already on one of those views. Appending
+/// them again from `accessibilityChildren` publishes the same id twice.
 final class PopupHostingView: NSHostingView<PopupRoot> {
-    private var publishingChildren = false
-
     override func isAccessibilityElement() -> Bool {
         false
     }
-
-    override func accessibilityChildren() -> [Any]? {
-        if publishingChildren {
-            return super.accessibilityChildren()
-        }
-        publishingChildren = true
-        defer { publishingChildren = false }
-        var children = super.accessibilityChildren() ?? []
-        let existing = Set(children.compactMap { ($0 as? NSView).map(ObjectIdentifier.init) })
-        for view in identifiedSubviews(in: self) where !existing.contains(ObjectIdentifier(view)) {
-            children.append(view)
-        }
-        return children
-    }
-}
-
-@MainActor
-private func identifiedSubviews(in root: NSView) -> [NSView] {
-    var found: [NSView] = []
-    func walk(_ view: NSView) {
-        for subview in view.subviews {
-            if !subview.accessibilityIdentifier().isEmpty {
-                found.append(subview)
-            }
-            walk(subview)
-        }
-    }
-    walk(root)
-    return found
 }
 
 final class PopupController: NSObject, @unchecked Sendable {
@@ -317,7 +286,6 @@ struct PopupRoot: View {
                     onEscape: { model.closePopup() },
                     onEditLast: { model.recallLast() }
                 )
-                .accessibilityIdentifier(CookieAX.popupInput)
                 .accessibilityLabel(CookieCopy.ask)
                 .frame(maxWidth: .infinity, minHeight: PopupLayout.mascot, maxHeight: 120)
                 if let notice = model.conversation.refusalLine(runtime: model.runtime.state) {

@@ -146,22 +146,32 @@ on axid(elem)
   end tell
 end axid
 
+on coerceToString(rawValue)
+  if rawValue is missing value then return ""
+  set oldDelims to AppleScript's text item delimiters
+  try
+    if class of rawValue is list then
+      set AppleScript's text item delimiters to " "
+      set joined to rawValue as string
+      set AppleScript's text item delimiters to oldDelims
+      return joined
+    end if
+    set AppleScript's text item delimiters to oldDelims
+    return rawValue as string
+  on error
+    set AppleScript's text item delimiters to oldDelims
+    return ""
+  end try
+end coerceToString
+
 on axtext(elem)
+  set rawValue to missing value
   tell application "System Events"
-    set oldDelims to AppleScript's text item delimiters
     try
       set rawValue to value of elem
-      if class of rawValue is list then
-        set AppleScript's text item delimiters to " "
-        set rawValue to rawValue as text
-      end if
-      set AppleScript's text item delimiters to oldDelims
-      return rawValue as text
-    on error
-      set AppleScript's text item delimiters to oldDelims
-      return ""
     end try
   end tell
+  return my coerceToString(rawValue)
 end axtext
 
 tell application "System Events"
@@ -211,10 +221,16 @@ APPLESCRIPT
 require_input_id() {
   python3 - <<'PY'
 import pathlib, sys
+from collections import Counter
 text = pathlib.Path("/tmp/cookie-drive-mac-ax.txt").read_text()
 ids = [line.split("\t", 1)[0] for line in text.splitlines() if line.strip()]
 if "cookie.popup.input" not in ids:
     print("missing cookie.popup.input")
+    print(text)
+    sys.exit(1)
+dupes = sorted(identifier for identifier, count in Counter(ids).items() if count > 1)
+if dupes:
+    print("duplicate AX identifiers: " + ", ".join(dupes))
     print(text)
     sys.exit(1)
 print("popup identifiers ok")
@@ -299,31 +315,46 @@ on axid(elem)
   end tell
 end axid
 
+on coerceToString(rawValue)
+  if rawValue is missing value then return ""
+  set oldDelims to AppleScript's text item delimiters
+  try
+    if class of rawValue is list then
+      set AppleScript's text item delimiters to " "
+      set joined to rawValue as string
+      set AppleScript's text item delimiters to oldDelims
+      return joined
+    end if
+    set AppleScript's text item delimiters to oldDelims
+    return rawValue as string
+  on error
+    set AppleScript's text item delimiters to oldDelims
+    return ""
+  end try
+end coerceToString
+
 on axtext(elem)
+  set rawValue to missing value
+  set rawName to missing value
+  set rawDescription to missing value
   tell application "System Events"
-    set oldDelims to AppleScript's text item delimiters
     try
       set rawValue to value of elem
-      if class of rawValue is list then
-        set AppleScript's text item delimiters to " "
-        set rawValue to rawValue as text
-      end if
-      set AppleScript's text item delimiters to oldDelims
-      set asText to rawValue as text
-      if asText is not "" and asText is not "cookie" then return asText
-    on error
-      set AppleScript's text item delimiters to oldDelims
     end try
     try
-      set named to name of elem as text
-      if named is not "" and named is not "cookie" then return named
+      set rawName to name of elem
     end try
     try
-      set described to description of elem as text
-      if described is not "" and described is not "cookie" then return described
+      set rawDescription to description of elem
     end try
-    return ""
   end tell
+  set fromValue to my coerceToString(rawValue)
+  if fromValue is not "" and fromValue is not "cookie" then return fromValue
+  set fromName to my coerceToString(rawName)
+  if fromName is not "" and fromName is not "cookie" then return fromName
+  set fromDescription to my coerceToString(rawDescription)
+  if fromDescription is not "" and fromDescription is not "cookie" then return fromDescription
+  return ""
 end axtext
 
 tell application "System Events"
@@ -538,11 +569,18 @@ if [[ -n "$evidence" ]]; then
   if [[ -f /tmp/cookie-drive-mac-ax.txt ]]; then
     cp /tmp/cookie-drive-mac-ax.txt "$evidence/ax.txt"
   fi
-  if [[ -f /tmp/cookie-drive-mac-chat.txt ]]; then
+  if [[ "$drive_chat" == "1" ]]; then
+    if [[ ! -s /tmp/cookie-drive-mac-chat.txt ]]; then
+      fail "chat.txt was not written"
+    fi
+    if [[ ! -s /tmp/cookie-drive-mac-popup.png ]]; then
+      fail "popup screenshot was not written"
+    fi
     cp /tmp/cookie-drive-mac-chat.txt "$evidence/chat.txt"
-  fi
-  if [[ -f /tmp/cookie-drive-mac-popup.png ]]; then
     cp /tmp/cookie-drive-mac-popup.png "$evidence/popup.png"
+    if [[ ! -s "$evidence/chat.txt" || ! -s "$evidence/popup.png" ]]; then
+      fail "evidence is missing chat.txt or popup.png"
+    fi
   fi
 fi
 
