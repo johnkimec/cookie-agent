@@ -1,0 +1,13 @@
+{
+  "name": "cookie-agent",
+  "private": true,
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "pnpm --filter @cookie-agent/core lint",
+    "typecheck": "pnpm --filter @cookie-agent/core typecheck",
+    "test": "pnpm --filter @cookie-agent/core test"
+  }
+}
