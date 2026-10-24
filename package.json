@@ -6,6 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "fake-core": "pnpm --filter @cookie-agent/core fake-core",
     "lint": "pnpm --filter @cookie-agent/core lint",
     "typecheck": "pnpm --filter @cookie-agent/core typecheck",
     "test": "pnpm --filter @cookie-agent/core test"

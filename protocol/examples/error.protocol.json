@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "error": {
+    "code": -32000,
+    "message": "Protocol version not supported",
+    "data": {
+      "reason": "unsupported protocolVersion"
+    }
+  }
+}

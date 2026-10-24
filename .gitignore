@@ -7,6 +7,10 @@ dist/
 coverage/
 *.tsbuildinfo
 
+# Verification proof captured by .cursor/skills/verify-cookie.
+# Cleanup must not delete this. It is not source.
+verify-evidence/
+
 # Secrets and local env
 .env
 .env.*

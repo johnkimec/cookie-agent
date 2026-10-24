@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": "2",
+  "method": "chat.send",
+  "params": {
+    "conversationId": "conv-1",
+    "text": "hi"
+  }
+}

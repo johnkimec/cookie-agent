@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cookie-agent.local/protocol/cookie-rpc.schema.json",
+  "title": "Cookie M0 JSON-RPC message",
+  "description": "One newline-delimited JSON-RPC 2.0 message between the Cookie shell and the agent core. Protocol version 0.1.",
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "entityId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "peerInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "clientCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "chatCancel": { "type": "boolean" }
+      }
+    },
+    "serverCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chat", "runtime"],
+      "properties": {
+        "chat": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stream", "cancel"],
+          "properties": {
+            "stream": { "type": "boolean" },
+            "cancel": { "type": "boolean" }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens"],
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "finishReason": {
+      "enum": ["stop", "cancelled", "length", "error"]
+    },
+    "runtimeState": {
+      "enum": ["up", "down", "loading"]
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._+-]+$"
+    },
+    "initializeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "clientInfo", "capabilities"],
+      "properties": {
+        "protocolVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        },
+        "clientInfo": { "$ref": "#/$defs/peerInfo" },
+        "capabilities": { "$ref": "#/$defs/clientCapabilities" }
+      }
+    },
+    "initializeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "serverInfo", "capabilities"],
+      "properties": {
+        "protocolVersion": { "const": "0.1" },
+        "serverInfo": { "$ref": "#/$defs/peerInfo" },
+        "capabilities": { "$ref": "#/$defs/serverCapabilities" }
+      }
+    },
+    "shutdownParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "shutdownResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok"],
+      "properties": {
+        "ok": { "const": true }
+      }
+    },
+    "chatSendParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "text"],
+      "properties": {
+        "conversationId": { "$ref": "#/$defs/entityId" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 100000 }
+      }
+    },
+    "chatSendResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "messageId"],
+      "properties": {
+        "conversationId": { "$ref": "#/$defs/entityId" },
+        "messageId": { "$ref": "#/$defs/entityId" }
+      }
+    },
+    "chatCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "messageId"],
+      "properties": {
+        "conversationId": { "$ref": "#/$defs/entityId" },
+        "messageId": { "$ref": "#/$defs/entityId" }
+      }
+    },
+    "chatCancelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancelled"],
+      "properties": {
+        "cancelled": { "type": "boolean" }
+      }
+    },
+    "chatDeltaParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "messageId", "index", "text"],
+      "properties": {
+        "conversationId": { "$ref": "#/$defs/entityId" },
+        "messageId": { "$ref": "#/$defs/entityId" },
+        "index": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 100000 }
+      }
+    },
+    "chatDoneParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "messageId", "finishReason", "usage"],
+      "properties": {
+        "conversationId": { "$ref": "#/$defs/entityId" },
+        "messageId": { "$ref": "#/$defs/entityId" },
+        "finishReason": { "$ref": "#/$defs/finishReason" },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    },
+    "emptyParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "runtimeStatusParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "$ref": "#/$defs/runtimeState" },
+        "modelId": {
+          "anyOf": [{ "$ref": "#/$defs/modelId" }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": ["state"],
+            "properties": {
+              "state": { "enum": ["up", "loading"] }
+            }
+          },
+          "then": {
+            "required": ["modelId"],
+            "properties": {
+              "modelId": { "$ref": "#/$defs/modelId" }
+            }
+          }
+        }
+      ]
+    },
+    "errorData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "method": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "errorObject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32700 },
+            "message": { "const": "Parse error" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32600 },
+            "message": { "const": "Invalid Request" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32601 },
+            "message": { "const": "Method not found" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32602 },
+            "message": { "const": "Invalid params" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32603 },
+            "message": { "const": "Internal error" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32000 },
+            "message": { "const": "Protocol version not supported" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32001 },
+            "message": { "const": "Not initialized" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32002 },
+            "message": { "const": "Runtime unavailable" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32003 },
+            "message": { "const": "Chat in progress" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "const": -32004 },
+            "message": { "const": "Shutting down" },
+            "data": { "$ref": "#/$defs/errorData" }
+          }
+        }
+      ]
+    },
+    "initializeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "initialize" },
+        "params": { "$ref": "#/$defs/initializeParams" }
+      }
+    },
+    "initializeResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/initializeResult" }
+      }
+    },
+    "shutdownRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "shutdown" },
+        "params": { "$ref": "#/$defs/shutdownParams" }
+      }
+    },
+    "shutdownResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/shutdownResult" }
+      }
+    },
+    "chatSendRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "chat.send" },
+        "params": { "$ref": "#/$defs/chatSendParams" }
+      }
+    },
+    "chatSendResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/chatSendResult" }
+      }
+    },
+    "chatCancelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "chat.cancel" },
+        "params": { "$ref": "#/$defs/chatCancelParams" }
+      }
+    },
+    "chatCancelResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/chatCancelResult" }
+      }
+    },
+    "chatDeltaNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "chat.delta" },
+        "params": { "$ref": "#/$defs/chatDeltaParams" }
+      }
+    },
+    "chatDoneNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "chat.done" },
+        "params": { "$ref": "#/$defs/chatDoneParams" }
+      }
+    },
+    "runtimeStatusNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "runtime.status" },
+        "params": { "$ref": "#/$defs/runtimeStatusParams" }
+      }
+    },
+    "runtimeStatusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "runtime.status" },
+        "params": { "$ref": "#/$defs/emptyParams" }
+      }
+    },
+    "runtimeStatusResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/runtimeStatusParams" }
+      }
+    },
+    "errorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": {
+          "anyOf": [{ "$ref": "#/$defs/requestId" }, { "type": "null" }]
+        },
+        "error": { "$ref": "#/$defs/errorObject" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/initializeRequest" },
+    { "$ref": "#/$defs/initializeResultMessage" },
+    { "$ref": "#/$defs/shutdownRequest" },
+    { "$ref": "#/$defs/shutdownResultMessage" },
+    { "$ref": "#/$defs/chatSendRequest" },
+    { "$ref": "#/$defs/chatSendResultMessage" },
+    { "$ref": "#/$defs/chatCancelRequest" },
+    { "$ref": "#/$defs/chatCancelResultMessage" },
+    { "$ref": "#/$defs/chatDeltaNotification" },
+    { "$ref": "#/$defs/chatDoneNotification" },
+    { "$ref": "#/$defs/runtimeStatusNotification" },
+    { "$ref": "#/$defs/runtimeStatusRequest" },
+    { "$ref": "#/$defs/runtimeStatusResultMessage" },
+    { "$ref": "#/$defs/errorResponse" }
+  ]
+}
