@@ -169,11 +169,11 @@ private func check(_ value: Any?, tree: KeyTree) throws {
     }
 }
 
-private func object(_ value: Any?) throws -> [String: Any] {
-    guard let object = value as? [String: Any] else {
+private func asDictionary(_ value: Any?) throws -> [String: Any] {
+    guard let dictionary = value as? [String: Any] else {
         throw WireError.invalidRequest
     }
-    return object
+    return dictionary
 }
 
 private func decodeJSON<T: Decodable>(_ type: T.Type, from object: [String: Any]) throws -> T {
@@ -201,7 +201,7 @@ private func decodeError(_ object: [String: Any]) throws -> RpcErrorMessage {
 }
 
 private func decodeRequest(_ object: [String: Any], method: String) throws -> WireMessage {
-    let params = try object(object["params"])
+    let params = try asDictionary(object["params"])
     switch method {
     case "initialize":
         try check(params, tree: KeyTree(
@@ -233,7 +233,7 @@ private func decodeRequest(_ object: [String: Any], method: String) throws -> Wi
 }
 
 private func decodeNotification(_ object: [String: Any], method: String) throws -> WireMessage {
-    let params = try object(object["params"])
+    let params = try asDictionary(object["params"])
     switch method {
     case "chat.delta":
         try allow(params, ["conversationId", "messageId", "index", "text"])
@@ -257,7 +257,7 @@ private func decodeNotification(_ object: [String: Any], method: String) throws 
 }
 
 private func decodeResult(_ object: [String: Any]) throws -> WireMessage {
-    let result = try object(object["result"])
+    let result = try asDictionary(object["result"])
     if result["protocolVersion"] != nil {
         try check(result, tree: KeyTree(
             keys: ["protocolVersion", "serverInfo", "capabilities"],

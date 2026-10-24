@@ -100,20 +100,31 @@ public final class ProcessTransport: CoreTransport, @unchecked Sendable {
 
     /// Nil when the process is still running after `timeout` seconds.
     public func waitForExit(timeout: TimeInterval) async -> Int32? {
-        let process = self.process
+        let box = ProcessBox(process)
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let start = Date()
-                while process.isRunning && Date().timeIntervalSince(start) < timeout {
+                while box.isRunning && Date().timeIntervalSince(start) < timeout {
                     Thread.sleep(forTimeInterval: 0.02)
                 }
-                if process.isRunning {
-                    continuation.resume(returning: nil)
-                } else {
-                    continuation.resume(returning: process.terminationStatus)
-                }
+                continuation.resume(returning: box.exitCodeIfExited())
             }
         }
+    }
+}
+
+/// `Process` is not `Sendable`. The exit wait runs off the caller thread.
+private final class ProcessBox: @unchecked Sendable {
+    private let process: Process
+
+    init(_ process: Process) {
+        self.process = process
+    }
+
+    var isRunning: Bool { process.isRunning }
+
+    func exitCodeIfExited() -> Int32? {
+        process.isRunning ? nil : process.terminationStatus
     }
 }
 
