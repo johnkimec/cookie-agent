@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "9",
+  "error": {
+    "code": -32001,
+    "message": "Not initialized",
+    "data": {
+      "method": "chat.send"
+    }
+  }
+}

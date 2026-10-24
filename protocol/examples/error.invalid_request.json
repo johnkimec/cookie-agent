@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "error": {
+    "code": -32600,
+    "message": "Invalid Request",
+    "data": {
+      "reason": "already initialized"
+    }
+  }
+}

@@ -25,7 +25,8 @@ Implementation is allowed, one milestone task per pull request.
 | `docs/lessons.md` | Append-only lessons. |
 | `core/` | TypeScript agent core. Builds and tests on Linux. |
 | `app/` | Swift shell. macOS only. Today a compile stub. |
-| `protocol/` | JSON-RPC message schemas, shared by Swift and TypeScript. Not written yet. |
+| `protocol/` | JSON-RPC 2.0 schemas, examples, and the M0 spec. Shared by Swift (Codable, not written yet) and TypeScript (`core/src/protocol/`). |
+| `.cursor/skills/verify-cookie/` | Verification skill and M0 feature map. Linux drives the fake core over stdio. The Mac app drive stays unreachable until the shell exists. |
 | `evals/` | Evaluation tasks from the project doc. Not written yet. |
 | `assets/` | Rive file and pose exports. Not covered by Apache-2.0. See `BRAND.md`. |
 | `BRAND.md` | Reservation of Cookie's name and mascot art. |
@@ -46,6 +47,8 @@ pnpm --filter @cookie-agent/core test
 
 `pnpm lint`, `pnpm typecheck`, and `pnpm test` run the same three commands.
 
+`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. See [protocol/README.md](protocol/README.md).
+
 On a Mac, the shell stub compiles with:
 
 ```bash
@@ -57,6 +60,7 @@ There is no app to launch. Linux CI does not build `app/`.
 ## Conventions
 
 - Small pull requests. One milestone task from the project doc per PR. Put the milestone id in the title, for example `M0: spawn the core over stdio`.
+- Every pull request from M0 onward updates the feature file it touches under `.cursor/skills/verify-cookie/features/`. Set a sub-feature to `status: verified (evidence path)` only when that pull request captured evidence with the verify-cookie skill. Otherwise leave `status: planned`. Do not mark a feature verified from a different feature's transcript.
 - Tests are required for every behavior change. A core change needs a vitest test that fails before the change and passes after it.
 - Never commit model weights (`*.gguf`, or any file a future model manifest would download), API keys, `.env` files, or Keychain exports.
 - Never commit Cookie's name or mascot art as if Apache-2.0 covered them. Art stays under `BRAND.md`.

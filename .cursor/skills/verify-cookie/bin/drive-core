@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Drive Cookie verification. See .cursor/skills/verify-cookie/SKILL.md.
+set -euo pipefail
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)"
+cd "$ROOT"
+exec node --experimental-strip-types "$ROOT/core/src/verify-drive.ts" "$@"

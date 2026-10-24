@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "4",
+  "error": {
+    "code": -32002,
+    "message": "Runtime unavailable",
+    "data": {
+      "reason": "runtime is down"
+    }
+  }
+}
