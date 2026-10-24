@@ -2,7 +2,7 @@
 
 M0 contract between the Swift shell and the TypeScript core. Newline-delimited JSON-RPC 2.0 on stdio. Version `0.1`.
 
-The schema is [`schema/cookie-rpc.schema.json`](schema/cookie-rpc.schema.json). Golden messages are in [`examples/`](examples/). Hand-written TypeScript types live in [`core/src/protocol/types.ts`](../core/src/protocol/types.ts). Swift mirrors them with Codable when task B lands. This directory does not contain Swift.
+The schema is [`schema/cookie-rpc.schema.json`](schema/cookie-rpc.schema.json). Golden messages are in [`examples/`](examples/). Hand-written TypeScript types live in [`core/src/protocol/types.ts`](../core/src/protocol/types.ts). Swift Codable types live in [`app/Sources/CookieProtocol`](../app/Sources/CookieProtocol). This directory does not contain Swift.
 
 The core is the JSON-RPC server. The shell spawns it and is the client. Either side may send `runtime.status` notifications. The core's stdout is protocol only. Logs go to stderr. There is no port on this channel. The core reaches `llama-server` over HTTP on `127.0.0.1`, which is a different channel and is not framed here.
 
@@ -138,7 +138,7 @@ These are process environment variables, not JSON-RPC fields.
 
 | Variable | Meaning |
 | --- | --- |
-| `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). Verification sets `18080` and must not use `8080`. |
+| `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). The shell leaves an unset or empty value unset so the core can apply that default. Verification sets `18080` and must not use `8080`. |
 | `COOKIE_THINKING` | Real core only. `0` or `1`. Default `0`. `0` turns Qwen thinking off (`reasoning` `none`, and `chat_template_kwargs.enable_thinking` false). `1` leaves thinking on. Any other value makes the process exit 1 before it speaks protocol. |
 | `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. The real core does not read it in M0. |
 | `COOKIE_FAKE_DELTA_MS` | Fake core only. Milliseconds to wait between deltas so `chat.cancel` can land. `0`–`10000`. Default `0`. |
@@ -175,7 +175,7 @@ pnpm core
 
 ## Swift
 
-Task B adds Codable types under `app/`. No generator and no Swift code in this milestone. Mirror the JSON keys so synthesized Codable matches, with these exceptions:
+Task B added Codable types under `app/Sources/CookieProtocol`. No generator. This directory still has no Swift. Mirror the JSON keys so synthesized Codable matches, with these exceptions:
 
 - Request `id` is a `String`. Do not send an `Int`. Error responses need `id` to decode as `String?` because parse errors use JSON `null`.
 - Notifications omit `id`. Decode them as a separate type, or as a request type whose `id` is optional and absent.

@@ -1,0 +1,586 @@
+#!/bin/bash
+# Mac recipe for the menu bar and the hotkey popup.
+# Status stays planned until a Mac run writes verify-evidence/.
+# On Linux this is the same reachability stub as drive-core.
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' "verified-unreachable on Linux: requires macOS"
+  exit 2
+fi
+
+feature="${1:-all}"
+if [[ "$feature" == "--evidence" ]]; then
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--evidence dir]" >&2
+  exit 2
+fi
+
+evidence=""
+if [[ "${2:-}" == "--evidence" ]]; then
+  evidence="${3:-}"
+fi
+
+port="${COOKIE_LLAMA_PORT:-}"
+data="${COOKIE_DATA_DIR:-}"
+if [[ "$port" != "18080" ]]; then
+  printf '%s\n' "not-ok" "COOKIE_LLAMA_PORT must be 18080"
+  exit 1
+fi
+if [[ -z "$data" || "$data" == *"Application Support/Cookie"* ]]; then
+  printf '%s\n' "not-ok" "COOKIE_DATA_DIR must be a fresh temp directory, not Application Support"
+  exit 1
+fi
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+APP="${COOKIE_APP:-"$ROOT/dist/Cookie Agent.app"}"
+BIN="$APP/Contents/MacOS/CookieAgent"
+if [[ ! -x "$BIN" ]]; then
+  printf '%s\n' "not-ok" "set COOKIE_APP to Cookie Agent.app (missing $BIN)"
+  exit 1
+fi
+
+export COOKIE_DATA_DIR="$data"
+export COOKIE_LLAMA_PORT=18080
+export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
+export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+
+log() { printf '%s\n' "$*"; }
+
+APP_PID=""
+cleanup() {
+  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
+    kill "$APP_PID" 2>/dev/null || true
+    wait "$APP_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+log "launch $BIN"
+"$BIN" &
+APP_PID=$!
+
+osascript_run() {
+  /usr/bin/osascript "$@"
+}
+
+fail() {
+  log "not-ok"
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+# System Events names the process after the executable, CookieAgent,
+# when the binary inside the bundle is launched directly.
+# The frontmost process is read from System Events, not from inside
+# `tell process "CookieAgent"` (that lookup is error -1728).
+read_menu() {
+  osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+    set itemLabel to description of statusItem
+    click statusItem
+    delay 0.4
+    set names to name of menu items of menu 1 of statusItem
+    click statusItem
+  end tell
+  set frontApp to name of first process whose frontmost is true
+  return itemLabel & linefeed & (names as string) & linefeed & "frontmost " & frontApp
+end tell
+APPLESCRIPT
+}
+
+frontmost_app() {
+  osascript_run -e 'tell application "System Events" to get name of first process whose frontmost is true'
+}
+
+# Primary open path. Synthetic ⌥Space and option-click are not this path.
+open_via_ask() {
+  osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+    click statusItem
+    delay 0.4
+    set itemCount to 0
+    try
+      set itemCount to count of menu items of menu 1 of statusItem
+    end try
+    if itemCount is 0 then
+      click statusItem
+      delay 0.4
+    end if
+    click menu item "Ask Cookie…" of menu 1 of statusItem
+  end tell
+end tell
+APPLESCRIPT
+}
+
+# One line per identified element: identifier, role, value. Never coerce
+# `entire contents` to a string (error -1700).
+# A handler is compiled outside the caller's tell. `attribute` is only a
+# System Events term, so axid and axtext tell System Events themselves.
+dump_popup_ax() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+on axtext(elem)
+  tell application "System Events"
+    set oldDelims to AppleScript's text item delimiters
+    try
+      set rawValue to value of elem
+      if class of rawValue is list then
+        set AppleScript's text item delimiters to " "
+        set rawValue to rawValue as text
+      end if
+      set AppleScript's text item delimiters to oldDelims
+      return rawValue as text
+    on error
+      set AppleScript's text item delimiters to oldDelims
+      return ""
+    end try
+  end tell
+end axtext
+
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      set candidateName to ""
+      set candidateSubrole to ""
+      try
+        set candidateName to name of candidate
+      end try
+      try
+        set candidateSubrole to subrole of candidate as text
+      end try
+      if candidateName is "Ask Cookie…" or candidateSubrole is "AXSystemDialog" then
+        set popupWindow to candidate
+      end if
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set linesOut to {}
+    set windowId to my axid(popupWindow)
+    if windowId is not "" then set end of linesOut to windowId & tab & "AXWindow" & tab & ""
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is not "" then
+        set theRole to ""
+        try
+          set theRole to role of elem as text
+        end try
+        set theValue to my axtext(elem)
+        set end of linesOut to theId & tab & theRole & tab & theValue
+      end if
+    end repeat
+    if linesOut is {} then error "popup exposed no AXIdentifier"
+    set oldDelims to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set output to linesOut as text
+    set AppleScript's text item delimiters to oldDelims
+    return output
+  end tell
+end tell
+APPLESCRIPT
+}
+
+require_input_id() {
+  python3 - <<'PY'
+import pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-ax.txt").read_text()
+ids = [line.split("\t", 1)[0] for line in text.splitlines() if line.strip()]
+if "cookie.popup.input" not in ids:
+    print("missing cookie.popup.input")
+    print(text)
+    sys.exit(1)
+print("popup identifiers ok")
+PY
+}
+
+# Set the field through AX. System Events keystrokes go to the frontmost
+# app, not this non-activating panel. AXConfirm is the field's Return.
+send_chat() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      set candidateName to ""
+      try
+        set candidateName to name of candidate
+      end try
+      if candidateName is "Ask Cookie…" then set popupWindow to candidate
+    end repeat
+    if popupWindow is missing value then
+      repeat with candidate in windows
+        try
+          if subrole of candidate as text is "AXSystemDialog" then set popupWindow to candidate
+        end try
+      end repeat
+    end if
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set inputElem to missing value
+    set sendElem to missing value
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      set theRole to ""
+      try
+        set theRole to role of elem as text
+      end try
+      if theId is "cookie.popup.input" then
+        if theRole is "AXTextArea" or theRole is "AXTextField" or inputElem is missing value then
+          set inputElem to elem
+        end if
+      end if
+      if theId is "cookie.popup.send" then set sendElem to elem
+    end repeat
+    if inputElem is missing value then error "missing cookie.popup.input"
+    set value of inputElem to "hello from drive-mac"
+    delay 0.2
+    set confirmed to false
+    try
+      perform action "AXConfirm" of inputElem
+      set confirmed to true
+    end try
+    if confirmed is false then
+      if sendElem is missing value then error "cannot confirm cookie.popup.input"
+      click sendElem
+    end if
+  end tell
+end tell
+APPLESCRIPT
+}
+
+cookie_turn_value() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+on axtext(elem)
+  tell application "System Events"
+    set oldDelims to AppleScript's text item delimiters
+    try
+      set rawValue to value of elem
+      if class of rawValue is list then
+        set AppleScript's text item delimiters to " "
+        set rawValue to rawValue as text
+      end if
+      set AppleScript's text item delimiters to oldDelims
+      set asText to rawValue as text
+      if asText is not "" and asText is not "cookie" then return asText
+    on error
+      set AppleScript's text item delimiters to oldDelims
+    end try
+    try
+      set named to name of elem as text
+      if named is not "" and named is not "cookie" then return named
+    end try
+    try
+      set described to description of elem as text
+      if described is not "" and described is not "cookie" then return described
+    end try
+    return ""
+  end tell
+end axtext
+
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then
+      repeat with candidate in windows
+        try
+          if subrole of candidate as text is "AXSystemDialog" then set popupWindow to candidate
+        end try
+      end repeat
+    end if
+    if popupWindow is missing value then return "missing-window"
+    set nodes to entire contents of popupWindow
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is "cookie.turn.cookie.0" or theId is "cookie.turn.cookie.1" then
+        set theValue to my axtext(elem)
+        if theValue is not "" and theValue is not "cookie" then
+          return theId & tab & theValue
+        end if
+      end if
+    end repeat
+    return "waiting"
+  end tell
+end tell
+APPLESCRIPT
+}
+
+close_popup() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+tell application "System Events"
+  if not (exists process "CookieAgent") then return
+  tell process "CookieAgent"
+    repeat with candidate in windows
+      try
+        if name of candidate is not "Ask Cookie…" then
+          -- keep looking
+        else
+          set nodes to entire contents of candidate
+          repeat with elem in nodes
+            if my axid(elem) is "cookie.popup.input" then
+              try
+                perform action "AXCancel" of elem
+                return
+              end try
+            end if
+          end repeat
+        end if
+      end try
+    end repeat
+  end tell
+end tell
+APPLESCRIPT
+}
+
+popup_is_open() {
+  osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "CookieAgent") then return "no"
+  tell process "CookieAgent"
+    repeat with candidate in windows
+      try
+        if name of candidate is "Ask Cookie…" then return "yes"
+      end try
+    end repeat
+  end tell
+end tell
+return "no"
+APPLESCRIPT
+}
+
+option_click_status() {
+  osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+  end tell
+  -- System-wide, not inside the process tell. The panel reads NSEvent.modifierFlags.
+  key down option
+  delay 0.1
+  try
+    tell process "CookieAgent" to click statusItem
+    key up option
+  on error errText
+    try
+      key up option
+    end try
+    error errText
+  end try
+end tell
+APPLESCRIPT
+}
+
+log "wait for menu bar"
+ready=""
+for _ in $(seq 1 30); do
+  if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+    ready=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ -z "$ready" ]]; then
+  log "not-ok"
+  log "menu bar did not appear"
+  cat /tmp/cookie-drive-mac-menu.err || true
+  exit 1
+fi
+log "menu"
+cat /tmp/cookie-drive-mac-menu.txt
+
+python3 - <<'PY' || fail "menu strings"
+import pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-menu.txt").read_text()
+required = ["Ask Cookie…", "Local-only mode", "Quit Cookie", "🐾 Cookie · on-device · fake-local"]
+missing = [item for item in required if item not in text]
+if missing:
+    print("missing " + ", ".join(missing))
+    sys.exit(1)
+print("menu strings ok")
+PY
+
+drive_popup=0
+drive_chat=0
+if [[ "$feature" == "hotkey-popup" || "$feature" == "chat" || "$feature" == "all" ]]; then
+  drive_popup=1
+fi
+if [[ "$feature" == "chat" || "$feature" == "all" ]]; then
+  drive_chat=1
+fi
+
+if [[ "$drive_popup" == "1" ]]; then
+  before="$(frontmost_app)"
+  log "frontmost-before $before"
+  log "open via Ask Cookie…"
+  open_via_ask
+  sleep 0.6
+  after="$(frontmost_app)"
+  log "frontmost-after $after"
+  if [[ "$before" != "$after" ]]; then
+    fail "frontmost changed from $before to $after"
+  fi
+  if ! dump_popup_ax > /tmp/cookie-drive-mac-ax.txt; then
+    fail "popup accessibility read failed"
+  fi
+  log "popup identifiers"
+  cat /tmp/cookie-drive-mac-ax.txt
+  require_input_id || fail "missing cookie.popup.input"
+fi
+
+if [[ "$drive_chat" == "1" ]]; then
+  log "send chat"
+  send_chat
+  turn_line=""
+  for _ in $(seq 1 40); do
+    turn_line="$(cookie_turn_value || true)"
+    case "$turn_line" in
+      cookie.turn.cookie.*)
+        break
+        ;;
+    esac
+    sleep 0.25
+  done
+  if [[ "$turn_line" != cookie.turn.cookie.* ]]; then
+    dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
+    log "popup identifiers after wait"
+    cat /tmp/cookie-drive-mac-ax.txt || true
+    fail "cookie turn did not gain text (last: ${turn_line:-empty})"
+  fi
+  log "chat $turn_line"
+  printf '%s\n' "$turn_line" > /tmp/cookie-drive-mac-chat.txt
+  shot="/tmp/cookie-drive-mac-popup.png"
+  screencapture -x "$shot"
+  if [[ ! -s "$shot" ]]; then
+    fail "screencapture wrote no file"
+  fi
+  log "screenshot $shot"
+fi
+
+if [[ -n "$evidence" ]]; then
+  mkdir -p "$evidence"
+  {
+    printf '%s\n' "drive-mac $feature"
+    printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
+    printf '%s\n' "COOKIE_LLAMA_PORT=$COOKIE_LLAMA_PORT"
+  } > "$evidence/command.txt"
+  cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
+  if [[ -f /tmp/cookie-drive-mac-ax.txt ]]; then
+    cp /tmp/cookie-drive-mac-ax.txt "$evidence/ax.txt"
+  fi
+  if [[ -f /tmp/cookie-drive-mac-chat.txt ]]; then
+    cp /tmp/cookie-drive-mac-chat.txt "$evidence/chat.txt"
+  fi
+  if [[ -f /tmp/cookie-drive-mac-popup.png ]]; then
+    cp /tmp/cookie-drive-mac-popup.png "$evidence/popup.png"
+  fi
+fi
+
+if [[ "$feature" == "menu-bar-icon" || "$feature" == "hotkey-popup" || "$feature" == "all" ]]; then
+  log "option-click"
+  if [[ "$(popup_is_open)" == "yes" ]]; then
+    close_popup
+    sleep 0.4
+  fi
+  if [[ "$(popup_is_open)" == "yes" ]]; then
+    fail "popup stayed open, so option-click was not a fresh open"
+  fi
+  option_click_status
+  sleep 0.6
+  if [[ "$(popup_is_open)" != "yes" ]]; then
+    fail "option-click did not open the Ask Cookie window"
+  fi
+  log "option-click opened popup"
+fi
+
+log "quit via menu"
+osascript_run <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+    click statusItem
+    delay 0.3
+    click menu item "Quit Cookie" of menu 1 of statusItem
+  end tell
+end tell
+APPLESCRIPT
+
+log "ok"
+log "Mac proof is pending until this transcript is saved under verify-evidence/ and the feature files are updated."

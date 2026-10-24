@@ -24,9 +24,9 @@ Implementation is allowed, one milestone task per pull request.
 | `docs/cookie-agent-ui-spec.md` | UI, branding, and packaging spec. |
 | `docs/lessons.md` | Append-only lessons. |
 | `core/` | TypeScript agent core. Builds and tests on Linux. |
-| `app/` | Swift shell. macOS only. Today a compile stub. |
+| `app/` | Swift shell. macOS only. Menu bar, hotkey popup, and the core supervisor. |
 | `protocol/` | JSON-RPC 2.0 schemas, examples, and the M0 spec. Shared by Swift (Codable, not written yet) and TypeScript (`core/src/protocol/`). |
-| `.cursor/skills/verify-cookie/` | Verification skill and M0 feature map. Linux drives the fake core, or the real core with `--core real`, over stdio. The Mac app drive stays unreachable until the shell exists. |
+| `.cursor/skills/verify-cookie/` | Verification skill and M0 feature map. Linux drives the fake core, or the real core with `--core real`, over stdio. The Mac menu and popup are driven by `drive-mac`; that proof is still pending. |
 | `evals/` | Evaluation tasks from the project doc. Not written yet. |
 | `assets/` | Rive file and pose exports. Not covered by Apache-2.0. See `BRAND.md`. |
 | `BRAND.md` | Reservation of Cookie's name and mascot art. |
@@ -49,13 +49,16 @@ pnpm --filter @cookie-agent/core test
 
 `pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `pnpm core` is the real core: it dials llama-server on `127.0.0.1:$COOKIE_LLAMA_PORT` (default `8080`). Thinking stays off unless `COOKIE_THINKING=1`. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. `--core fake` is the default. `--core real` drives the real core against a stub on port `18080`. See [protocol/README.md](protocol/README.md).
 
-On a Mac, the shell stub compiles with:
+On a Mac, build and test the shell, then launch it against the fake core. `open` drops the shell environment, so run the executable. Linux CI does not build `app/`. macOS CI does.
 
 ```bash
-swift build --package-path app
+swift test --package-path app
+app/Scripts/package-app.sh
+export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"
+export COOKIE_LLAMA_PORT=18080
+export COOKIE_CORE_CWD="$(pwd)"
+"dist/Cookie Agent.app/Contents/MacOS/CookieAgent"
 ```
-
-There is no app to launch. Linux CI does not build `app/`.
 
 ## Conventions
 

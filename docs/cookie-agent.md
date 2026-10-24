@@ -33,6 +33,8 @@ Recorded before any product code, from the technical design and the UI spec.
 | D-2026-10-24-13 | Repo layout | Foundation layout: `app/`, `core/`, `protocol/`, `evals/`, `assets/`. | UI spec sketch: `apps/mac/`, `brand/`, `runtime/`, `scripts/`, `core/test/evals/` | Supersedes the repo tree sketched in `docs/cookie-agent-ui-spec.md` §8.2. That sketch had no earlier log id. It stays in the spec as history. New code uses the foundation paths. |
 | D-2026-10-24-14 | M0 process | Contract-first walking skeleton. JSON-RPC schemas in `protocol/` plus a verification skill `.cursor/skills/verify-cookie/` with a feature map land first. The parallel M0 tasks follow. Each of those PRs updates its feature file with captured evidence. | Build M0 features before the contract and the feature map | The shared contract and the feature map land before parallel M0 work, and each later PR records evidence on its feature file. |
 
+TODO (M0 shell, not a decision): when `COOKIE_DATA_DIR` is unset, the shell keeps using a temporary directory. When memory lands, that default moves to `~/Library/Application Support/Cookie`.
+
 Supersession example, not itself a decision: a later entry would say `Supersedes D-2026-10-24-03` and state the new choice. `D-2026-10-24-03` would remain in the log.
 
 ## Technical design

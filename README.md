@@ -20,7 +20,7 @@ brew install --cask johnkimec/tap/cookie-agent
 
 Not affiliated with "Cookie", the browser-cookie manager by SweetP Productions.
 
-This repository is the design and an empty skeleton. There is no app yet. The plan is waiting for approval in [docs/cookie-agent.md](docs/cookie-agent.md).
+The plan is approved in [docs/cookie-agent.md](docs/cookie-agent.md). The M0 Mac shell lives in [app/](app/README.md): a menu bar, an ⌥Space popup, and a supervisor for the fake core. Launch that executable with `COOKIE_DATA_DIR` and `COOKIE_LLAMA_PORT=18080` set. Do not point those at a real Cookie instance.
 
 ## Architecture
 
