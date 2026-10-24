@@ -19,13 +19,7 @@ final class HotkeyCenter: @unchecked Sendable {
         )
         let target = GetApplicationEventTarget()
         let pointer = Unmanaged.passUnretained(self).toOpaque()
-        let callback: EventHandlerProcPtr = { _, _, userData in
-            guard let userData else { return noErr }
-            let center = Unmanaged<HotkeyCenter>.fromOpaque(userData).takeUnretainedValue()
-            center.fire()
-            return noErr
-        }
-        InstallEventHandler(target, callback, 1, &spec, pointer, &handler)
+        InstallEventHandler(target, hotkeyCallback, 1, &spec, pointer, &handler)
         let id = EventHotKeyID(signature: OSType(0x434B_4945), id: 1)
         let status = RegisterEventHotKey(
             UInt32(kVK_Space),
@@ -41,6 +35,13 @@ final class HotkeyCenter: @unchecked Sendable {
             ))
         }
     }
+}
+
+private let hotkeyCallback: EventHandlerProcPtr = { _, _, userData in
+    guard let userData else { return noErr }
+    let center = Unmanaged<HotkeyCenter>.fromOpaque(userData).takeUnretainedValue()
+    center.fire()
+    return noErr
 }
 
 extension HotkeyCenter {

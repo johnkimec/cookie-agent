@@ -303,12 +303,13 @@ struct TurnRow: View {
 
 struct CookiePlaceholder: View {
     var pose: PopupPose
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let fur = colorScheme == .dark ? Color(white: 0.78) : Color(white: 0.97)
+        let outline = colorScheme == .dark ? Color(white: 0.9) : Color(white: 0.42)
         Canvas { context, size in
             let rect = CGRect(origin: .zero, size: size)
-            let fur = Color(nsColor: furColor)
-            let outline = Color(nsColor: outlineColor)
             let earsRaised = pose == .listening
             let earY: CGFloat = earsRaised ? size.height * 0.42 : size.height * 0.12
             let ear = CGSize(width: size.width * 0.22, height: size.height * 0.42)
@@ -361,14 +362,4 @@ struct CookiePlaceholder: View {
         .opacity(pose == .offline ? 0.55 : 1)
         .help(popupPoseVoiceOver(pose))
     }
-}
-
-private let furColor = NSColor(name: nil) { appearance in
-    let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    return dark ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.97, alpha: 1)
-}
-
-private let outlineColor = NSColor(name: nil) { appearance in
-    let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    return dark ? NSColor(calibratedWhite: 0.9, alpha: 1) : NSColor(calibratedWhite: 0.42, alpha: 1)
 }

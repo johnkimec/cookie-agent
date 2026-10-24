@@ -69,7 +69,8 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(chat.prepareSend(runtime: .loading), .refused)
         XCTAssertEqual(chat.draft, "hello")
         XCTAssertTrue(chat.turns.isEmpty)
-        XCTAssertEqual(PopupConversation().prepareSend(runtime: .up), .ignore)
+        var empty = PopupConversation()
+        XCTAssertEqual(empty.prepareSend(runtime: .up), .ignore)
     }
 
     func testStreamRendersYouAndCookieWithBadge() {
@@ -200,8 +201,9 @@ final class SupervisorTests: XCTestCase {
         XCTAssertEqual(ack.messageId, "msg-1")
         let done = try await supervisor.waitForDone(messageId: "msg-1")
         XCTAssertEqual(done.finishReason, .stop)
+        let partial = await supervisor.partialText(messageId: "msg-1")
         XCTAssertEqual(
-            await supervisor.partialText(messageId: "msg-1"),
+            partial,
             "I'm here. This reply is from the fake core, with no model loaded."
         )
 
@@ -271,8 +273,9 @@ final class FakeCoreSpawnTests: XCTestCase {
             XCTAssertEqual(ack.messageId, "msg-1")
             let done = try await supervisor.waitForDone(messageId: ack.messageId)
             XCTAssertEqual(done.finishReason, .stop)
+            let partial = await supervisor.partialText(messageId: ack.messageId)
             XCTAssertEqual(
-                await supervisor.partialText(messageId: ack.messageId),
+                partial,
                 "I'm here. This reply is from the fake core, with no model loaded."
             )
             try await supervisor.shutdown()
