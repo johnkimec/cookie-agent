@@ -14,7 +14,11 @@ import {
   readIndexEmbedTimeoutMs,
   readQueryEmbedTimeoutMs,
 } from "./memory/http-embedder.ts";
-import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
+import {
+  HybridRetriever,
+  readForgottenTurnIds,
+  readRrfWeights,
+} from "./memory/hybrid-retrieve.ts";
 import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
 import {
@@ -64,6 +68,7 @@ export function startStdioCore(
       embedder: indexEmbedder,
       vectors,
       available: embedUp,
+      forgottenTurnIds: () => readForgottenTurnIds(store),
     });
     provider = createLlamaServerProvider({ port, thinking });
     const reranker = new ModelReranker({
