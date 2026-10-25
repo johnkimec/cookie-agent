@@ -215,7 +215,7 @@ Set a feature sub-feature to `status: verified (verify-evidence/...)` only when 
 .cursor/skills/verify-cookie/bin/drive-core cleanup
 ```
 
-Stdout is `ok`. Cleanup reads `/tmp/cookie-verify/pids/` (or `COOKIE_VERIFY_RUNTIME` if set) and signals only pids whose `/proc/<pid>/cmdline` contains `fake-core.ts` or `core/src/index.ts`. It never signals pid 1 or its own pid. It deletes scratch data directories recorded under that runtime root and nothing else. A path outside the runtime root is left alone, including `verify-evidence/` and any `COOKIE_DATA_DIR` that was not created there. The `--core real` stub runs inside the drive process and exits with it.
+Stdout is `ok`. Cleanup reads `/tmp/cookie-verify/pids/` (or `COOKIE_VERIFY_RUNTIME` if set) and signals only pids whose `/proc/<pid>/cmdline` contains `fake-core.ts` or `core/src/index.ts`. It never signals pid 1 or its own pid. It deletes scratch data directories recorded under that runtime root and nothing else. The runtime root and the candidate are both realpath'd before that comparison, so a symlinked root still matches and `/tmp` versus `/private/tmp` still matches. A path whose realpath throws is left alone. A path outside the runtime root is left alone, including `verify-evidence/` and any `COOKIE_DATA_DIR` that was not created there. The `--core real` stub runs inside the drive process and exits with it.
 
 Run cleanup after a failed drive too, so a core is not left running. Then confirm the evidence files are still on disk.
 

@@ -4,8 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { chunkText, MAX_CHUNK_TOKENS } from "./chunk.ts";
 import { FakeEmbedder } from "./embedder.ts";
-import { prefixDocument, QUERY_PREFIX } from "./http-embedder.ts";
-import { ContentIndexer } from "./index-content.ts";
+import {
+  DEFAULT_EMBED_BATCH_SIZE,
+  prefixDocument,
+  QUERY_PREFIX,
+} from "./http-embedder.ts";
+import { ContentIndexer, INDEX_PASS_CHUNK_CAP } from "./index-content.ts";
 import { openMemoryDatabase } from "./migrate.ts";
 import { SqliteVecIndex } from "./sqlite-vec-index.ts";
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
@@ -151,6 +155,172 @@ describe("content indexer", () => {
     expect(await new SqliteVecIndex(db).knn("vec_chunks", unit(), 1)).toEqual(
       [],
     );
+    db.close();
+  });
+
+  it("indexes about 64 chunks per pass and leaves the rest", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let embedded = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          embedded += 1;
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    const insert = db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES (?, 'ses', 'user', ?, ?)`,
+    );
+    const total = INDEX_PASS_CHUNK_CAP + DEFAULT_EMBED_BATCH_SIZE;
+    for (let index = 0; index < total; index += 1) {
+      insert.run(`t${index}`, `note ${index}`, index + 2);
+    }
+    const first = await indexer.indexPending();
+    expect(first).toEqual({
+      turns: INDEX_PASS_CHUNK_CAP,
+      facts: 0,
+      chunks: INDEX_PASS_CHUNK_CAP,
+      skipped: false,
+    });
+    expect(embedded).toBe(INDEX_PASS_CHUNK_CAP);
+    const second = await indexer.indexPending();
+    expect(second.chunks).toBe(DEFAULT_EMBED_BATCH_SIZE);
+    expect(second.skipped).toBe(false);
+    expect(embedded).toBe(total);
+    expect(db.prepare("SELECT count(*) AS n FROM chunks").get()).toEqual({
+      n: total,
+    });
+    const third = await indexer.indexPending();
+    expect(third).toEqual({ turns: 0, facts: 0, chunks: 0, skipped: false });
+    db.close();
+  });
+
+  it("commits an embed batch before the next batch runs", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let embedded = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          embedded += 1;
+          if (embedded > DEFAULT_EMBED_BATCH_SIZE) {
+            throw new Error("stop after the first batch");
+          }
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    const insert = db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES (?, 'ses', 'user', ?, ?)`,
+    );
+    for (let index = 0; index < DEFAULT_EMBED_BATCH_SIZE + 4; index += 1) {
+      insert.run(`b${index}`, `batch ${index}`, index + 2);
+    }
+    const stopped = await indexer.indexPending();
+    expect(stopped.skipped).toBe(true);
+    expect(stopped.chunks).toBe(DEFAULT_EMBED_BATCH_SIZE);
+    expect(db.prepare("SELECT count(*) AS n FROM embed_index").get()).toEqual({
+      n: DEFAULT_EMBED_BATCH_SIZE,
+    });
+    expect(db.prepare("SELECT count(*) AS n FROM chunks").get()).toEqual({
+      n: DEFAULT_EMBED_BATCH_SIZE,
+    });
+    db.close();
+  });
+
+  it("deletes vectors for superseded or expired facts and does not embed them", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    const calls: string[] = [];
+    let now = 1_000;
+    let up = true;
+    const embedder = {
+      async embed(text: string): Promise<Float32Array> {
+        calls.push(text);
+        return vectorFor(text);
+      },
+    };
+    const indexer = new ContentIndexer({
+      db,
+      embedder,
+      vectors: new SqliteVecIndex(db),
+      now: () => now,
+      model: "test-embed",
+      available: async () => up,
+    });
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, valid_until, created_at)
+       VALUES ('live', 'ECE midterm is Friday', 'event', 1, 5000, 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, valid_until, created_at)
+       VALUES ('old', 'already expired', 'event', 1, 100, 2)`,
+    ).run();
+    const indexed = await indexer.indexPending();
+    expect(indexed.facts).toBe(1);
+    expect(calls.some((text) => text.includes("already expired"))).toBe(false);
+    const index = new SqliteVecIndex(db);
+    const query = vectorFor(prefixDocument("ECE midterm is Friday"));
+    expect(
+      (await index.knn("vec_facts", query, 5)).map((hit) => hit.id),
+    ).toEqual(["live"]);
+
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, valid_until, created_at)
+       VALUES ('tomb', 'tombstone', 'event', 1, 1, 3)`,
+    ).run();
+    db.prepare(
+      "UPDATE facts SET superseded_by = 'tomb' WHERE id = 'live'",
+    ).run();
+    const before = calls.length;
+    const dropped = await indexer.indexPending();
+    expect(dropped.facts).toBe(0);
+    expect(calls).toHaveLength(before);
+    expect(await index.knn("vec_facts", query, 5)).toEqual([]);
+    expect(
+      db
+        .prepare("SELECT count(*) AS n FROM embed_index WHERE source = 'fact'")
+        .get(),
+    ).toEqual({ n: 0 });
+
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, created_at)
+       VALUES ('keep', 'keep this fact', 'event', 1, 4)`,
+    ).run();
+    up = true;
+    expect((await indexer.indexPending()).facts).toBe(1);
+    const kept = vectorFor(prefixDocument("keep this fact"));
+    expect((await index.knn("vec_facts", kept, 1))[0]?.id).toBe("keep");
+    db.prepare(
+      "UPDATE facts SET superseded_by = 'tomb' WHERE id = 'keep'",
+    ).run();
+    up = false;
+    const whileDown = await indexer.indexPending();
+    expect(whileDown.skipped).toBe(true);
+    expect(await index.knn("vec_facts", kept, 1)).toEqual([]);
+    now = 9_000;
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, valid_until, created_at)
+       VALUES ('soon', 'expires later', 'event', 1, 8000, 5)`,
+    ).run();
+    up = true;
+    expect((await indexer.indexPending()).facts).toBe(0);
+    expect(calls.some((text) => text.includes("expires later"))).toBe(false);
     db.close();
   });
 });
