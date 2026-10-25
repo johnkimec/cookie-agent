@@ -7,6 +7,7 @@ import { InMemoryDerivedMemory, randomIds } from "./derived.ts";
 import type { Embedder } from "./embedder.ts";
 import { FakeEmbedder } from "./embedder.ts";
 import type { MemoryHost } from "./host.ts";
+import type { Reflector } from "./reflect.ts";
 import type { TextComplete } from "./reflect-job.ts";
 import { LocalReflector } from "./reflect-job.ts";
 import type { AcPower } from "./schedule.ts";
@@ -32,6 +33,12 @@ import { InMemoryVectorIndex } from "./vectors.ts";
 export interface MemoryRuntime {
   host: MemoryHost;
   scheduler: IdleScheduler;
+  /**
+   * The same `LocalReflector` the idle scheduler calls.
+   * A new conversation ends the previous session and cancels that
+   * timer, so the caller awaits this before the next retrieval.
+   */
+  reflector: Reflector;
   store: MemoryStore;
   derived: DerivedMemoryStore;
   slot: ModelSlot;
@@ -217,6 +224,7 @@ export function createMemoryRuntime(
   return {
     host,
     scheduler,
+    reflector,
     store,
     derived,
     slot,
