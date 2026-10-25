@@ -62,6 +62,16 @@ ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 DRIVE_BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=drive-mac-pid.sh
 source "$DRIVE_BIN_DIR/drive-mac-pid.sh"
+# Captured before any launch replaces HOME. An empty HOME falls through to
+# dscl or getent so the comparison target stays the account home.
+REAL_HOME="${HOME:-}"
+if [[ -z "$REAL_HOME" ]]; then
+  REAL_HOME="$(directory_service_home || true)"
+fi
+if [[ -z "$REAL_HOME" ]]; then
+  printf '%s\n' "not-ok" "refusing to launch: cannot resolve the real home" >&2
+  exit 4
+fi
 DRIVE_PROCESS_LIB="$DRIVE_BIN_DIR/cookie-drive-process.applescript"
 APP="${COOKIE_APP:-"$ROOT/dist/Cookie Agent.app"}"
 BIN="$APP/Contents/MacOS/CookieAgent"
@@ -127,6 +137,7 @@ stop_pid() {
 }
 DECOY_DATA=""
 DRIVE_DATA=""
+ISOLATE_ROOT=""
 cleanup() {
   local root
   stop_pid "$APP_PID" "$BIN" "${DRIVE_PROCESS_NAME:-}" "${DRIVE_BUNDLE_ID:-}"
@@ -147,6 +158,46 @@ cleanup() {
   if [[ -n "$DRIVE_DATA" && "$(drive_temp_data_dir "$DRIVE_DATA")" == "$DRIVE_DATA" ]]; then
     rm -rf "$DRIVE_DATA"
   fi
+  # Per-run HOME and open-clean COOKIE_DATA_DIR. The marker keeps a bad
+  # value from removing the real home. Success and failure both hit this trap.
+  if [[ -n "${ISOLATE_ROOT:-}" ]]; then
+    case "$ISOLATE_ROOT" in
+      *"/cookie-drive-isolate."*)
+        remove_isolate_root "$ISOLATE_ROOT"
+        ;;
+      *)
+        log "not removing isolate root: $ISOLATE_ROOT"
+        ;;
+    esac
+  fi
+}
+
+# The temp HOME hides ~/Library/pnpm and ~/cookie-runtime. Keep those lookups
+# on the real home so the core and the weights still resolve.
+launch_path_with_user_tools() {
+  local path="$1"
+  local extra
+  for extra in \
+    "$REAL_HOME/Library/pnpm" \
+    "$REAL_HOME/.local/share/pnpm"
+  do
+    [[ -d "$extra" ]] || continue
+    case ":$path:" in
+      *":$extra:"*) ;;
+      *) path="$path:$extra" ;;
+    esac
+  done
+  printf '%s\n' "$path"
+}
+
+launch_model_path() {
+  local override="$1"
+  local filename="$2"
+  if [[ -n "$override" ]]; then
+    printf '%s\n' "$override"
+    return 0
+  fi
+  printf '%s\n' "$REAL_HOME/cookie-runtime/models/$filename"
 }
 trap cleanup EXIT
 
@@ -217,11 +268,36 @@ current_target_pid() {
 launch_verified() {
   # $1 binary, $2 app|decoy, $3 per-run process name, $4 per-run bundle id.
   local bin="$1" which="$2" name="$3" bundle="$4" existing attempt reason pid
+  local launch_home launch_data launch_path model embed
   existing="$(pids_for_executable "$bin" "$name" | tr '\n' ' ')"
   if [[ -n "${existing// /}" ]]; then
     fail "refusing to launch: $bin already running as pid ${existing}"
   fi
-  "$bin" &
+  # Direct launches already require the caller's COOKIE_DATA_DIR. They used
+  # to inherit the real HOME. The child gets a per-run home, and a per-run
+  # data directory only when COOKIE_DATA_DIR is empty.
+  ensure_isolate_root
+  isolate_dir home
+  launch_home="$ISOLATE_LAST"
+  if [[ -n "${COOKIE_DATA_DIR:-}" ]]; then
+    launch_data="$COOKIE_DATA_DIR"
+  else
+    isolate_dir data
+    launch_data="$ISOLATE_LAST"
+    COOKIE_DATA_DIR="$launch_data"
+    export COOKIE_DATA_DIR
+  fi
+  assert_isolated_data_dir "$launch_home" "$launch_data"
+  launch_path="$(launch_path_with_user_tools "${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}")"
+  model="$(launch_model_path "${COOKIE_MODEL_PATH:-}" "Qwen3.6-35B-A3B-Q4_K_M.gguf")"
+  embed="$(launch_model_path "${COOKIE_EMBED_MODEL_PATH:-}" "nomic-embed-text-v1.5.Q8_0.gguf")"
+  log "launch home=$launch_home data=$launch_data"
+  HOME="$launch_home" \
+    COOKIE_DATA_DIR="$launch_data" \
+    COOKIE_MODEL_PATH="$model" \
+    COOKIE_EMBED_MODEL_PATH="$embed" \
+    PATH="$launch_path" \
+    "$bin" &
   pid=$!
   reason=""
   for attempt in $(seq 1 30); do
@@ -521,10 +597,6 @@ core_child_cwd() {
     done
   done
   return 1
-}
-
-open_support_dir() {
-  printf '%s\n' "$HOME/Library/Application Support/com.johnkimec.cookie-agent"
 }
 
 # Resolve the process by the pid and per-run identity this drive launched.
@@ -1469,9 +1541,9 @@ dump_shell_log_since() {
   tail -c +$((mark + 1)) "$file" || true
 }
 
-# Finder and `open` pass no COOKIE_* variables and a minimal PATH.
-# LaunchServices does not keep this shell's environment. env -i is the
-# same shape John gets from `open -n`.
+# Finder and `open` pass a minimal PATH and drop this shell's COOKIE_* variables.
+# env -i is that shape, plus the per-run HOME and COOKIE_DATA_DIR this launch
+# creates so the app cannot open the real cookie.db.
 open_clean_check() {
   local attempt gone=0
   for attempt in $(seq 1 40); do
@@ -1488,7 +1560,7 @@ open_clean_check() {
   local others
   others="$(cookieagent_comm_pids | tr '\n' ' ')"
   if [[ -n "${others// /}" ]]; then
-    log "open-clean skipped: another CookieAgent is running (pid ${others}); not launching into Application Support and not signaling those pids"
+    log "open-clean skipped: another CookieAgent is running (pid ${others}); not launching and not signaling those pids"
     if [[ -n "$evidence" ]]; then
       mkdir -p "$evidence"
       {
@@ -1506,21 +1578,34 @@ open_clean_check() {
     open_clean_status=3
     return 0
   fi
-  local support port_before shell_log log_mark
-  support="$(open_support_dir)"
+  local isolate_home isolate_data support port_before shell_log log_mark
+  local launch_path model embed
+  ensure_isolate_root
+  isolate_dir home
+  isolate_home="$ISOLATE_LAST"
+  isolate_dir data
+  isolate_data="$ISOLATE_LAST"
+  assert_isolated_data_dir "$isolate_home" "$isolate_data"
+  support="$isolate_data"
   shell_log="$support/logs/cookie-shell.log"
   log_mark="$(shell_log_bytes "$shell_log")"
   port_before=0
   if port_listening 8080; then
     port_before=1
   fi
-  log "open -n clean env support=$support existing=none"
+  launch_path="$(launch_path_with_user_tools "/usr/bin:/bin:/usr/sbin:/sbin")"
+  model="$(launch_model_path "${COOKIE_MODEL_PATH:-}" "Qwen3.6-35B-A3B-Q4_K_M.gguf")"
+  embed="$(launch_model_path "${COOKIE_EMBED_MODEL_PATH:-}" "nomic-embed-text-v1.5.Q8_0.gguf")"
+  log "open -n clean env home=$isolate_home data=$isolate_data existing=none"
   env -i \
-    HOME="$HOME" \
+    HOME="$isolate_home" \
+    COOKIE_DATA_DIR="$isolate_data" \
+    COOKIE_MODEL_PATH="$model" \
+    COOKIE_EMBED_MODEL_PATH="$embed" \
     USER="${USER:-$(id -un)}" \
     LOGNAME="${USER:-$(id -un)}" \
     TMPDIR="${TMPDIR:-/tmp}" \
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    PATH="$launch_path" \
     /usr/bin/open -n "$APP"
   local pid current fresh="" count=0
   for attempt in $(seq 1 40); do
