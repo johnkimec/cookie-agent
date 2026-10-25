@@ -206,6 +206,7 @@ final class PopupReplyTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testReplyFieldBesideAHalfWidthBadgeStaysOneLineUntilTheBadgeIsGone() {
         let text = "Einstein is best known for the theory of relativity. "
             + String(repeating: "Relativity describes space and time. ", count: 12)

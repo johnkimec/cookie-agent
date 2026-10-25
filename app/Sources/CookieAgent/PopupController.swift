@@ -248,13 +248,16 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 }
 
-private struct TranscriptFrame: Equatable {
+private struct TranscriptFrame: Equatable, Sendable {
     var height: CGFloat
     var minY: CGFloat
 }
 
 private struct TranscriptFrameKey: PreferenceKey {
-    static var defaultValue = TranscriptFrame(height: 0, minY: 0)
+    static var defaultValue: TranscriptFrame {
+        TranscriptFrame(height: 0, minY: 0)
+    }
+
     static func reduce(value: inout TranscriptFrame, nextValue: () -> TranscriptFrame) {
         let next = nextValue()
         if next.height > 0 {
@@ -264,7 +267,8 @@ private struct TranscriptFrameKey: PreferenceKey {
 }
 
 private struct ViewportHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static var defaultValue: CGFloat { 0 }
+
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
