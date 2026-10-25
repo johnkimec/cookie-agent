@@ -1727,20 +1727,10 @@ private final class HoldProbe: RuntimeHealthChecking, @unchecked Sendable {
     }
 
     func probe(port: Int) async -> RuntimeProbe {
-        let shouldHold: Bool
-        lock.lock()
-        entered += 1
-        shouldHold = entered > holdAfter && !released
-        lock.unlock()
-        if shouldHold {
+        if beginProbe() {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                lock.lock()
-                if released {
-                    lock.unlock()
+                if !park(continuation) {
                     continuation.resume()
-                } else {
-                    waiters.append(continuation)
-                    lock.unlock()
                 }
             }
         }
@@ -1748,24 +1738,48 @@ private final class HoldProbe: RuntimeHealthChecking, @unchecked Sendable {
     }
 
     func waitUntilHeld() async {
-        while true {
-            lock.lock()
-            let held = entered > holdAfter
-            lock.unlock()
-            if held { return }
+        while !isHeld() {
             await Task.yield()
         }
     }
 
     func releaseHold() {
+        let pending = takeWaiters()
+        for continuation in pending {
+            continuation.resume()
+        }
+    }
+
+    private func beginProbe() -> Bool {
+        lock.lock()
+        entered += 1
+        let shouldHold = entered > holdAfter && !released
+        lock.unlock()
+        return shouldHold
+    }
+
+    private func isHeld() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return entered > holdAfter
+    }
+
+    /// Returns false when the probe should resume immediately.
+    private func park(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if released { return false }
+        waiters.append(continuation)
+        return true
+    }
+
+    private func takeWaiters() -> [CheckedContinuation<Void, Never>] {
         lock.lock()
         released = true
         let pending = waiters
         waiters.removeAll()
         lock.unlock()
-        for continuation in pending {
-            continuation.resume()
-        }
+        return pending
     }
 }
 
