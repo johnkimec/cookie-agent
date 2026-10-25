@@ -1,2 +1,9 @@
 packages:
   - "core"
+
+# better-sqlite3's install script is `prebuild-install || node-gyp rebuild`.
+# Allow that script so the Node 22 ABI 127 prebuild is unpacked. The spike
+# CI jobs put failing compiler shims on PATH, so a node-gyp fallback fails
+# the job instead of compiling.
+onlyBuiltDependencies:
+  - better-sqlite3

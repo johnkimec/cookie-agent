@@ -40,6 +40,7 @@ Supersession example, not itself a decision: a later entry would say `Supersedes
 | ID | Decision | Choice | Main alternative | Why |
 | --- | --- | --- | --- | --- |
 | D-2026-10-25-01 | Data directory when `COOKIE_DATA_DIR` is unset | `~/Library/Application Support/com.johnkimec.cookie-agent` | A new temporary directory on every launch | The M0 TODO under the 2026-10-24 log said the temporary default would move when memory landed. That TODO was not a decision id and is removed. A per-launch temp directory hid the `llama-server` pid file. `/tmp/cookie-m0.*` is only the verification `mktemp` from the README, `AGENTS.md`, and the verify-cookie skill, inherited when that variable is still exported. Verification still sets its own `COOKIE_DATA_DIR`. |
+| D-2026-10-25-02 | SQLite library in the core | `better-sqlite3` 12.11.1 (prebuild for Node ABI 127). WAL, FTS5, and sqlite-vec through `Database#loadExtension`. | `node:sqlite` on Node 22.13 | Node 22.13.0's `node:sqlite` is SQLite 3.47.2 and has no FTS5 (`no such module: fts5`). The spike is archived at `core/scripts/spike-node-sqlite.mjs`. Linux and macOS arm64 both failed in GitHub Actions run 40217048358 (https://github.com/johnkimec/cookie-agent/actions/runs/40217048358). `better-sqlite3` 13.x's bundled prebuild segfaults on that Node at `new Database()`. 12.11.1 installs with `prebuild-install` and does not compile. This does not supersede D-2026-10-24-06: memory is still one SQLite file, WAL, FTS5, and sqlite-vec. |
 
 ## Technical design
 

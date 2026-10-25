@@ -90,3 +90,73 @@ jobs:
         env:
           COOKIE_EXPECT_TYPE_STRIP_WARNING: "1"
         run: node core/scripts/check-type-strip-stderr.mjs
+
+  sqlite-spike:
+    name: better-sqlite3 spike (Node 22.13, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: macos-26
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node 22.13
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install dependencies from the prebuild
+        run: |
+          bindir="${{ runner.temp }}/no-toolchain/bin"
+          log="${{ runner.temp }}/pnpm-install.log"
+          mkdir -p "$bindir"
+          for tool in gcc g++ cc c++ clang clang++ make node-gyp node-gyp-build cmake; do
+            printf '%s\n' '#!/bin/sh' 'echo "TOOLCHAIN_INVOKED $0 $*" >&2' 'exit 1' > "$bindir/$tool"
+            chmod +x "$bindir/$tool"
+          done
+          export PATH="$bindir:$PATH"
+          set +e
+          pnpm install --frozen-lockfile > "$log" 2>&1
+          code=$?
+          cat "$log"
+          set -e
+          test "$code" -eq 0
+          if grep -q TOOLCHAIN_INVOKED "$log"; then
+            echo "a compiler or node-gyp ran during install" >&2
+            exit 1
+          fi
+          if grep -q "prebuild-install || node-gyp rebuild --release" "$log"; then
+            echo "install script ran: prebuild-install || node-gyp rebuild --release"
+          else
+            echo "install script was not reprinted; pnpm reused a store entry"
+            binary="core/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+            if [ ! -f "$binary" ]; then
+              binary="$(find node_modules -path '*/better-sqlite3/build/Release/better_sqlite3.node' -type f -print -quit)"
+            fi
+            test -f "$binary"
+            file "$binary"
+          fi
+
+      - name: Require runner architecture
+        run: |
+          echo "runner.os=${{ runner.os }} runner.arch=${{ runner.arch }} uname=$(uname -m)"
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            test "$(uname -m)" = "arm64"
+            test "${{ runner.arch }}" = "ARM64"
+          else
+            test "$(uname -m)" = "x86_64"
+            test "${{ runner.arch }}" = "X64"
+          fi
+
+      - name: Spike better-sqlite3
+        run: pnpm spike-sqlite

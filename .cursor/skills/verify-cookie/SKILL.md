@@ -135,7 +135,7 @@ Never attach to a Cookie already running in John's session. The process name is 
 
 Proof goes in `verify-evidence/` at the repository root. That directory is gitignored. Cleanup does not delete it.
 
-Every core `drive` (`chat-streaming`, `model-status`, `chat-history`, `runtime-restart`) requires `--evidence <dir>`. Without it `drive-core` prints its usage, writes nothing, and exits 2.
+Every core `drive` (`chat-streaming`, `model-status`, `chat-history`, `memory-persist`, `runtime-restart`) requires `--evidence <dir>`. Without it `drive-core` prints its usage, writes nothing, and exits 2. A drive that returns success exits 1 when any file below is missing or older than the start of that run. `chat-history` also requires `timings.txt`. `memory-persist` also requires `db.txt`. stderr is `drive-core: no evidence written`.
 
 A drive writes these files into `--evidence`:
 
@@ -174,7 +174,9 @@ Run cleanup after a failed drive too, so a core is not left running. Then confir
 
 ## Helpers
 
-`.cursor/skills/verify-cookie/bin/drive-core` is executable. It runs `node --experimental-strip-types --disable-warning=ExperimentalWarning core/src/verify-drive.ts` from the repository root. The same two flags are on `pnpm core` and `pnpm fake-core`. The Swift app's default command is `pnpm --filter @cookie-agent/core fake-core`, so that script covers the app without a change under `app/`. Do not replace the flag with `--no-warnings`.
+`.cursor/skills/verify-cookie/bin/drive-core` is executable. It runs `node --experimental-strip-types --disable-warning=ExperimentalWarning` on `core/src/verify-drive-entry.ts` from the repository root. That file calls the exported `main()` in `core/src/verify-drive.ts` and exits with the result. Importing `verify-drive.ts` does not start a drive. The entry does not compare `import.meta.url` with `process.argv[1]`. A checkout reached through a symlink, including macOS `/tmp` → `/private/tmp`, still runs. The same two flags are on `pnpm core` and `pnpm fake-core`. The Swift app's default command is `pnpm --filter @cookie-agent/core fake-core`, so that script covers the app without a change under `app/`. Do not replace the flag with `--no-warnings`.
+
+Exit 0 means the command ran. Doctor and cleanup do not write evidence files, and they stay exit 0 when they succeed. A core `drive` that requires `--evidence` exits 1 when `command.txt`, `transcript.jsonl`, `stderr.txt`, or `summary.txt` is missing or older than the start of that run, even if the drive reported success. `chat-history` also requires a fresh `timings.txt`. `memory-persist` also requires a fresh `db.txt`. stderr is `drive-core: no evidence written`. Executing `core/src/verify-drive.ts` directly does not run a drive: stderr is `run bin/drive-core (or verify-drive-entry.ts)` and the exit code is 1. Importing that module does not print the line. Usage, a missing `--evidence`, and the unreachable Mac drives stay exit 2.
 
 ```bash
 .cursor/skills/verify-cookie/bin/drive-core doctor
@@ -185,6 +187,7 @@ Run cleanup after a failed drive too, so a core is not left running. Then confir
 .cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-real-model-status --core real
 .cursor/skills/verify-cookie/bin/drive-core drive runtime-restart --evidence verify-evidence/m0-runtime-restart --core real
 .cursor/skills/verify-cookie/bin/drive-core drive chat-history --evidence verify-evidence/m0-chat-history --core real --llama external
+.cursor/skills/verify-cookie/bin/drive-core drive memory-persist --evidence verify-evidence/m1-memory-persist --core real
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
 .cursor/skills/verify-cookie/bin/drive-mac all

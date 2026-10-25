@@ -1,0 +1,41 @@
+{
+  "id": "01-ece-midterm",
+  "question": "What did I say about the ECE midterm last week?",
+  "expectedFact": "ECE midterm is Friday",
+  "sessions": [
+    {
+      "id": "ses-2026-10-16-popup",
+      "startedAt": "2026-10-16T22:10:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Remember my ECE midterm is Friday.",
+          "createdAt": "2026-10-16T22:10:04Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Got it. ECE midterm is Friday.",
+          "createdAt": "2026-10-16T22:10:09Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-18-popup",
+      "startedAt": "2026-10-18T15:00:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What should I pack for the trip?",
+          "createdAt": "2026-10-18T15:00:02Z"
+        },
+        {
+          "role": "assistant",
+          "content": "A charger, a notebook, and a jacket.",
+          "createdAt": "2026-10-18T15:00:08Z"
+        }
+      ]
+    }
+  ]
+}

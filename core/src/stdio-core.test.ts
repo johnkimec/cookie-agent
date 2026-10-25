@@ -1,7 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, it } from "vitest";
 import { TYPE_STRIP_NODE_ARGS } from "./node-launch.ts";
@@ -35,15 +39,11 @@ class StdioClient {
   private stderrEnded = false;
   private readonly stderrWaiters: Array<() => void> = [];
 
-  constructor(env: NodeJS.ProcessEnv) {
-    this.child = spawn(
-      process.execPath,
-      [...TYPE_STRIP_NODE_ARGS, entry.pathname],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, ...env },
-      },
-    );
+  constructor(env: NodeJS.ProcessEnv, entryPath = entry.pathname) {
+    this.child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, entryPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+    });
     children.push(this.child);
     if (
       this.child.stdout === null ||
@@ -136,50 +136,56 @@ class StdioClient {
 describe("stdio core", () => {
   it("reports down and returns runtime unavailable when llama-server is closed", async () => {
     const port = await closedPort();
-    const client = new StdioClient({
-      COOKIE_LLAMA_PORT: String(port),
-      COOKIE_DATA_DIR: "/tmp/cookie-core-stdio-test",
-    });
-    const started = Date.now();
-    client.send({
-      jsonrpc: "2.0",
-      id: "1",
-      method: "initialize",
-      params: {
+    const dataDir = await mkdtemp(join(tmpdir(), "cookie-stdio-"));
+    try {
+      const client = new StdioClient({
+        COOKIE_LLAMA_PORT: String(port),
+        COOKIE_DATA_DIR: dataDir,
+      });
+      const started = Date.now();
+      client.send({
+        jsonrpc: "2.0",
+        id: "1",
+        method: "initialize",
+        params: {
+          protocolVersion: "0.1",
+          clientInfo: { name: "cookie-test", version: "0.0.0" },
+          capabilities: {},
+        },
+      });
+      const ready = await client.response("1");
+      expect(ready.result).toMatchObject({
         protocolVersion: "0.1",
-        clientInfo: { name: "cookie-test", version: "0.0.0" },
-        capabilities: {},
-      },
-    });
-    const ready = await client.response("1");
-    expect(ready.result).toMatchObject({
-      protocolVersion: "0.1",
-      serverInfo: { name: "cookie-core", version: "0.0.0" },
-    });
-    const status = client.messages[0] ?? (await client.next());
-    expect(status).toMatchObject({
-      method: "runtime.status",
-      params: { state: "down", modelId: null },
-    });
-    client.send({
-      jsonrpc: "2.0",
-      id: "2",
-      method: "chat.send",
-      params: { conversationId: "conv-1", text: "hello" },
-    });
-    const error = await client.response("2");
-    expect(Date.now() - started).toBeLessThan(2000);
-    expect(error.error).toMatchObject({
-      code: protocolErrors.runtimeUnavailable.code,
-      message: protocolErrors.runtimeUnavailable.message,
-    });
-    expect(client.messages.every((message) => isCookieMessage(message))).toBe(
-      true,
-    );
-    client.send({ jsonrpc: "2.0", id: "3", method: "shutdown", params: {} });
-    const shutdown = await client.response("3");
-    expect(shutdown.result).toMatchObject({ ok: true });
-    expect(await client.exitCode()).toBe(0);
+        serverInfo: { name: "cookie-core", version: "0.0.0" },
+      });
+      const status = client.messages[0] ?? (await client.next());
+      expect(status).toMatchObject({
+        method: "runtime.status",
+        params: { state: "down", modelId: null },
+      });
+      client.send({
+        jsonrpc: "2.0",
+        id: "2",
+        method: "chat.send",
+        params: { conversationId: "conv-1", text: "hello" },
+      });
+      const error = await client.response("2");
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(error.error).toMatchObject({
+        code: protocolErrors.runtimeUnavailable.code,
+        message: protocolErrors.runtimeUnavailable.message,
+      });
+      expect(client.messages.every((message) => isCookieMessage(message))).toBe(
+        true,
+      );
+      expect(existsSync(join(dataDir, "cookie.db"))).toBe(true);
+      client.send({ jsonrpc: "2.0", id: "3", method: "shutdown", params: {} });
+      const shutdown = await client.response("3");
+      expect(shutdown.result).toMatchObject({ ok: true });
+      expect(await client.exitCode()).toBe(0);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("exits on a bad COOKIE_LLAMA_PORT without speaking protocol", async () => {
@@ -194,6 +200,40 @@ describe("stdio core", () => {
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_THINKING");
+  });
+
+  it("starts through a symlinked path", async () => {
+    const port = await closedPort();
+    const dataDir = await mkdtemp(join(tmpdir(), "cookie-stdio-"));
+    const linkDir = await mkdtemp(join(tmpdir(), "cookie-index-link-"));
+    const link = join(linkDir, "index.ts");
+    await symlink(entry.pathname, link);
+    try {
+      const client = new StdioClient(
+        {
+          COOKIE_LLAMA_PORT: String(port),
+          COOKIE_DATA_DIR: dataDir,
+        },
+        link,
+      );
+      client.send({
+        jsonrpc: "2.0",
+        id: "1",
+        method: "initialize",
+        params: {
+          protocolVersion: "0.1",
+          clientInfo: { name: "cookie-test", version: "0.0.0" },
+          capabilities: {},
+        },
+      });
+      const ready = await client.response("1");
+      expect(ready.result).toMatchObject({
+        serverInfo: { name: "cookie-core", version: "0.0.0" },
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(linkDir, { recursive: true, force: true });
+    }
   });
 });
 
