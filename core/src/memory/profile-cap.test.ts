@@ -46,10 +46,23 @@ describe("profile cap", () => {
     expect(estimateTokens(rendered)).toBe(profileTokens(capped));
   });
 
-  it("shrinks a huge pinned value so the key survives inside the cap", () => {
-    const capped = capProfile([row("bio", "y".repeat(10_000), true, 1)]);
+  it("keeps a huge pinned value whole and hides unpinned overflow", () => {
+    const logs: string[] = [];
+    const capped = capProfile(
+      [
+        row("bio", "y".repeat(10_000), true, 1),
+        row("note", "x".repeat(200), false, 2),
+      ],
+      PROFILE_TOKEN_CAP,
+      (message) => {
+        logs.push(message);
+      },
+    );
     expect(capped.map((entry) => entry.key)).toEqual(["bio"]);
-    expect(profileTokens(capped)).toBeLessThanOrEqual(PROFILE_TOKEN_CAP);
-    expect(capped[0]?.value.length).toBeLessThan(10_000);
+    expect(capped[0]?.value).toHaveLength(10_000);
+    expect(logs).toEqual([
+      "profile cap: pinned rows exceed 800 tokens; keeping pinned values whole",
+    ]);
+    expect(logs.join("\n")).not.toContain("y".repeat(20));
   });
 });

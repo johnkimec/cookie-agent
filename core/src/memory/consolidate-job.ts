@@ -4,9 +4,9 @@ import {
   type FactRecord,
   TOMBSTONE_SUBJECT,
 } from "./derived.ts";
-import type { Embedder } from "./embedder.ts";
+import { documentInput, type Embedder, queryInput } from "./embedder.ts";
 import { activeFacts, isActiveFact, MERGE_DISTANCE } from "./policy.ts";
-import { capProfile } from "./profile-cap.ts";
+import { capProfile, PROFILE_TOKEN_CAP } from "./profile-cap.ts";
 import { abortError } from "./slot.ts";
 import { embedFact, tombstone } from "./tools.ts";
 import type { TurnRecord } from "./types.ts";
@@ -34,6 +34,7 @@ export interface LocalConsolidatorOptions {
   localDay: (epochMs: number, timeZone: string) => string;
   ids: () => string;
   maintenance?: StoreMaintenance;
+  log?: (message: string) => void;
 }
 
 /**
@@ -59,12 +60,17 @@ export class LocalConsolidator {
     const signal = this.signal;
     throwIfAborted(signal);
     await this.expire(signal);
+    await yieldBatch();
     throwIfAborted(signal);
     await this.mergeDuplicates(signal);
+    await yieldBatch();
     throwIfAborted(signal);
-    this.options.derived.replaceProfile(
-      capProfile(this.options.derived.listProfile()),
+    capProfile(
+      this.options.derived.listProfile(),
+      PROFILE_TOKEN_CAP,
+      this.options.log ?? (() => undefined),
     );
+    await yieldBatch();
     throwIfAborted(signal);
     await this.rechunkToday(signal);
     throwIfAborted(signal);
@@ -104,7 +110,9 @@ export class LocalConsolidator {
         continue;
       }
       await embedFact(this.options, fact);
-      const embedding = await this.options.embedder.embed(fact.text);
+      const embedding = await this.options.embedder.embed(
+        queryInput(fact.text),
+      );
       const hits = await this.options.vectors.knn("vec_facts", embedding, 8);
       for (const hit of hits) {
         if (hit.id === fact.id || hit.distance > MERGE_DISTANCE) {
@@ -138,35 +146,66 @@ export class LocalConsolidator {
   private async rechunkToday(signal: AbortSignal): Promise<void> {
     const now = this.options.now();
     const today = this.options.localDay(now, this.options.timeZone);
+    const forgotten = new Set(this.options.derived.forgottenTurnIds());
     for (const sessionId of this.options.sessionIds()) {
       throwIfAborted(signal);
-      const turns = this.options
-        .readTurns(sessionId)
-        .filter(
-          (turn) =>
-            this.options.localDay(turn.createdAt, this.options.timeZone) ===
-            today,
+      const todayTurns = this.options.readTurns(sessionId).filter((turn) => {
+        if (forgotten.has(turn.id)) {
+          return false;
+        }
+        return (
+          this.options.localDay(turn.createdAt, this.options.timeZone) === today
         );
-      this.options.derived.deleteChunks(sessionId);
-      const chunks = chunkTurns(sessionId, turns);
+      });
+      if (todayTurns.length === 0) {
+        continue;
+      }
+      const todayIds = new Set(todayTurns.map((turn) => turn.id));
+      const stale = this.options.derived
+        .listChunks(sessionId)
+        .filter(
+          (chunk) =>
+            (chunk.firstTurn !== null && todayIds.has(chunk.firstTurn)) ||
+            (chunk.lastTurn !== null && todayIds.has(chunk.lastTurn)),
+        );
+      if (stale.length > 0) {
+        await this.options.vectors.delete(stale.map((chunk) => chunk.chunkId));
+        for (const chunk of stale) {
+          this.options.derived.deleteChunk(chunk.chunkId);
+        }
+      }
+      const chunks = chunkTurns(sessionId, todayTurns, CHUNK_CHAR_BUDGET, [
+        sessionId,
+        today,
+      ]);
       for (const chunk of chunks) {
         throwIfAborted(signal);
         this.options.derived.upsertChunk(chunk);
-        const embedding = await this.options.embedder.embed(chunk.text);
+        const embedding = await this.options.embedder.embed(
+          documentInput(chunk.text),
+        );
         await this.options.vectors.upsert(
           "vec_chunks",
           chunk.chunkId,
           embedding,
         );
       }
+      await yieldBatch();
     }
   }
+}
+
+function yieldBatch(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 export function chunkTurns(
   sessionId: string,
   turns: readonly TurnRecord[],
   budget: number = CHUNK_CHAR_BUDGET,
+  idParts: readonly string[] = [sessionId],
 ): ChunkRecord[] {
   const chunks: ChunkRecord[] = [];
   let batch: TurnRecord[] = [];
@@ -181,7 +220,7 @@ export function chunkTurns(
       return;
     }
     chunks.push({
-      chunkId: `chunk-${sessionId}-${chunks.length}`,
+      chunkId: `chunk-${[...idParts, String(chunks.length)].join("-")}`,
       sessionId,
       firstTurn: first.id,
       lastTurn: last.id,

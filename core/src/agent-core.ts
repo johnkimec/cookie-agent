@@ -568,12 +568,18 @@ export class AgentCore {
   private async runStream(flight: Flight): Promise<void> {
     let stream: ModelStream;
     try {
+      const messages = await this.history.messagesFor(
+        flight.conversationId,
+        flight.userText,
+        flight.abort.signal,
+      );
+      const storedTurn = this.history.currentUserTurnId?.() ?? null;
+      if (storedTurn !== null) {
+        this.memoryHost?.noteUserTurn?.(storedTurn);
+      }
       stream = this.provider.streamChat({
         system: this.memoryHost?.systemPrompt ?? SYSTEM_PROMPT,
-        messages: this.history.messagesFor(
-          flight.conversationId,
-          flight.userText,
-        ),
+        messages,
         abortSignal: flight.abort.signal,
         tools: this.memoryHost?.tools,
       });
@@ -665,8 +671,8 @@ export class AgentCore {
     }
     this.inflight = null;
     this.commitFlight(flight, usage);
-    this.settleChat(flight, finishReason);
     this.emit(this.doneMessage(flight, finishReason, usage));
+    this.settleChat(flight, finishReason);
   }
 
   private cancelFlight(flight: Flight | null): void {
@@ -677,9 +683,9 @@ export class AgentCore {
     this.inflight = null;
     flight.abort.abort();
     this.commitFlight(flight, ZERO_USAGE);
-    this.settleChat(flight, "cancelled");
     // The aborted request does not return a usage payload. See lessons.
     this.emit(this.doneMessage(flight, "cancelled", ZERO_USAGE));
+    this.settleChat(flight, "cancelled");
   }
 
   private settleChat(flight: Flight, finishReason: FinishReason): void {

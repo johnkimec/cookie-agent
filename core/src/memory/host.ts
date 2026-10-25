@@ -26,6 +26,11 @@ export interface MemoryHost {
   readonly tools: ToolSet;
   readonly slot: ModelSlot;
   onChatStarted(event: MemoryChatStart): void;
+  /**
+   * Id of the user turn ChatLog just stored. Tools read it as
+   * `source_turn`. Set after `messagesFor`, before the model runs.
+   */
+  noteUserTurn?(turnId: string): void;
   onChatSettled(event: MemoryChatSettled): void;
   onStop(): void;
   /**

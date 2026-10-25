@@ -1,17 +1,42 @@
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
 
+/**
+ * nomic document prefix. Callers add this before `embed` when indexing.
+ * `embed` itself does not.
+ */
+export const DOCUMENT_PREFIX = "search_document: ";
+
+/**
+ * nomic query prefix. Callers add this before `embed` when searching.
+ * `embed` itself does not.
+ */
+export const QUERY_PREFIX = "search_query: ";
+
+export function documentInput(text: string): string {
+  return `${DOCUMENT_PREFIX}${text}`;
+}
+
+export function queryInput(text: string): string {
+  return `${QUERY_PREFIX}${text}`;
+}
+
 /** Text to a 768-d vector. CI uses a fake. The local model is a later step. */
 export interface Embedder {
   embed(text: string): Promise<Float32Array>;
 }
 
-/** Deterministic offline embedder. Same text always yields the same vector. */
+/**
+ * Deterministic offline embedder. Same text always yields the same vector.
+ * The nomic prefixes are stripped first so a document vector and a query
+ * vector for the same words match. The HTTP embedder must not strip them.
+ */
 export class FakeEmbedder implements Embedder {
   async embed(text: string): Promise<Float32Array> {
+    const bare = stripEmbedPrefix(text);
     const out = new Float32Array(EMBEDDING_DIMENSIONS);
     let hash = 2166136261;
-    for (let index = 0; index < text.length; index += 1) {
-      hash ^= text.charCodeAt(index);
+    for (let index = 0; index < bare.length; index += 1) {
+      hash ^= bare.charCodeAt(index);
       hash = Math.imul(hash, 16777619);
     }
     for (let index = 0; index < out.length; index += 1) {
@@ -22,4 +47,14 @@ export class FakeEmbedder implements Embedder {
     }
     return out;
   }
+}
+
+function stripEmbedPrefix(text: string): string {
+  if (text.startsWith(DOCUMENT_PREFIX)) {
+    return text.slice(DOCUMENT_PREFIX.length);
+  }
+  if (text.startsWith(QUERY_PREFIX)) {
+    return text.slice(QUERY_PREFIX.length);
+  }
+  return text;
 }

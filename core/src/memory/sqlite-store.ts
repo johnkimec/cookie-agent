@@ -471,9 +471,70 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
     return rows.map(chunkFromRow);
   }
 
+  deleteChunk(chunkId: string): void {
+    this.requireOpen();
+    this.db.prepare("DELETE FROM chunks WHERE chunk_id = ?").run(chunkId);
+  }
+
   deleteChunks(sessionId: string): void {
     this.requireOpen();
     this.db.prepare("DELETE FROM chunks WHERE session_id = ?").run(sessionId);
+  }
+
+  deleteFact(id: string): void {
+    this.requireOpen();
+    const remove = this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE facts SET superseded_by = NULL WHERE superseded_by = ?",
+        )
+        .run(id);
+      const result = this.db.prepare("DELETE FROM facts WHERE id = ?").run(id);
+      if (result.changes === 0) {
+        throw new Error(`unknown fact: ${id}`);
+      }
+    });
+    remove();
+  }
+
+  deleteJournal(sessionId: string): void {
+    this.requireOpen();
+    this.db.prepare("DELETE FROM journal WHERE session_id = ?").run(sessionId);
+  }
+
+  forgetTurn(
+    turnId: string,
+    forgottenAt: string,
+    factIds: readonly string[],
+  ): void {
+    this.requireOpen();
+    const existing = this.db
+      .prepare("SELECT fact_ids FROM forgotten_turns WHERE turn_id = ?")
+      .get(turnId) as { fact_ids: string } | undefined;
+    const prior = parseFactIds(existing?.fact_ids);
+    const merged = [...new Set([...prior, ...factIds])].sort();
+    this.db
+      .prepare(
+        `INSERT INTO forgotten_turns (turn_id, forgotten_at, fact_ids)
+         VALUES (?, ?, ?)
+         ON CONFLICT(turn_id) DO UPDATE SET
+           forgotten_at = excluded.forgotten_at,
+           fact_ids = excluded.fact_ids`,
+      )
+      .run(turnId, forgottenAt, JSON.stringify(merged));
+  }
+
+  forgottenTurnIds(): string[] {
+    this.requireOpen();
+    const rows = this.db
+      .prepare("SELECT turn_id FROM forgotten_turns ORDER BY turn_id ASC")
+      .all() as Array<{ turn_id: string }>;
+    return rows.map((row) => row.turn_id);
+  }
+
+  transaction(work: () => void): void {
+    this.requireOpen();
+    this.db.transaction(work)();
   }
 
   setSummary(sessionId: string, summary: string): void {
@@ -481,6 +542,16 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
     const result = this.db
       .prepare("UPDATE sessions SET summary = ? WHERE id = ?")
       .run(summary, sessionId);
+    if (result.changes === 0) {
+      throw new Error(`unknown session: ${sessionId}`);
+    }
+  }
+
+  clearSummary(sessionId: string): void {
+    this.requireOpen();
+    const result = this.db
+      .prepare("UPDATE sessions SET summary = NULL WHERE id = ?")
+      .run(sessionId);
     if (result.changes === 0) {
       throw new Error(`unknown session: ${sessionId}`);
     }
@@ -655,6 +726,21 @@ interface ChunkRow {
   first_turn: string | null;
   last_turn: string | null;
   text: string;
+}
+
+function parseFactIds(value: string | undefined): string[] {
+  if (value === undefined || value.length === 0) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
 }
 
 function bit(value: boolean): number {

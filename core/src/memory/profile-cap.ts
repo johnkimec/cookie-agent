@@ -23,13 +23,15 @@ export function profileTokens(rows: readonly ProfileRecord[]): number {
 }
 
 /**
- * Pinned keys are kept, in key order, and shrunk from the longest value
- * until the block fits. Unpinned keys are added newest-first only when
- * the whole row fits. The result is a new list; inputs are not mutated.
+ * Visible profile for a prompt. Pinned keys stay whole. When they alone
+ * exceed the cap, every pinned value is kept and the overflow is logged.
+ * Unpinned rows that do not fit are omitted from the result. Callers
+ * hide those rows; they do not delete them from the store.
  */
 export function capProfile(
   rows: readonly ProfileRecord[],
   cap: number = PROFILE_TOKEN_CAP,
+  log: (message: string) => void = () => undefined,
 ): ProfileRecord[] {
   const pinned = rows
     .filter((row) => row.pinned)
@@ -42,42 +44,19 @@ export function capProfile(
       (left, right) =>
         right.updatedAt - left.updatedAt || left.key.localeCompare(right.key),
     );
-  const selected = pinned.map(clone);
-  if (profileTokens(selected) > cap) {
-    shrinkToCap(selected, cap);
-    return selected;
+  if (profileTokens(pinned) > cap) {
+    log(
+      `profile cap: pinned rows exceed ${cap} tokens; keeping pinned values whole`,
+    );
+    return pinned;
   }
+  const selected = pinned.map(clone);
   for (const row of loose) {
     if (profileTokens([...selected, row]) <= cap) {
       selected.push(row);
     }
   }
   return selected;
-}
-
-function shrinkToCap(rows: ProfileRecord[], cap: number): void {
-  while (profileTokens(rows) > cap && rows.length > 0) {
-    let longest = 0;
-    for (let index = 1; index < rows.length; index += 1) {
-      const current = rows[index];
-      const best = rows[longest];
-      if (current !== undefined && best !== undefined) {
-        if (current.value.length > best.value.length) {
-          longest = index;
-        }
-      }
-    }
-    const row = rows[longest];
-    if (row === undefined) {
-      return;
-    }
-    if (row.value.length === 0) {
-      rows.splice(longest, 1);
-      continue;
-    }
-    const nextLength = Math.max(0, row.value.length - 4);
-    row.value = row.value.slice(0, nextLength);
-  }
 }
 
 function clone(row: ProfileRecord): ProfileRecord {

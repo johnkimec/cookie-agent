@@ -6,7 +6,11 @@ import type {
 } from "./derived.ts";
 import type { Embedder } from "./embedder.ts";
 import { DUPLICATE_DISTANCE, isSecret, isVerbatimScreen } from "./policy.ts";
-import { capProfile } from "./profile-cap.ts";
+import {
+  capProfile,
+  estimateTokens,
+  PROFILE_TOKEN_CAP,
+} from "./profile-cap.ts";
 import type { ReflectOptions, Reflector } from "./reflect.ts";
 import { abortError, isAbortError } from "./slot.ts";
 import type { MemoryStore } from "./store.ts";
@@ -70,12 +74,16 @@ export interface LocalReflectorOptions {
   localDay: (epochMs: number, timeZone: string) => string;
   factIds: () => string;
   journalIds: () => string;
+  log?: (message: string) => void;
 }
+
+/** About 6k tokens of recent turns plus the highest-confidence facts. */
+export const REFLECT_PROMPT_TOKEN_CAP = 6_000;
 
 /**
  * Idle reflect job. The scheduler holds the llama slot and aborts
- * `signal` when a chat starts. Writes happen only after the model
- * returns and the signal is still clear.
+ * `signal` when a chat starts. Once the model has returned, the abort
+ * is ignored and every derived write commits together, summary last.
  */
 export class LocalReflector implements Reflector {
   private readonly options: LocalReflectorOptions;
@@ -86,8 +94,14 @@ export class LocalReflector implements Reflector {
 
   async reflect(sessionId: string, opts?: ReflectOptions): Promise<void> {
     const signal = opts?.signal ?? new AbortController().signal;
-    const turns = this.options.store.recentTurns(sessionId, 10_000);
+    const forgotten = new Set(this.options.derived.forgottenTurnIds());
+    const turns = this.options.store
+      .recentTurns(sessionId, 10_000)
+      .filter((turn) => !forgotten.has(turn.id));
     if (turns.length === 0) {
+      if (this.options.store.recentTurns(sessionId, 1).length > 0) {
+        this.options.derived.setSummary(sessionId, "");
+      }
       return;
     }
     throwIfAborted(signal);
@@ -109,92 +123,137 @@ export class LocalReflector implements Reflector {
       }
       throw error;
     }
-    throwIfAborted(signal);
     const extracted = parseReflectExtraction(raw);
     const turnById = new Map(turns.map((turn) => [turn.id, turn]));
-    this.writeSummary(sessionId, extracted.summary, signal);
-    this.writeJournal(sessionId, extracted.journal, signal);
-    for (const candidate of extracted.facts) {
-      throwIfAborted(signal);
-      await this.writeFact(candidate, turnById, signal);
+    const planned = await this.planFacts(extracted.facts, turnById, forgotten);
+    const now = this.options.now();
+    const journal = this.planJournal(sessionId, extracted.journal, now);
+    const profile = this.planProfile(extracted.profile, now);
+    const summary = cleanSummary(extracted.summary);
+    this.options.derived.transaction(() => {
+      if (journal !== null) {
+        this.options.derived.insertJournal(journal);
+      }
+      for (const fact of planned.inserts) {
+        this.options.derived.insertFact(fact);
+      }
+      for (const fact of planned.updates) {
+        this.options.derived.updateFact(fact);
+      }
+      for (const row of profile) {
+        this.options.derived.upsertProfile(row);
+      }
+      capProfile(
+        this.options.derived.listProfile(),
+        PROFILE_TOKEN_CAP,
+        this.options.log ?? (() => undefined),
+      );
+      if (summary !== null) {
+        this.options.derived.setSummary(sessionId, summary);
+      }
+    });
+    for (const fact of planned.inserts) {
+      await embedFact(this.options, fact);
     }
-    this.writeProfile(extracted.profile, signal);
   }
 
-  private writeSummary(
-    sessionId: string,
-    summary: string,
-    signal: AbortSignal,
-  ): void {
-    throwIfAborted(signal);
-    const text = summary.trim().slice(0, 500);
-    if (text.length === 0 || isSecret(text)) {
-      return;
-    }
-    this.options.derived.setSummary(sessionId, text);
-  }
-
-  private writeJournal(
+  private planJournal(
     sessionId: string,
     entry: string,
-    signal: AbortSignal,
-  ): void {
-    throwIfAborted(signal);
+    now: number,
+  ): {
+    id: string;
+    day: string;
+    entry: string;
+    sessionId: string;
+    createdAt: number;
+  } | null {
     const text = entry.trim().slice(0, 2000);
     if (text.length === 0 || isSecret(text)) {
-      return;
+      return null;
     }
     if (this.options.derived.listJournal(sessionId).length > 0) {
-      return;
+      return null;
     }
-    const now = this.options.now();
-    this.options.derived.insertJournal({
+    return {
       id: this.options.journalIds(),
       day: this.options.localDay(now, this.options.timeZone),
       entry: text,
       sessionId,
       createdAt: now,
-    });
+    };
   }
 
-  private async writeFact(
-    candidate: ReflectFact,
+  private async planFacts(
+    candidates: readonly ReflectFact[],
     turnById: Map<string, TurnRecord>,
-    signal: AbortSignal,
-  ): Promise<void> {
-    throwIfAborted(signal);
-    const text = candidate.text.trim().slice(0, 500);
-    const turn = turnById.get(candidate.sourceTurn);
-    if (text.length === 0 || turn === undefined) {
-      return;
-    }
-    if (isSecret(text) || isVerbatimScreen(text, turn)) {
-      return;
-    }
-    const now = this.options.now();
-    if (candidate.contradicts !== null) {
-      const prior = this.options.derived.factById(candidate.contradicts);
-      if (prior !== null && prior.supersededBy === null) {
-        const created = this.insertFact(candidate, text, now);
-        this.options.derived.updateFact({
-          ...prior,
-          supersededBy: created.id,
-        });
-        await embedFact(this.options, created);
-        return;
+    forgotten: ReadonlySet<string>,
+  ): Promise<{ inserts: FactRecord[]; updates: FactRecord[] }> {
+    const inserts: FactRecord[] = [];
+    const updates: FactRecord[] = [];
+    for (const candidate of candidates) {
+      const text = candidate.text.trim().slice(0, 500);
+      const turn = turnById.get(candidate.sourceTurn);
+      if (text.length === 0 || turn === undefined) {
+        continue;
       }
+      if (forgotten.has(candidate.sourceTurn)) {
+        continue;
+      }
+      if (isSecret(text) || isVerbatimScreen(text, turn)) {
+        continue;
+      }
+      const now = this.options.now();
+      if (candidate.contradicts !== null) {
+        // TODO(M1): reject contradicts when the source turn is tainted.
+        // A screen or file quote must not supersede a fact John stated.
+        const prior = this.options.derived.factById(candidate.contradicts);
+        if (prior !== null && prior.supersededBy === null) {
+          const created = this.makeFact(candidate, text, now);
+          inserts.push(created);
+          updates.push({ ...prior, supersededBy: created.id });
+          continue;
+        }
+      }
+      if (
+        inserts.some((fact) => fact.text.toLowerCase() === text.toLowerCase())
+      ) {
+        continue;
+      }
+      const nearest = await nearestActive(this.options, text, now);
+      if (nearest !== null && nearest.distance <= DUPLICATE_DISTANCE) {
+        updates.push({ ...nearest.fact, lastUsedAt: now });
+        continue;
+      }
+      inserts.push(this.makeFact(candidate, text, now));
     }
-    const nearest = await nearestActive(this.options, text, now);
-    throwIfAborted(signal);
-    if (nearest !== null && nearest.distance <= DUPLICATE_DISTANCE) {
-      this.options.derived.updateFact({ ...nearest.fact, lastUsedAt: now });
-      return;
-    }
-    const created = this.insertFact(candidate, text, now);
-    await embedFact(this.options, created);
+    return { inserts, updates };
   }
 
-  private insertFact(
+  private planProfile(rows: ReflectProfile[], now: number): ProfileRecord[] {
+    const planned: ProfileRecord[] = [];
+    for (const row of rows) {
+      if (!promoteProfile(row) || isSecret(row.value) || isSecret(row.key)) {
+        continue;
+      }
+      const key = row.key.trim().replace(/\s+/g, "_").slice(0, 64);
+      const value = row.value.trim().slice(0, 500);
+      if (key.length === 0 || value.length === 0) {
+        continue;
+      }
+      planned.push({
+        key,
+        value,
+        pinned: row.pinned && row.statedByJohn,
+        shareable: row.shareable && !row.sensitive,
+        sourceTurn: null,
+        updatedAt: now,
+      });
+    }
+    return planned;
+  }
+
+  private makeFact(
     candidate: ReflectFact,
     text: string,
     now: number,
@@ -212,36 +271,16 @@ export class LocalReflector implements Reflector {
       createdAt: now,
       lastUsedAt: null,
     };
-    this.options.derived.insertFact(fact);
     return fact;
   }
+}
 
-  private writeProfile(rows: ReflectProfile[], signal: AbortSignal): void {
-    throwIfAborted(signal);
-    const now = this.options.now();
-    for (const row of rows) {
-      if (!promoteProfile(row) || isSecret(row.value) || isSecret(row.key)) {
-        continue;
-      }
-      const key = row.key.trim().replace(/\s+/g, "_").slice(0, 64);
-      const value = row.value.trim().slice(0, 500);
-      if (key.length === 0 || value.length === 0) {
-        continue;
-      }
-      const record: ProfileRecord = {
-        key,
-        value,
-        pinned: row.pinned && row.statedByJohn,
-        shareable: row.shareable && !row.sensitive,
-        sourceTurn: null,
-        updatedAt: now,
-      };
-      this.options.derived.upsertProfile(record);
-    }
-    this.options.derived.replaceProfile(
-      capProfile(this.options.derived.listProfile()),
-    );
+function cleanSummary(summary: string): string | null {
+  const text = summary.trim().slice(0, 500);
+  if (text.length === 0 || isSecret(text)) {
+    return null;
   }
+  return text;
 }
 
 export function promoteProfile(row: ReflectProfile): boolean {
@@ -251,21 +290,57 @@ export function promoteProfile(row: ReflectProfile): boolean {
   return row.sessionsObserved >= 3;
 }
 
+export function selectReflectContext(
+  turns: readonly TurnRecord[],
+  facts: readonly FactRecord[],
+  cap: number = REFLECT_PROMPT_TOKEN_CAP,
+): { turns: TurnRecord[]; facts: FactRecord[] } {
+  const selectedTurns: TurnRecord[] = [];
+  let used = 0;
+  for (const turn of [...turns].reverse()) {
+    const cost = estimateTokens(reflectTurnLine(turn));
+    if (selectedTurns.length > 0 && used + cost > cap) {
+      break;
+    }
+    selectedTurns.push(turn);
+    used += cost;
+  }
+  selectedTurns.reverse();
+  const ranked = facts
+    .filter(
+      (fact) =>
+        fact.supersededBy === null && fact.subject !== "memory:tombstone",
+    )
+    .sort(
+      (left, right) =>
+        right.confidence - left.confidence || left.id.localeCompare(right.id),
+    );
+  const selectedFacts: FactRecord[] = [];
+  for (const fact of ranked) {
+    const cost = estimateTokens(fact.text) + 4;
+    if (selectedFacts.length > 0 && used + cost > cap) {
+      break;
+    }
+    selectedFacts.push(fact);
+    used += cost;
+  }
+  return { turns: selectedTurns, facts: selectedFacts };
+}
+
+function reflectTurnLine(turn: TurnRecord): string {
+  return `- id=${turn.id} role=${turn.role} tainted=${turn.tainted ? "true" : "false"} text=${turn.content}`;
+}
+
 export function renderReflectPrompt(
   sessionId: string,
   turns: readonly TurnRecord[],
   facts: readonly FactRecord[],
 ): string {
-  const turnLines = turns.map(
-    (turn) =>
-      `- id=${turn.id} role=${turn.role} tainted=${turn.tainted ? "true" : "false"} text=${turn.content}`,
+  const selected = selectReflectContext(turns, facts);
+  const turnLines = selected.turns.map(reflectTurnLine);
+  const factLines = selected.facts.map(
+    (fact) => `- id=${fact.id} text=${fact.text}`,
   );
-  const factLines = facts
-    .filter(
-      (fact) =>
-        fact.supersededBy === null && fact.subject !== "memory:tombstone",
-    )
-    .map((fact) => `- id=${fact.id} text=${fact.text}`);
   return [
     `Session ${sessionId}`,
     "Turns:",

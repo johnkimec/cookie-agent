@@ -1,4 +1,5 @@
 import type { ModelMessage } from "ai";
+import { abortError } from "./memory/slot.ts";
 import type { ModelUsage } from "./model/provider.ts";
 
 /**
@@ -13,8 +14,8 @@ export interface ChatTurnCommit {
   usage: ModelUsage;
   latencyMs: number | null;
   /**
-   * Set when the memory host already stored this user turn.
-   * ChatLog then skips a second user insert.
+   * Unused by ChatLog. ChatLog is the only turn writer on the sqlite
+   * path and stores the user row in `messagesFor`.
    */
   userTurnId?: string;
 }
@@ -25,7 +26,16 @@ export interface ChatTurnCommit {
  * The system prompt is not stored; the provider adds it on each call.
  */
 export interface ConversationHistory {
-  messagesFor(conversationId: string, userText: string): ModelMessage[];
+  messagesFor(
+    conversationId: string,
+    userText: string,
+    signal?: AbortSignal,
+  ): Promise<ModelMessage[]>;
+  /**
+   * Id of the user turn `messagesFor` just stored, when this history
+   * persists turns. Absent on the in-memory default.
+   */
+  currentUserTurnId?(): string | null;
   commit(turn: ChatTurnCommit): void;
   close(): void;
 }
@@ -33,7 +43,14 @@ export interface ConversationHistory {
 export class ConversationMemory implements ConversationHistory {
   private readonly turns = new Map<string, ModelMessage[]>();
 
-  messagesFor(conversationId: string, userText: string): ModelMessage[] {
+  async messagesFor(
+    conversationId: string,
+    userText: string,
+    signal?: AbortSignal,
+  ): Promise<ModelMessage[]> {
+    if (signal?.aborted) {
+      throw abortError();
+    }
     const prior = this.turns.get(conversationId) ?? [];
     return [...prior, { role: "user", content: userText }];
   }

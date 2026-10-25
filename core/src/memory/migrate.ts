@@ -11,15 +11,15 @@ const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
     ),
   },
   {
-    version: 2,
+    version: 3,
     sql: readFileSync(
-      new URL("./migrations/002_meta.sql", import.meta.url),
+      new URL("./migrations/003_meta.sql", import.meta.url),
       "utf8",
     ),
   },
 ];
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /**
  * Open a file database, turn on WAL and foreign keys, load sqlite-vec, and

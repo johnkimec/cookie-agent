@@ -1,6 +1,7 @@
 import { type ToolSet, tool } from "ai";
 import { z } from "zod";
 import {
+  type ChunkRecord,
   type DerivedMemoryStore,
   FACT_KINDS,
   type FactKind,
@@ -8,14 +9,14 @@ import {
   type ProfileRecord,
   TOMBSTONE_SUBJECT,
 } from "./derived.ts";
-import type { Embedder } from "./embedder.ts";
+import { documentInput, type Embedder, queryInput } from "./embedder.ts";
 import {
   activeFacts,
   FORGET_DISTANCE,
   isActiveFact,
   isSecret,
 } from "./policy.ts";
-import { capProfile } from "./profile-cap.ts";
+import type { MemoryStore } from "./store.ts";
 import type { VectorIndex } from "./vectors.ts";
 
 export const MEMORY_REMEMBER_TOOL = "memory.remember";
@@ -33,13 +34,19 @@ export type MemoryToolState = {
   sourceTurnId: string | null;
 };
 
+/** Text forget needs at least this many characters. */
+export const MIN_FORGET_TEXT = 4;
+
 export interface MemoryToolDeps {
   derived: DerivedMemoryStore;
+  store: MemoryStore;
   embedder: Embedder;
   vectors: VectorIndex;
   state: MemoryToolState;
   now: () => number;
   ids: () => string;
+  /** Ids only. Fact text must not be logged. */
+  log?: (message: string) => void;
 }
 
 const rememberInput = z.object({
@@ -98,7 +105,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolSet {
     }),
     [MEMORY_FORGET_TOOL]: tool({
       description:
-        "Forget a fact John asked to drop. The old row stays and is superseded so it leaves recall. Nothing is deleted.",
+        "Forget a fact John asked to drop. Deletes that fact, its profile row, and derived rows built from its turn. Raw turns stay. If several facts match and none is an exact match, returns the candidates and deletes nothing.",
       inputSchema: forgetInput,
       execute: (input) => forgetFact(deps, input),
     }),
@@ -153,7 +160,6 @@ async function rememberFact(
       updatedAt: now,
     };
     deps.derived.upsertProfile(row);
-    deps.derived.replaceProfile(capProfile(deps.derived.listProfile()));
   }
   return {
     remembered: true,
@@ -163,59 +169,200 @@ async function rememberFact(
   };
 }
 
+type ForgetMatch =
+  | { kind: "facts"; facts: FactRecord[] }
+  | { kind: "ambiguous"; candidates: Array<{ id: string; text: string }> }
+  | { kind: "too short" }
+  | { kind: "none" };
+
 async function forgetFact(
   deps: MemoryToolDeps,
   input: ForgetInput,
 ): Promise<
   | { forgotten: true; factIds: string[] }
-  | { forgotten: false; reason: "not found" }
+  | { forgotten: false; reason: "not found" | "too short" }
+  | {
+      forgotten: false;
+      reason: "ambiguous";
+      candidates: Array<{ id: string; text: string }>;
+    }
 > {
   const now = deps.now();
-  const matches = await factsToForget(deps, input, now);
-  if (matches.length === 0) {
+  const match = await factsToForget(deps, input, now);
+  if (match.kind === "too short") {
+    return { forgotten: false, reason: "too short" };
+  }
+  if (match.kind === "ambiguous") {
+    return {
+      forgotten: false,
+      reason: "ambiguous",
+      candidates: match.candidates,
+    };
+  }
+  if (match.kind === "none") {
     return { forgotten: false, reason: "not found" };
   }
-  const forgotten: string[] = [];
-  for (const fact of matches) {
-    const marker = tombstone(deps.ids(), fact, now);
-    deps.derived.insertFact(marker);
-    deps.derived.updateFact({ ...fact, supersededBy: marker.id });
-    await deps.vectors.delete([fact.id]);
-    dropProfileFor(deps.derived, fact);
-    forgotten.push(fact.id);
+  const facts = match.facts;
+  const turnIds = new Set<string>();
+  const vectorIds = facts.map((fact) => fact.id);
+  const texts = facts.map((fact) => fact.text);
+  for (const fact of facts) {
+    if (fact.sourceTurn !== null) {
+      turnIds.add(fact.sourceTurn);
+    }
   }
-  return { forgotten: true, factIds: forgotten };
+  const chunks = deps.derived
+    .listChunks()
+    .filter((chunk) => chunkCovers(chunk, turnIds, texts));
+  for (const chunk of chunks) {
+    vectorIds.push(chunk.chunkId);
+  }
+  const sessions = sessionsTouching(deps.store, turnIds, texts, deps.derived);
+  const factsByTurn = new Map<string, string[]>();
+  for (const fact of facts) {
+    if (fact.sourceTurn === null) {
+      continue;
+    }
+    const ids = factsByTurn.get(fact.sourceTurn) ?? [];
+    ids.push(fact.id);
+    factsByTurn.set(fact.sourceTurn, ids);
+  }
+  const forgottenAt = new Date(now).toISOString();
+  // TODO: a hard-erase option deletes the raw turn as well. John wants
+  // to test this flow first. Until then the turn stays in `turns`, is
+  // kept as a dated entry, and is never recalled.
+  deps.derived.transaction(() => {
+    for (const fact of facts) {
+      dropProfileFor(deps.derived, fact);
+      deps.derived.deleteFact(fact.id);
+    }
+    for (const [turnId, ids] of factsByTurn) {
+      deps.derived.forgetTurn(turnId, forgottenAt, ids);
+    }
+    for (const chunk of chunks) {
+      deps.derived.deleteChunk(chunk.chunkId);
+    }
+    for (const sessionId of sessions) {
+      deps.derived.deleteJournal(sessionId);
+      regenerateSummary(deps, sessionId, turnIds);
+    }
+  });
+  await deps.vectors.delete(vectorIds);
+  const turnList = [...turnIds].sort();
+  deps.log?.(
+    `memory.forget facts=${facts.map((fact) => fact.id).join(",")} turns=${turnList.join(",")}`,
+  );
+  return { forgotten: true, factIds: facts.map((fact) => fact.id) };
 }
 
 async function factsToForget(
   deps: MemoryToolDeps,
   input: ForgetInput,
   now: number,
-): Promise<FactRecord[]> {
+): Promise<ForgetMatch> {
   const active = activeFacts(deps.derived, now);
   if (input.factId !== undefined) {
     const found = active.find((fact) => fact.id === input.factId);
-    return found === undefined ? [] : [found];
+    return found === undefined
+      ? { kind: "none" }
+      : { kind: "facts", facts: [found] };
   }
-  const needle = input.text?.trim().toLowerCase() ?? "";
-  if (needle.length === 0) {
-    return [];
+  const needle = input.text?.trim() ?? "";
+  if (needle.length < MIN_FORGET_TEXT) {
+    return { kind: "too short" };
   }
-  const exact = active.filter((fact) => fact.text.toLowerCase() === needle);
+  const lowered = needle.toLowerCase();
+  const exact = active.filter((fact) => fact.text.toLowerCase() === lowered);
   if (exact.length > 0) {
-    return exact;
+    return { kind: "facts", facts: exact };
   }
   const partial = active.filter((fact) =>
-    fact.text.toLowerCase().includes(needle),
+    fact.text.toLowerCase().includes(lowered),
   );
-  if (partial.length > 0) {
-    return partial;
+  if (partial.length === 1) {
+    const only = partial[0];
+    return only === undefined
+      ? { kind: "none" }
+      : { kind: "facts", facts: [only] };
   }
-  const nearest = await nearestActive(deps, input.text ?? "", now);
+  if (partial.length > 1) {
+    return {
+      kind: "ambiguous",
+      candidates: partial.map((fact) => ({ id: fact.id, text: fact.text })),
+    };
+  }
+  const nearest = await nearestActive(deps, needle, now);
   if (nearest !== null && nearest.distance <= FORGET_DISTANCE) {
-    return [nearest.fact];
+    return { kind: "facts", facts: [nearest.fact] };
   }
-  return [];
+  return { kind: "none" };
+}
+
+function chunkCovers(
+  chunk: ChunkRecord,
+  turnIds: ReadonlySet<string>,
+  texts: readonly string[],
+): boolean {
+  if (chunk.firstTurn !== null && turnIds.has(chunk.firstTurn)) {
+    return true;
+  }
+  if (chunk.lastTurn !== null && turnIds.has(chunk.lastTurn)) {
+    return true;
+  }
+  const haystack = chunk.text.toLowerCase();
+  return texts.some((text) => {
+    const needle = text.trim().toLowerCase();
+    return needle.length >= MIN_FORGET_TEXT && haystack.includes(needle);
+  });
+}
+
+function sessionsTouching(
+  store: MemoryStore,
+  turnIds: ReadonlySet<string>,
+  texts: readonly string[],
+  derived: DerivedMemoryStore,
+): string[] {
+  const sessions = new Set<string>();
+  for (const session of store.listSessions()) {
+    const turns = store.recentTurns(session.id, 10_000);
+    if (turns.some((turn) => turnIds.has(turn.id))) {
+      sessions.add(session.id);
+    }
+  }
+  for (const entry of derived.listJournal()) {
+    if (entry.sessionId === null) {
+      continue;
+    }
+    if (texts.some((text) => entry.entry.includes(text))) {
+      sessions.add(entry.sessionId);
+    }
+  }
+  for (const chunk of derived.listChunks()) {
+    if (chunk.sessionId !== null && chunkCovers(chunk, turnIds, texts)) {
+      sessions.add(chunk.sessionId);
+    }
+  }
+  return [...sessions];
+}
+
+function regenerateSummary(
+  deps: MemoryToolDeps,
+  sessionId: string,
+  forgotten: ReadonlySet<string>,
+): void {
+  const remaining = deps.store
+    .recentTurns(sessionId, 10_000)
+    .filter((turn) => !forgotten.has(turn.id));
+  const text = remaining
+    .map((turn) => turn.content.trim())
+    .filter((line) => line.length > 0)
+    .join("\n")
+    .slice(0, 500);
+  if (text.length === 0) {
+    deps.derived.clearSummary(sessionId);
+    return;
+  }
+  deps.derived.setSummary(sessionId, text);
 }
 
 export async function nearestActive(
@@ -227,7 +374,7 @@ export async function nearestActive(
   text: string,
   now: number,
 ): Promise<{ fact: FactRecord; distance: number } | null> {
-  const embedding = await deps.embedder.embed(text);
+  const embedding = await deps.embedder.embed(queryInput(text));
   const hits = await deps.vectors.knn("vec_facts", embedding, 8);
   for (const hit of hits) {
     const fact = deps.derived.factById(hit.id);
@@ -246,7 +393,7 @@ export async function embedFact(
   if (fact.subject === TOMBSTONE_SUBJECT) {
     return;
   }
-  const embedding = await deps.embedder.embed(fact.text);
+  const embedding = await deps.embedder.embed(documentInput(fact.text));
   await deps.vectors.upsert("vec_facts", fact.id, embedding);
 }
 
@@ -257,7 +404,7 @@ export function tombstone(
 ): FactRecord {
   return {
     id,
-    text: `Forgotten: ${fact.text}`,
+    text: `Superseded ${fact.id}`,
     kind: fact.kind,
     subject: TOMBSTONE_SUBJECT,
     confidence: 1,
@@ -271,16 +418,10 @@ export function tombstone(
 }
 
 function dropProfileFor(derived: DerivedMemoryStore, fact: FactRecord): void {
-  const next = derived.listProfile().filter((row) => {
-    if (row.value === fact.text) {
-      return false;
-    }
-    return !(
-      row.pinned &&
-      fact.sourceTurn !== null &&
-      row.sourceTurn === fact.sourceTurn
-    );
-  });
+  const next = derived.listProfile().filter((row) => row.value !== fact.text);
+  if (next.length === derived.listProfile().length) {
+    return;
+  }
   derived.replaceProfile(next);
 }
 

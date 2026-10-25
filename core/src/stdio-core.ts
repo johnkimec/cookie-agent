@@ -37,12 +37,16 @@ export function startStdioCore(
     process.exit(1);
   }
   const provider = createLlamaServerProvider({ port, thinking });
+  // TODO(#20): pass `await resolveEmbedder(process.env)` as `embedder`
+  // once that PR is on main. Until then the runtime keeps FakeEmbedder.
+  // Callers prefix `search_document: ` and `search_query: ` themselves.
   const memory = createMemoryRuntime({
     provider,
     idleMs,
     timeZone,
     store,
     derived: store,
+    recordTurns: false,
   });
   const core = new AgentCore({
     provider,

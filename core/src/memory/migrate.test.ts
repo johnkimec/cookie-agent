@@ -35,6 +35,7 @@ const EXPECTED_OBJECTS = [
   "trust_grants",
   "checkins",
   "memory_meta",
+  "forgotten_turns",
 ];
 
 describe("migration 001", () => {
@@ -52,21 +53,22 @@ describe("migration 001", () => {
       expect(names).toContain(name);
     }
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(db.pragma("user_version", { simple: true })).toBe(2);
+    expect(db.pragma("user_version", { simple: true })).toBe(3);
     db.close();
 
     const again = openMemoryDatabase(path);
-    expect(again.pragma("user_version", { simple: true })).toBe(2);
+    expect(again.pragma("user_version", { simple: true })).toBe(3);
     expect(again.prepare("SELECT count(*) AS n FROM facts").get()).toEqual({
       n: 0,
     });
     again.close();
   });
 
-  it("applies migration 002 on a database that stopped at version 1", () => {
+  it("applies migration 003 on a database that stopped at version 1", () => {
     const path = tempDbPath();
     const opened = openMemoryDatabase(path);
     opened.exec("DROP TABLE memory_meta");
+    opened.exec("DROP TABLE forgotten_turns");
     opened.pragma("user_version = 1");
     opened.close();
 
@@ -79,7 +81,15 @@ describe("migration 001", () => {
         .all("memory_meta") as Array<{ name: string }>
     ).map((row) => row.name);
     expect(names).toEqual(["memory_meta"]);
-    expect(upgraded.pragma("user_version", { simple: true })).toBe(2);
+    const forgotten = (
+      upgraded
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .all("forgotten_turns") as Array<{ name: string }>
+    ).map((row) => row.name);
+    expect(forgotten).toEqual(["forgotten_turns"]);
+    expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
     upgraded.close();
   });
 

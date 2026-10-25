@@ -3,7 +3,7 @@ import type { ModelProvider } from "../model/provider.ts";
 import type { StoreMaintenance } from "./consolidate-job.ts";
 import { LocalConsolidator } from "./consolidate-job.ts";
 import type { DerivedMemoryStore } from "./derived.ts";
-import { InMemoryDerivedMemory, sequentialIds } from "./derived.ts";
+import { InMemoryDerivedMemory, randomIds } from "./derived.ts";
 import type { Embedder } from "./embedder.ts";
 import { FakeEmbedder } from "./embedder.ts";
 import type { MemoryHost } from "./host.ts";
@@ -56,6 +56,13 @@ export interface MemoryRuntimeOptions {
   power?: AcPower;
   maintenance?: StoreMaintenance;
   modelId?: string;
+  /**
+   * When a ChatLog is also writing turns, set this false. Two writers
+   * duplicate the user text in the prompt and mint different ids.
+   */
+  recordTurns?: boolean;
+  /** Ids only. Forget must not log fact text. */
+  log?: (message: string) => void;
 }
 
 /**
@@ -76,8 +83,14 @@ export function createMemoryRuntime(
   const sessions = new Set<string>();
   const writtenUserTurns = new Map<string, string>();
   const state: MemoryToolState = { sourceTurnId: null };
-  const factIds = sequentialIds("fact");
-  const journalIds = sequentialIds("journal");
+  const recordTurns = options.recordTurns !== false;
+  const log =
+    options.log ??
+    ((message: string) => {
+      process.stderr.write(`${message}\n`);
+    });
+  const factIds = randomIds("fact");
+  const journalIds = randomIds("journal");
   const provider = options.provider;
   const complete =
     options.complete ??
@@ -98,6 +111,7 @@ export function createMemoryRuntime(
     localDay,
     factIds,
     journalIds,
+    log,
   });
   const consolidator = new LocalConsolidator({
     derived,
@@ -110,6 +124,7 @@ export function createMemoryRuntime(
     localDay,
     ids: factIds,
     maintenance: options.maintenance,
+    log,
   });
   const scheduler = new IdleScheduler({
     slot,
@@ -141,15 +156,20 @@ export function createMemoryRuntime(
     systemPrompt: MEMORY_SYSTEM_PROMPT,
     tools: createMemoryTools({
       derived,
+      store,
       embedder,
       vectors,
       state,
       now,
       ids: factIds,
+      log,
     }),
     slot,
     onChatStarted(event) {
       scheduler.onChatStarted(event.conversationId);
+      if (!recordTurns) {
+        return;
+      }
       const storedId = rememberTurn(store, sessions, {
         id: userTurnId(event.messageId),
         sessionId: event.conversationId,
@@ -161,12 +181,16 @@ export function createMemoryRuntime(
       writtenUserTurns.set(event.messageId, storedId);
       state.sourceTurnId = storedId;
     },
+    noteUserTurn(turnId) {
+      state.sourceTurnId = turnId;
+    },
     storedUserTurnId(messageId) {
       return writtenUserTurns.get(messageId);
     },
     onChatSettled(event) {
       state.sourceTurnId = null;
       if (
+        recordTurns &&
         event.assistantText.length > 0 &&
         !latestTurnIs(
           store,

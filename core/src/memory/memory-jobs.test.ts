@@ -13,13 +13,15 @@ import {
 } from "./derived.ts";
 import { type Embedder, FakeEmbedder } from "./embedder.ts";
 import { activeFacts, withoutSuperseded } from "./policy.ts";
-import { profileTokens } from "./profile-cap.ts";
+import { capProfile, profileTokens } from "./profile-cap.ts";
 import { InMemoryReflector } from "./reflect.ts";
 import {
   LocalReflector,
   parseReflectExtraction,
   type ReflectExtraction,
   rebuildDerivedMemory,
+  renderReflectPrompt,
+  selectReflectContext,
   type TextComplete,
 } from "./reflect-job.ts";
 import { InMemoryRetriever } from "./retrieve.ts";
@@ -193,13 +195,17 @@ const toolOptions = {
 };
 
 describe("memory.remember and memory.forget", () => {
-  it("stores a pinned fact with its source turn and forget supersedes it", async () => {
+  it("stores a pinned fact and forget hard-deletes that fact only", async () => {
     const derived = new InMemoryDerivedMemory();
     const vectors = new InMemoryVectorIndex();
     const embedder = new FakeEmbedder();
     const state: MemoryToolState = { sourceTurnId: "t1" };
+    const store = new InMemoryMemoryStore();
+    store.appendSession(session("ses-1"));
+    store.appendTurn(turn("t1", "The ECE midterm is Friday"));
     const tools = createMemoryTools({
       derived,
+      store,
       embedder,
       vectors,
       state,
@@ -265,23 +271,74 @@ describe("memory.remember and memory.forget", () => {
       sourceTurn: null,
       updatedAt: DAY,
     });
+    derived.insertFact(
+      fact({
+        id: "fact-sibling",
+        text: "gym locker is near the door",
+        sourceTurn: "t1",
+      }),
+    );
+    derived.upsertChunk({
+      chunkId: "chunk-1",
+      sessionId: "ses-1",
+      firstTurn: "t1",
+      lastTurn: "t1",
+      text: "user: The ECE midterm is Friday",
+    });
+    await vectors.upsert("vec_chunks", "chunk-1", embedding);
 
     const dropped = await forget?.execute?.({ text: "midterm" }, toolOptions);
     expect(dropped).toEqual({ forgotten: true, factIds: ["fact-1"] });
     expect(
       (await vectors.knn("vec_facts", embedding, 4)).map((hit) => hit.id),
     ).not.toContain("fact-1");
-    const rows = derived.listFacts();
-    const original = rows.find((row) => row.id === "fact-1");
-    expect(original?.supersededBy).toMatch(/^fact-/);
-    expect(rows.some((row) => row.id === "fact-1")).toBe(true);
-    expect(activeFacts(derived, DAY).map((row) => row.id)).not.toContain(
-      "fact-1",
+    expect(
+      (await vectors.knn("vec_chunks", embedding, 4)).map((hit) => hit.id),
+    ).not.toContain("chunk-1");
+    expect(derived.factById("fact-1")).toBeNull();
+    expect(derived.factById("fact-sibling")?.text).toBe(
+      "gym locker is near the door",
     );
-    expect(derived.listProfile()).toEqual([
-      expect.objectContaining({ key: "kept", pinned: false }),
-    ]);
+    expect(
+      derived.listFacts().some((row) => /forgotten|midterm/i.test(row.text)),
+    ).toBe(false);
+    expect(derived.forgottenTurnIds()).toEqual(["t1"]);
+    expect(derived.listChunks()).toEqual([]);
+    expect(
+      derived
+        .listProfile()
+        .map((row) => row.key)
+        .sort(),
+    ).toEqual(["kept", "linked"]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
+  });
+
+  it("returns candidates when several facts match and none is exact", async () => {
+    const derived = new InMemoryDerivedMemory();
+    const store = new InMemoryMemoryStore();
+    const tools = createMemoryTools({
+      derived,
+      store,
+      embedder: new FakeEmbedder(),
+      vectors: new InMemoryVectorIndex(),
+      state: { sourceTurnId: "t1" },
+      now: () => DAY,
+      ids: sequentialIds("fact"),
+    });
+    derived.insertFact(fact({ id: "a", text: "alpha midterm notes" }));
+    derived.insertFact(fact({ id: "b", text: "beta midterm notes" }));
+    const short = await tools[MEMORY_FORGET_TOOL]?.execute?.(
+      { text: "mid" },
+      toolOptions,
+    );
+    expect(short).toEqual({ forgotten: false, reason: "too short" });
+    expect(derived.factById("a")).not.toBeNull();
+    const ambiguous = await tools[MEMORY_FORGET_TOOL]?.execute?.(
+      { text: "midterm" },
+      toolOptions,
+    );
+    expect(ambiguous).toMatchObject({ forgotten: false, reason: "ambiguous" });
+    expect(derived.listFacts()).toHaveLength(2);
   });
 
   it("refuses a secret and does not write a fact", async () => {
@@ -289,6 +346,7 @@ describe("memory.remember and memory.forget", () => {
     const state: MemoryToolState = { sourceTurnId: "t1" };
     const tools = createMemoryTools({
       derived,
+      store: new InMemoryMemoryStore(),
       embedder: new FakeEmbedder(),
       vectors: new InMemoryVectorIndex(),
       state,
@@ -503,6 +561,47 @@ describe("reflect job", () => {
     expect(activeFacts(derived, DAY)[0]?.sourceTurn).toBe("t1");
   });
 
+  it("writes facts and the summary when the signal aborts after the model returns", async () => {
+    const controller = new AbortController();
+    const { derived, reflector } = harness(async () => {
+      controller.abort();
+      return extraction();
+    });
+    await reflector.reflect("ses-1", { signal: controller.signal });
+    expect(derived.summary("ses-1")).toBe("ECE midterm Friday");
+    expect(activeFacts(derived, DAY)).toHaveLength(1);
+    expect(derived.listJournal("ses-1")).toHaveLength(1);
+  });
+
+  it("does not mark reflect done when the model itself aborts", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { derived, reflector } = harness(async ({ signal }) => {
+      if (signal.aborted) {
+        throw abortError();
+      }
+      return extraction();
+    });
+    await expect(
+      reflector.reflect("ses-1", { signal: controller.signal }),
+    ).rejects.toThrow();
+    expect(derived.summary("ses-1")).toBeNull();
+    expect(derived.listFacts()).toEqual([]);
+  });
+
+  it("caps the reflect prompt at about 6k tokens of recent turns", () => {
+    const turns = Array.from({ length: 80 }, (_, index) =>
+      turn(`t-${index}`, "x".repeat(800), DAY + index),
+    );
+    const selected = selectReflectContext(turns, []);
+    expect(selected.turns.length).toBeLessThan(turns.length);
+    expect(selected.turns[0]?.id).not.toBe("t-0");
+    expect(selected.turns.at(-1)?.id).toBe("t-79");
+    const prompt = renderReflectPrompt("ses-1", turns, []);
+    expect(prompt).toContain("id=t-79");
+    expect(prompt).not.toContain("id=t-0");
+  });
+
   it("rejects a model reply that is not JSON", async () => {
     const { reflector } = harness(scripted("not json"));
     await expect(reflector.reflect("ses-1")).rejects.toThrow();
@@ -524,8 +623,13 @@ describe("consolidation", () => {
     const embedder = new NearEmbedder();
     const store = new InMemoryMemoryStore();
     store.appendSession(session("ses-1"));
+    store.appendSession(session("ses-old"));
     store.appendTurn(turn("today", "packed the bag", DAY));
     store.appendTurn(turn("yesterday", "old note", DAY - 86_400_000));
+    store.appendTurn({
+      ...turn("older", "kept chunk", DAY - 86_400_000),
+      sessionId: "ses-old",
+    });
     derived.insertFact(
       fact({
         id: "fresh",
@@ -554,6 +658,33 @@ describe("consolidation", () => {
     await embedFactText(embedder, vectors, "fresh", "alpha");
     await embedFactText(embedder, vectors, "copy", "alpha-near");
     await embedFactText(embedder, vectors, "stale", "beta");
+    derived.upsertChunk({
+      chunkId: "chunk-ses-1-stale-today",
+      sessionId: "ses-1",
+      firstTurn: "today",
+      lastTurn: "today",
+      text: "stale today chunk",
+    });
+    derived.upsertChunk({
+      chunkId: "chunk-ses-1-yesterday",
+      sessionId: "ses-1",
+      firstTurn: "yesterday",
+      lastTurn: "yesterday",
+      text: "old note",
+    });
+    derived.upsertChunk({
+      chunkId: "chunk-ses-old-0",
+      sessionId: "ses-old",
+      firstTurn: "older",
+      lastTurn: "older",
+      text: "kept chunk",
+    });
+    await vectors.upsert(
+      "vec_chunks",
+      "chunk-ses-1-stale-today",
+      staleVector(),
+    );
+    await vectors.upsert("vec_chunks", "chunk-ses-1-yesterday", oldVector());
     derived.upsertProfile({
       key: "name",
       value: "John",
@@ -577,7 +708,7 @@ describe("consolidation", () => {
       derived,
       embedder,
       vectors,
-      sessionIds: () => ["ses-1"],
+      sessionIds: () => ["ses-1", "ses-old"],
       readTurns: (sessionId) => store.recentTurns(sessionId, 100),
       now: () => DAY,
       timeZone: "UTC",
@@ -593,14 +724,28 @@ describe("consolidation", () => {
     expect(derived.factById("stale")?.supersededBy).toMatch(/^marker-/);
     expect(activeFacts(derived, DAY).map((row) => row.id)).toEqual(["copy"]);
     expect(derived.factById("fresh")?.supersededBy).toMatch(/^marker-/);
-    expect(profileTokens(derived.listProfile())).toBeLessThanOrEqual(800);
+    expect(
+      profileTokens(capProfile(derived.listProfile())),
+    ).toBeLessThanOrEqual(800);
+    expect(
+      derived.listProfile().some((row) => row.key.startsWith("note_")),
+    ).toBe(true);
     expect(
       derived.listProfile().some((row) => row.key === "name" && row.pinned),
     ).toBe(true);
     const chunks = derived.listChunks("ses-1");
     const chunkText = chunks.map((chunk) => chunk.text).join("\n");
     expect(chunkText).toContain("packed the bag");
-    expect(chunkText).not.toContain("old note");
+    expect(chunkText).toContain("old note");
+    expect(derived.listChunks("ses-old").map((chunk) => chunk.text)).toEqual([
+      "kept chunk",
+    ]);
+    const staleHits = await vectors.knn("vec_chunks", staleVector(), 4);
+    expect(staleHits.map((hit) => hit.id)).not.toContain(
+      "chunk-ses-1-stale-today",
+    );
+    const oldHits = await vectors.knn("vec_chunks", oldVector(), 4);
+    expect(oldHits.map((hit) => hit.id)).toContain("chunk-ses-1-yesterday");
     const first = chunks[0];
     expect(first).toBeDefined();
     const hits = await vectors.knn(
@@ -1020,10 +1165,13 @@ async function waitFor(ready: () => boolean): Promise<void> {
 
 class NearEmbedder implements Embedder {
   async embed(text: string): Promise<Float32Array> {
+    const bare = text
+      .replace(/^search_document: /, "")
+      .replace(/^search_query: /, "");
     const out = new Float32Array(EMBEDDING_DIMENSIONS);
-    if (text === "alpha" || text === "alpha-near") {
+    if (bare === "alpha" || bare === "alpha-near") {
       out[0] = 1;
-      out[1] = text === "alpha" ? 0 : 0.02;
+      out[1] = bare === "alpha" ? 0 : 0.02;
       return out;
     }
     if (text === "beta") {
@@ -1031,12 +1179,24 @@ class NearEmbedder implements Embedder {
       return out;
     }
     let hash = 0;
-    for (let index = 0; index < text.length; index += 1) {
-      hash = (hash + text.charCodeAt(index)) % EMBEDDING_DIMENSIONS;
+    for (let index = 0; index < bare.length; index += 1) {
+      hash = (hash + bare.charCodeAt(index)) % EMBEDDING_DIMENSIONS;
     }
     out[hash] = 1;
     return out;
   }
+}
+
+function staleVector(): Float32Array {
+  const out = new Float32Array(EMBEDDING_DIMENSIONS);
+  out[3] = 1;
+  return out;
+}
+
+function oldVector(): Float32Array {
+  const out = new Float32Array(EMBEDDING_DIMENSIONS);
+  out[4] = 1;
+  return out;
 }
 
 async function embedFactText(

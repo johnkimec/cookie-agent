@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 /**
  * Derived memory: profile, journal, facts, chunks, and session summaries.
  *
@@ -17,7 +19,11 @@ export const FACT_KINDS = [
 
 export type FactKind = (typeof FACT_KINDS)[number];
 
-/** Subject on a fact that exists only so `superseded_by` has a target. */
+/**
+ * Subject on a supersede marker (a correction, expiry, or merge).
+ * Forget does not write one of these. It deletes the fact and records
+ * the turn id in `forgotten_turns`.
+ */
 export const TOMBSTONE_SUBJECT = "memory:tombstone";
 
 export type FactRecord = {
@@ -79,15 +85,43 @@ export interface DerivedMemoryStore {
 
   upsertChunk(row: ChunkRecord): void;
   listChunks(sessionId?: string): ChunkRecord[];
+  deleteChunk(chunkId: string): void;
   deleteChunks(sessionId: string): void;
 
   setSummary(sessionId: string, summary: string): void;
+  /** Sets `sessions.summary` back to null. */
+  clearSummary(sessionId: string): void;
   summary(sessionId: string): string | null;
+
+  deleteFact(id: string): void;
+  deleteJournal(sessionId: string): void;
+
+  /**
+   * Remember that this turn must not be derived again.
+   * `forgottenAt` is an ISO date. `factIds` are the removed fact ids.
+   * No fact text is stored.
+   */
+  forgetTurn(
+    turnId: string,
+    forgottenAt: string,
+    factIds: readonly string[],
+  ): void;
+  /** Turn ids forget recorded. Retrieval (step 2D) excludes these. */
+  forgottenTurnIds(): string[];
 
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
 
-  /** Drops facts, profile, journal, chunks, and summaries. Keeps meta. */
+  /**
+   * Runs `work` as one commit. SQLite rolls it back on throw.
+   * The in-memory fake runs it inline.
+   */
+  transaction(work: () => void): void;
+
+  /**
+   * Drops facts, profile, journal, chunks, and summaries.
+   * Keeps meta and `forgotten_turns`, so rebuild cannot resurrect them.
+   */
   clearDerived(): void;
 }
 
@@ -99,12 +133,21 @@ export function sequentialIds(prefix: string): () => string {
   };
 }
 
+/** New id on every call. A restarted process must not reuse fact-1. */
+export function randomIds(prefix: string): () => string {
+  return () => `${prefix}-${randomUUID()}`;
+}
+
 export class InMemoryDerivedMemory implements DerivedMemoryStore {
   private readonly facts = new Map<string, FactRecord>();
   private readonly profile = new Map<string, ProfileRecord>();
   private readonly journal: JournalRecord[] = [];
   private readonly chunks = new Map<string, ChunkRecord>();
   private readonly summaries = new Map<string, string>();
+  private readonly forgotten = new Map<
+    string,
+    { at: string; factIds: string[] }
+  >();
   private readonly meta = new Map<string, string>();
 
   insertFact(fact: FactRecord): void {
@@ -178,6 +221,10 @@ export class InMemoryDerivedMemory implements DerivedMemoryStore {
       .map(cloneChunk);
   }
 
+  deleteChunk(chunkId: string): void {
+    this.chunks.delete(chunkId);
+  }
+
   deleteChunks(sessionId: string): void {
     for (const [id, row] of this.chunks) {
       if (row.sessionId === sessionId) {
@@ -190,8 +237,50 @@ export class InMemoryDerivedMemory implements DerivedMemoryStore {
     this.summaries.set(sessionId, summary);
   }
 
+  clearSummary(sessionId: string): void {
+    this.summaries.delete(sessionId);
+  }
+
   summary(sessionId: string): string | null {
     return this.summaries.get(sessionId) ?? null;
+  }
+
+  deleteFact(id: string): void {
+    if (!this.facts.has(id)) {
+      throw new Error(`unknown fact: ${id}`);
+    }
+    for (const fact of this.facts.values()) {
+      if (fact.supersededBy === id) {
+        fact.supersededBy = null;
+      }
+    }
+    this.facts.delete(id);
+  }
+
+  deleteJournal(sessionId: string): void {
+    for (let index = this.journal.length - 1; index >= 0; index -= 1) {
+      if (this.journal[index]?.sessionId === sessionId) {
+        this.journal.splice(index, 1);
+      }
+    }
+  }
+
+  forgetTurn(
+    turnId: string,
+    forgottenAt: string,
+    factIds: readonly string[],
+  ): void {
+    const prior = this.forgotten.get(turnId);
+    const merged = [...new Set([...(prior?.factIds ?? []), ...factIds])].sort();
+    this.forgotten.set(turnId, { at: forgottenAt, factIds: merged });
+  }
+
+  forgottenTurnIds(): string[] {
+    return [...this.forgotten.keys()].sort();
+  }
+
+  transaction(work: () => void): void {
+    work();
   }
 
   getMeta(key: string): string | null {
