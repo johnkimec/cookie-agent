@@ -80,6 +80,49 @@ jobs:
       - name: Package Cookie Agent.app
         run: app/Scripts/package-app.sh "${{ runner.temp }}/Cookie Agent.app"
 
+      - name: Render popup previews
+        timeout-minutes: 2
+        env:
+          COOKIE_DATA_DIR: ${{ runner.temp }}/popup-preview-data
+          COOKIE_RENDER_POPUP_PREVIEWS: ${{ runner.temp }}/popup-previews
+        run: |
+          mkdir -p "$COOKIE_DATA_DIR/logs" "$COOKIE_RENDER_POPUP_PREVIEWS"
+          "${{ runner.temp }}/Cookie Agent.app/Contents/MacOS/CookieAgent"
+          python3 - "$COOKIE_RENDER_POPUP_PREVIEWS" <<'PY'
+          import struct, sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+
+          def points(name):
+              data = (root / name).read_bytes()
+              if data[:8] != b"\x89PNG\r\n\x1a\n":
+                  raise SystemExit(f"{name} is not a png")
+              width, height = struct.unpack(">II", data[16:24])
+              scale = 2 if width >= 1000 else 1
+              return width / scale, height / scale
+
+          empty_w, empty_h = points("popup-empty.png")
+          short_w, short_h = points("popup-short.png")
+          long_w, long_h = points("popup-long.png")
+          if abs(empty_w - 560) > 2 or abs(short_w - 560) > 2 or abs(long_w - 560) > 2:
+              raise SystemExit(f"width {empty_w} {short_w} {long_w}")
+          if not (40 < empty_h < 80):
+              raise SystemExit(f"empty height {empty_h}")
+          if not (empty_h < short_h < 320):
+              raise SystemExit(f"short height {short_h}")
+          if abs(long_h - 320) > 1:
+              raise SystemExit(f"long height {long_h}")
+          print(f"popup previews empty {empty_h:.0f} short {short_h:.0f} long {long_h:.0f}")
+          PY
+
+      - name: Upload popup previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: popup-previews
+          path: ${{ runner.temp }}/popup-previews/popup-*.png
+          if-no-files-found: error
+
   type-strip-warning:
     name: Type-stripping stderr (Node 22.13)
     runs-on: ubuntu-latest
