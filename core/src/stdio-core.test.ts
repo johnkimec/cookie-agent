@@ -234,6 +234,13 @@ describe("stdio core", () => {
     expect(existsSync(join(dataDir, "cookie.db"))).toBe(false);
   });
 
+  it("exits on a bad COOKIE_REFLECT_IDLE_MS without speaking protocol", async () => {
+    const client = new StdioClient({ COOKIE_REFLECT_IDLE_MS: "soon" });
+    expect(await client.exitCode()).toBe(1);
+    const stderr = await client.stderrText();
+    expect(stderr).toContain("COOKIE_REFLECT_IDLE_MS");
+  });
+
   it("exits on a bad COOKIE_RERANK without speaking protocol", async () => {
     const client = new StdioClient(isolated({ COOKIE_RERANK: "yes" }).env);
     expect(await client.exitCode()).toBe(1);

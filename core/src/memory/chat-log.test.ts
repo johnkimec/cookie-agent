@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentCore } from "../agent-core.ts";
 import type { ModelProvider, ModelStream } from "../model/provider.ts";
 import {
@@ -11,7 +11,9 @@ import {
   messageErrors,
 } from "../protocol/validate.ts";
 import { ChatLog } from "./chat-log.ts";
+import { JournalReflector, type Reflector } from "./reflect.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
+import type { Memory } from "./types.ts";
 
 const dirs: string[] = [];
 
@@ -197,6 +199,116 @@ describe("chat log wired into the core", () => {
     expect(store.recentTurns("conv-a", 10).map((row) => row.content)).toContain(
       "keep this",
     );
+    store.close();
+  });
+
+  it("reflects the session a new conversation ends, before that turn", async () => {
+    const path = tempDbPath();
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
+    const journal = new JournalReflector(store.database(), () =>
+      store.currentTime(),
+    );
+    const reflected: Array<{ id: string; opts: unknown }> = [];
+    const reflector: Reflector = {
+      async reflect(sessionId, opts) {
+        reflected.push({ id: sessionId, opts });
+        await journal.reflect(sessionId);
+      },
+    };
+    const harness = coreFor(
+      new ChatLog(store, null, null, { reflector }),
+      seen,
+      () => 2_000,
+    );
+    await ready(harness.core, harness.messages);
+    send(harness.core, chat("2", "conv-a", "keep this"));
+    await untilDone(harness.messages, "msg-1");
+    send(harness.core, chat("3", "conv-b", "new chat"));
+    await untilDone(harness.messages, "msg-2");
+    const rows = store
+      .database()
+      .prepare("SELECT entry FROM journal")
+      .all() as Array<{ entry: string }>;
+    expect(rows.map((row) => row.entry)).toEqual(["reflected conv-a"]);
+    expect(reflected).toEqual([{ id: "conv-a", opts: undefined }]);
+    store.close();
+  });
+
+  it("keeps the chat when reflect throws and retries that session later", async () => {
+    const path = tempDbPath();
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
+    const calls: string[] = [];
+    let fail = true;
+    const reflector: Reflector = {
+      async reflect(sessionId) {
+        calls.push(sessionId);
+        if (fail) {
+          throw new Error("reflect down");
+        }
+      },
+    };
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        lines.push(String(chunk));
+        return true;
+      });
+    try {
+      const harness = coreFor(
+        new ChatLog(store, null, null, { reflector }),
+        seen,
+        () => 2_000,
+      );
+      await ready(harness.core, harness.messages);
+      send(harness.core, chat("2", "conv-a", "keep this"));
+      await untilDone(harness.messages, "msg-1");
+      send(harness.core, chat("3", "conv-b", "new chat"));
+      await untilDone(harness.messages, "msg-2");
+      expect(calls).toEqual(["conv-a"]);
+      expect(lines.join("")).toContain(
+        "cookie-core: reflect failed: reflect down",
+      );
+      const rows = store.database().prepare("SELECT id FROM journal").all();
+      expect(rows).toEqual([]);
+      fail = false;
+      send(harness.core, chat("4", "conv-c", "later"));
+      await untilDone(harness.messages, "msg-3");
+      expect(calls).toEqual(["conv-a", "conv-a", "conv-b"]);
+    } finally {
+      spy.mockRestore();
+    }
+    store.close();
+  });
+
+  it("writes retrieved ids to the trace file", async () => {
+    const dir = tempDbPath().replace(/cookie\.db$/, "");
+    const trace = join(dir, "retrieval.jsonl");
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(join(dir, "cookie.db"), {
+      now: () => 3_000,
+    });
+    const memory: Memory = { id: "mem-1", text: "alpha", source: "turn" };
+    const harness = coreFor(
+      new ChatLog(
+        store,
+        null,
+        { retrieve: async () => [memory] },
+        { tracePath: trace },
+      ),
+      seen,
+      () => 3_000,
+    );
+    await ready(harness.core, harness.messages);
+    send(harness.core, chat("2", "conv-1", "where is alpha"));
+    await untilDone(harness.messages, "msg-1");
+    const lines = readFileSync(trace, "utf8").trim().split("\n");
+    expect(JSON.parse(lines[0] ?? "{}")).toEqual({
+      conversationId: "conv-1",
+      ids: ["mem-1"],
+    });
     store.close();
   });
 });

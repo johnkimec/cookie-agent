@@ -6,7 +6,9 @@
 
 import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
+import { installLoopbackGuard } from "./loopback-guard.ts";
 import { ChatLog } from "./memory/chat-log.ts";
+import { clockFromEnv } from "./memory/clock.ts";
 import { cachedProbe } from "./memory/embed-config.ts";
 import {
   DEFAULT_EMBED_TIMEOUT_MS,
@@ -17,6 +19,11 @@ import {
 import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
 import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
+import {
+  JournalReflector,
+  readReflectIdleMs,
+  reflectHookRequested,
+} from "./memory/reflect.ts";
 import {
   completeText,
   ModelReranker,
@@ -36,6 +43,7 @@ import type { ModelProvider } from "./model/provider.ts";
 export function startStdioCore(
   env: NodeJS.ProcessEnv = process.env,
 ): AgentCore {
+  installLoopbackGuard(env);
   let port: number;
   let thinking: boolean;
   let history: ChatLog;
@@ -46,10 +54,16 @@ export function startStdioCore(
     const embedPort = readEmbedPort(env);
     const weights = readRrfWeights(env);
     const rerankConfig = readRerankConfig(env);
+    // Always a number. The hook is installed only when the variable is
+    // a non-empty string, so the default 600000 does not reflect.
+    readReflectIdleMs(env);
+    const reflect = reflectHookRequested(env);
     // Every env read stays above the open. A bad timeout must not create
     // cookie.db, and a test must not fall through to the product directory.
     const queryTimeoutMs = readQueryEmbedTimeoutMs(env);
-    const store = SqliteMemoryStore.open(memoryDatabasePath(env));
+    const store = SqliteMemoryStore.open(memoryDatabasePath(env), {
+      now: clockFromEnv(env),
+    });
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
       timeoutMs: queryTimeoutMs,
@@ -87,7 +101,13 @@ export function startStdioCore(
       store,
       rerank: (query, candidates) => reranker.rerank(query, candidates),
     });
-    history = new ChatLog(store, indexer, retriever);
+    const trace = env.COOKIE_RETRIEVAL_TRACE;
+    history = new ChatLog(store, indexer, retriever, {
+      reflector: reflect
+        ? new JournalReflector(store.database(), () => store.currentTime())
+        : null,
+      tracePath: trace === undefined || trace === "" ? null : trace,
+    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "bad config";
     process.stderr.write(`cookie-core: ${detail}\n`);
