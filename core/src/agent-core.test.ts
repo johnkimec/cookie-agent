@@ -24,7 +24,10 @@ interface Harness {
   core: AgentCore;
 }
 
-function textChunks(parts: string[], finish: "stop" | "length" = "stop") {
+function textChunks(
+  parts: string[],
+  finish: "stop" | "length" | "error" = "stop",
+) {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "t1" },
@@ -52,7 +55,7 @@ function textChunks(parts: string[], finish: "stop" | "length" = "stop") {
 
 function scriptedProvider(options: {
   parts?: string[];
-  finish?: "stop" | "length";
+  finish?: "stop" | "length" | "error";
   delayMs?: number | null;
   probe?: () => Promise<RuntimeState>;
   onStream?: (signal: AbortSignal | undefined) => void;
@@ -104,7 +107,11 @@ function scriptedProvider(options: {
 
 function harnessFor(
   provider: ModelProvider,
-  options: { probeTimeoutMs?: number; now?: () => number } = {},
+  options: {
+    probeTimeoutMs?: number;
+    now?: () => number;
+    watchIntervalMs?: number;
+  } = {},
 ): Harness {
   const harness: Harness = {
     messages: [],
@@ -116,6 +123,7 @@ function harnessFor(
     provider,
     probeTimeoutMs: options.probeTimeoutMs ?? 200,
     now: options.now,
+    watchIntervalMs: options.watchIntervalMs,
     emit: (message) => {
       expect(isCookieMessage(message), messageErrors(message)).toBe(true);
       harness.messages.push(message);
@@ -187,6 +195,20 @@ async function ready(harness: Harness): Promise<void> {
         isRecord(message.params),
     ),
   );
+}
+
+function statusStates(messages: unknown[]): string[] {
+  const states: string[] = [];
+  for (const message of messages) {
+    if (!isRecord(message) || message.method !== "runtime.status") {
+      continue;
+    }
+    if (!isRecord(message.params) || typeof message.params.state !== "string") {
+      continue;
+    }
+    states.push(message.params.state);
+  }
+  return states;
 }
 
 function deltasOf(messages: unknown[]): string[] {
@@ -421,6 +443,26 @@ describe("agent core", () => {
     );
   });
 
+  it("keeps finishReason error when a failed completion has no text", async () => {
+    const { provider } = scriptedProvider({ parts: [], finish: "error" });
+    const harness = harnessFor(provider);
+    await ready(harness);
+    send(harness, chatSend("2", "fail empty"));
+    await waitFor(harness, () =>
+      harness.messages.some(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    );
+    expect(deltasOf(harness.messages)).toEqual([]);
+    expect(
+      harness.messages.find(
+        (message) => isRecord(message) && message.method === "chat.done",
+      ),
+    ).toMatchObject({
+      params: { finishReason: "error" },
+    });
+  });
+
   it("finishes an empty completion with stop and no deltas", async () => {
     const { provider } = scriptedProvider({ parts: [] });
     const harness = harnessFor(provider);
@@ -532,6 +574,154 @@ describe("agent core", () => {
         (message) => isRecord(message) && message.method === "chat.done",
       ),
     ).toBe(false);
+  });
+
+  it("follows a llama-server restart and fails the in-flight chat", async () => {
+    const stub = await startLlamaStub(0);
+    const provider = createLlamaServerProvider({ port: stub.port });
+    const harness = harnessFor(provider, { watchIntervalMs: 40 });
+    try {
+      await ready(harness);
+      stub.holdAfterFirstChunk(true);
+      send(harness, chatSend("2", "hold this reply"));
+      await waitFor(harness, () => deltasOf(harness.messages).length >= 1);
+      await stub.kill();
+      await waitFor(
+        harness,
+        () =>
+          statusStates(harness.messages).includes("down") &&
+          harness.messages.some(
+            (message) =>
+              isRecord(message) &&
+              message.method === "chat.done" &&
+              isRecord(message.params) &&
+              message.params.finishReason === "error",
+          ),
+        4000,
+      );
+      stub.setHealth("loading");
+      await stub.resume();
+      await waitFor(
+        harness,
+        () => statusStates(harness.messages).at(-1) === "loading",
+        4000,
+      );
+      stub.setHealth("up");
+      await waitFor(
+        harness,
+        () => statusStates(harness.messages).at(-1) === "up",
+        4000,
+      );
+      expect(statusStates(harness.messages)).toEqual([
+        "up",
+        "down",
+        "loading",
+        "up",
+      ]);
+      const failed = harness.messages.find(
+        (message) =>
+          isRecord(message) &&
+          message.method === "chat.done" &&
+          isRecord(message.params) &&
+          message.params.finishReason === "error",
+      );
+      expect(failed).toMatchObject({
+        params: {
+          messageId: "msg-1",
+          finishReason: "error",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+      });
+      expect(deltasOf(harness.messages).length).toBeGreaterThan(0);
+      stub.holdAfterFirstChunk(false);
+      send(harness, chatSend("3", "after restart"));
+      await waitFor(
+        harness,
+        () =>
+          harness.messages.filter(
+            (message) => isRecord(message) && message.method === "chat.done",
+          ).length >= 2,
+        4000,
+      );
+      const dones = harness.messages.filter(
+        (message) => isRecord(message) && message.method === "chat.done",
+      );
+      expect(dones[1]).toMatchObject({
+        params: { messageId: "msg-2", finishReason: "stop" },
+      });
+      expect(statusStates(harness.messages)).toEqual([
+        "up",
+        "down",
+        "loading",
+        "up",
+      ]);
+      expect(harness.exitCode).toBeNull();
+      expect(
+        harness.messages.every((message) => isCookieMessage(message)),
+      ).toBe(true);
+    } finally {
+      if (harness.exitCode === null) {
+        send(harness, {
+          jsonrpc: "2.0",
+          id: "9",
+          method: "shutdown",
+          params: {},
+        });
+        await waitFor(harness, () => harness.exitCode !== null).catch(
+          () => undefined,
+        );
+      }
+      await stub.close();
+    }
+  });
+
+  it("does not let the watch override a fresh shell push", async () => {
+    const stub = await startLlamaStub(0);
+    const provider = createLlamaServerProvider({ port: stub.port });
+    const harness = harnessFor(provider, { watchIntervalMs: 30 });
+    try {
+      await ready(harness);
+      send(harness, {
+        jsonrpc: "2.0",
+        method: "runtime.status",
+        params: { state: "loading", modelId: DEFAULT_MODEL_ID },
+      });
+      await new Promise((resolve) => {
+        setTimeout(resolve, 150);
+      });
+      send(harness, {
+        jsonrpc: "2.0",
+        id: "2",
+        method: "runtime.status",
+        params: {},
+      });
+      await waitFor(harness, () =>
+        harness.messages.some(
+          (message) => isRecord(message) && message.id === "2",
+        ),
+      );
+      expect(statusStates(harness.messages)).toEqual(["up"]);
+      expect(
+        harness.messages.find(
+          (message) => isRecord(message) && message.id === "2",
+        ),
+      ).toMatchObject({
+        result: { state: "loading", modelId: DEFAULT_MODEL_ID },
+      });
+    } finally {
+      if (harness.exitCode === null) {
+        send(harness, {
+          jsonrpc: "2.0",
+          id: "9",
+          method: "shutdown",
+          params: {},
+        });
+        await waitFor(harness, () => harness.exitCode !== null).catch(
+          () => undefined,
+        );
+      }
+      await stub.close();
+    }
   });
 
   it("marks the runtime down when a fresh send's connection fails", async () => {

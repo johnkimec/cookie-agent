@@ -1,11 +1,11 @@
 /**
  * Stdio entry for the real core.
- * Run: node --experimental-strip-types src/stdio-core.ts
+ * Run: node --experimental-strip-types --disable-warning=ExperimentalWarning src/stdio-core.ts
  * Logs go to stderr. stdout is protocol only.
  */
 
 import { createInterface } from "node:readline";
-import { AgentCore } from "./agent-core.ts";
+import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import {
   createLlamaServerProvider,
   readLlamaPort,
@@ -27,6 +27,7 @@ export function startStdioCore(
   }
   const core = new AgentCore({
     provider: createLlamaServerProvider({ port, thinking }),
+    watchIntervalMs: RUNTIME_WATCH_MS,
   });
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   process.stdout.on("error", () => {

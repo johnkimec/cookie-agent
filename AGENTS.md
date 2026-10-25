@@ -4,7 +4,7 @@ Instructions for coding agents working in this repository. Cookie, the product, 
 
 ## Project
 
-Cookie is an open-source, local-first Mac companion. A non-sandboxed Swift 6 / SwiftUI app owns the UI, macOS permissions, and Mac tools. It spawns a TypeScript agent core (Node 22+, AI SDK 7) as a child process. They talk newline-delimited JSON-RPC 2.0 over stdio. A local llama.cpp `llama-server` on 127.0.0.1 serves Qwen3.6-35B-A3B. Memory is SQLite. Local-only is the default. Hosted escalation is opt-in.
+Cookie is an open-source, local-first Mac companion. A non-sandboxed Swift 6 / SwiftUI app owns the UI, macOS permissions, and Mac tools. It spawns a TypeScript agent core (Node 22.6+, AI SDK 7) as a child process. They talk newline-delimited JSON-RPC 2.0 over stdio. A local llama.cpp `llama-server` on 127.0.0.1 serves Qwen3.6-35B-A3B. Memory is SQLite. Local-only is the default. Hosted escalation is opt-in.
 
 The mascot is an animated white maltipoo named Cookie, animated with Rive. Inside the app the name is Cookie. The repository is `johnkimec/cookie-agent`. The app file is `Cookie Agent.app`.
 
@@ -36,7 +36,7 @@ The UI spec also sketches `apps/mac/`, `brand/`, `runtime/`, `scripts/`, and `co
 
 ## Commands
 
-From the repository root, with Node 22 and pnpm 10:
+From the repository root, with Node 22.6+ (`.nvmrc` is `22`) and pnpm 10:
 
 ```bash
 pnpm install
@@ -47,7 +47,7 @@ pnpm --filter @cookie-agent/core test
 
 `pnpm lint`, `pnpm typecheck`, and `pnpm test` run the same three commands.
 
-`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `pnpm core` is the real core: it dials llama-server on `127.0.0.1:$COOKIE_LLAMA_PORT` (default `8080`). Thinking stays off unless `COOKIE_THINKING=1`. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. `--core fake` is the default. `--core real` drives the real core against a stub on port `18080`. See [protocol/README.md](protocol/README.md).
+`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `pnpm core` is the real core: it dials llama-server on `127.0.0.1:$COOKIE_LLAMA_PORT` (default `8080`). Both scripts pass `--disable-warning=ExperimentalWarning` so Node 22.13's type-stripping warning stays off stderr. Thinking stays off unless `COOKIE_THINKING=1`, and every request then sends `chat_template_kwargs.enable_thinking` false. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. `--core fake` is the default. `--core real` drives the real core against a stub on port `18080`. `--llama external` with `--core real` does not start that stub; it uses whatever is already serving `COOKIE_LLAMA_PORT`. See [protocol/README.md](protocol/README.md).
 
 On a Mac, build and test the shell, then launch it against the fake core. `open` drops the shell environment, so run the executable. Linux CI does not build `app/`. macOS CI does.
 
