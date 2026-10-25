@@ -45,12 +45,13 @@ function run(
   args: string[],
   runtimeDir: string,
   extraEnv: NodeJS.ProcessEnv = {},
+  timeout = 20000,
 ) {
   return exec(script, args, {
     cwd: repoRoot,
     env: { ...process.env, COOKIE_VERIFY_RUNTIME: runtimeDir, ...extraEnv },
     encoding: "utf8",
-    timeout: 20000,
+    timeout,
   });
 }
 
@@ -329,6 +330,142 @@ describe("verify-cookie drive-core", () => {
       await rm(evidence, { recursive: true, force: true });
     }
   }, 20000);
+
+  it("drives memory remember into a pinned fact and a new conversation", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        ["drive", "memory-remember", "--evidence", evidence, "--core", "real"],
+        root,
+        {},
+        30000,
+      );
+      expect(result.stdout).toContain("remember true\n");
+      expect(result.stdout).toContain("pinned true\n");
+      expect(result.stdout).toContain("egress 0\n");
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain("ECE midterm is Friday");
+      expect(dbText).toContain('"pinned":1');
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain("conv-remember-next");
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("drives memory forget so only the raw turn keeps the code", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        ["drive", "memory-forget", "--evidence", evidence, "--core", "real"],
+        root,
+        {},
+        30000,
+      );
+      expect(result.stdout).toContain("forget true\n");
+      expect(result.stdout).toContain("retrieval dropped\n");
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain("Remember the locker code is 4417");
+      expect(dbText).not.toMatch(/^fact .*"4417"/m);
+      const command = await readFile(join(evidence, "command.txt"), "utf8");
+      expect(command).toContain("COOKIE_REFLECT_IDLE_MS=250");
+      const stderr = await readFile(join(evidence, "stderr.txt"), "utf8");
+      expect(stderr).not.toContain("4417");
+      expect(stderr).toMatch(/^memory\.forget facts=\S+ turns=\S+$/m);
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("drives memory reflect to abort on chat.send and then write a fact", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        ["drive", "memory-reflect", "--evidence", evidence, "--core", "real"],
+        root,
+        {},
+        30000,
+      );
+      expect(result.stdout).toContain("reflect aborted\n");
+      expect(result.stdout).toContain("journal 1\n");
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toMatch(/^journal /m);
+      expect(dbText).toMatch(/^fact .*"source_turn":"conv-/m);
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("drives the profile cap and keeps the pinned name", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        [
+          "drive",
+          "memory-profile-cap",
+          "--evidence",
+          evidence,
+          "--core",
+          "real",
+        ],
+        root,
+        {},
+        30000,
+      );
+      expect(result.stdout).toContain("profile capped\n");
+      expect(result.stdout).toContain("pinned kept\n");
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain('"key":"name"');
+      expect(dbText).toContain('"key":"note_15"');
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("drives memory rebuild from turns and recalls the turn", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        ["drive", "memory-rebuild", "--evidence", evidence, "--core", "real"],
+        root,
+        {},
+        30000,
+      );
+      expect(result.stdout).toContain("rebuild true\n");
+      expect(result.stdout).toContain("recall true\n");
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain("amber marker for the rebuild check");
+      expect(dbText).not.toContain("rebuild-should-drop-this");
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("still rejects memory-recall because that drive is not written", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const failed = await run(
+        ["drive", "memory-recall", "--evidence", evidence, "--core", "real"],
+        root,
+      ).then(
+        () => ({ code: 0, stdout: "", stderr: "" }),
+        (error: unknown) => capturedFailure(error),
+      );
+      expect(failed.code).toBe(2);
+      expect(failed.stderr).toContain("usage:");
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  });
 
   it("drives a llama stub restart through up, down, loading, and up", async () => {
     const root = await runtime();

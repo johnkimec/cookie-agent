@@ -51,6 +51,13 @@ import {
   STUB_REPLY_CHUNKS,
   startLlamaStub,
 } from "./verify-llama-stub.ts";
+import {
+  assertForgetStderr,
+  isMemoryDriveFeature,
+  memoryDriveIdleMs,
+  memoryStubOptions,
+  runMemoryDrive,
+} from "./verify-memory-drives.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fakeCorePath = join(repoRoot, "core/src/fake-core.ts");
@@ -63,6 +70,11 @@ type DriveFeature =
   | "model-status"
   | "chat-history"
   | "memory-persist"
+  | "memory-remember"
+  | "memory-forget"
+  | "memory-reflect"
+  | "memory-profile-cap"
+  | "memory-rebuild"
   | "runtime-restart";
 const schemaPath = join(repoRoot, "protocol/schema/cookie-rpc.schema.json");
 const llamaPort = "18080";
@@ -141,7 +153,7 @@ class LineQueue {
   }
 }
 
-class CoreSession {
+export class CoreSession {
   readonly transcript: TranscriptEntry[] = [];
   readonly side: unknown[] = [];
   readonly stderr: Buffer[] = [];
@@ -192,11 +204,13 @@ class CoreSession {
     deltaMs: string,
     kind: CoreKind,
     llama: LlamaMode,
+    extraEnv: NodeJS.ProcessEnv = {},
   ): CoreSession {
     mkdirSync(dataDir, { recursive: true });
     const entry = kind === "real" ? realCorePath : fakeCorePath;
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      ...extraEnv,
       COOKIE_DATA_DIR: dataDir,
       COOKIE_FAKE_DELTA_MS: deltaMs,
     };
@@ -1422,14 +1436,19 @@ function commandLines(
   dataDir: string,
   deltaMs: string,
   port: string,
+  idleMs?: string,
 ): string {
-  return [
+  const lines = [
     `.cursor/skills/verify-cookie/bin/drive-core ${args}`,
     `COOKIE_DATA_DIR=${dataDir}`,
     `COOKIE_LLAMA_PORT=${port}`,
     `COOKIE_FAKE_DELTA_MS=${deltaMs}`,
-    "",
-  ].join("\n");
+  ];
+  if (idleMs !== undefined) {
+    lines.push(`COOKIE_REFLECT_IDLE_MS=${idleMs}`);
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 async function writeEvidence(
@@ -1442,6 +1461,7 @@ async function writeEvidence(
   summary: string,
   timings?: string,
   dbText?: string,
+  idleMs?: string,
 ): Promise<void> {
   await mkdir(evidenceDir, { recursive: true });
   const lines = session.transcript
@@ -1449,7 +1469,7 @@ async function writeEvidence(
     .join("\n");
   await writeFile(
     join(evidenceDir, "command.txt"),
-    commandLines(args, dataDir, deltaMs, port),
+    commandLines(args, dataDir, deltaMs, port, idleMs),
   );
   await writeFile(
     join(evidenceDir, "transcript.jsonl"),
@@ -1494,6 +1514,11 @@ async function driveFeature(
   rememberScratch(runDir);
   const port = effectiveLlamaPort(llama);
   const args = driveArgs(feature, evidence, kind, llama);
+  const idleMs = isMemoryDriveFeature(feature)
+    ? memoryDriveIdleMs(feature)
+    : undefined;
+  const childEnv =
+    idleMs === undefined ? {} : { COOKIE_REFLECT_IDLE_MS: idleMs };
   let stub: LlamaStub | null = null;
   let session: CoreSession | null = null;
   let summary = "not-ok\n";
@@ -1502,12 +1527,9 @@ async function driveFeature(
   let code = 1;
   try {
     if (kind === "real" && llama === "stub") {
-      stub = await startLlamaStub(
-        Number(llamaPort),
-        feature === "memory-persist" ? { recallWord: HISTORY_CODE_WORD } : {},
-      );
+      stub = await startLlamaStub(Number(llamaPort), stubOptions(feature));
     }
-    session = CoreSession.spawn(dataDir, deltaMs, kind, llama);
+    session = CoreSession.spawn(dataDir, deltaMs, kind, llama, childEnv);
     if (feature === "chat-history") {
       const produced = await runChatHistory(session, port);
       summary = produced.summary;
@@ -1517,6 +1539,27 @@ async function driveFeature(
         throw new Error("memory-persist has no llama stub");
       }
       const produced = await runMemoryPersist(session, dataDir, port);
+      summary = produced.summary;
+      dbText = produced.dbText;
+      session = produced.session;
+    } else if (isMemoryDriveFeature(feature)) {
+      if (stub === null) {
+        throw new Error(`${feature} has no llama stub`);
+      }
+      const produced = await runMemoryDrive({
+        feature,
+        session,
+        stub,
+        dataDir,
+        port,
+        boot: (next) => waitForRuntimeUp(next, "real", 15_000, port),
+        respawn: () =>
+          CoreSession.spawn(dataDir, "0", "real", "stub", childEnv),
+        release: async (old) => {
+          await old.dispose();
+          forgetPid(old.pid);
+        },
+      });
       summary = produced.summary;
       dbText = produced.dbText;
       session = produced.session;
@@ -1534,7 +1577,9 @@ async function driveFeature(
     // The type-stripping ExperimentalWarning is not that error. Spawn flags
     // remove it; this check does not.
     const stderr = session.stderrText().trim();
-    if (stderr !== "" && feature !== "runtime-restart") {
+    if (feature === "memory-forget") {
+      assertForgetStderr(stderr);
+    } else if (stderr !== "" && feature !== "runtime-restart") {
       throw new Error(`stderr: ${stderr}`);
     }
     code = 0;
@@ -1557,6 +1602,7 @@ async function driveFeature(
         summary,
         timings,
         dbText,
+        idleMs,
       );
     }
     await stub?.close();
@@ -1585,6 +1631,11 @@ function usage(): number {
       "  drive-core drive model-status --evidence <dir> [--core fake|real]",
       "  drive-core drive chat-history --evidence <dir> --core real --llama external",
       "  drive-core drive memory-persist --evidence <dir> --core real",
+      "  drive-core drive memory-remember --evidence <dir> --core real",
+      "  drive-core drive memory-forget --evidence <dir> --core real",
+      "  drive-core drive memory-reflect --evidence <dir> --core real",
+      "  drive-core drive memory-profile-cap --evidence <dir> --core real",
+      "  drive-core drive memory-rebuild --evidence <dir> --core real",
       "  drive-core drive runtime-restart --evidence <dir> --core real",
       "  drive-core drive menu-bar-icon",
       "  drive-core drive hotkey-popup",
@@ -1666,10 +1717,27 @@ function evidenceFilesFor(feature: DriveFeature): readonly string[] {
   if (feature === "chat-history") {
     files.push("timings.txt");
   }
-  if (feature === "memory-persist") {
+  if (feature === "memory-persist" || isMemoryDriveFeature(feature)) {
     files.push("db.txt");
   }
   return files;
+}
+
+function stubOptions(feature: DriveFeature): {
+  recallWord?: string;
+  script?: ReturnType<typeof memoryStubOptions>["script"];
+} {
+  if (feature === "memory-persist") {
+    return { recallWord: HISTORY_CODE_WORD };
+  }
+  if (isMemoryDriveFeature(feature)) {
+    return memoryStubOptions(feature);
+  }
+  return {};
+}
+
+function requiresRealStub(feature: DriveFeature): boolean {
+  return feature === "memory-persist" || isMemoryDriveFeature(feature);
 }
 
 function invocation(code: number): DriveInvocation {
@@ -1751,7 +1819,8 @@ export async function main(argv: string[]): Promise<DriveInvocation> {
     feature !== "model-status" &&
     feature !== "chat-history" &&
     feature !== "memory-persist" &&
-    feature !== "runtime-restart"
+    feature !== "runtime-restart" &&
+    !isMemoryDriveFeature(feature)
   ) {
     return invocation(usage());
   }
@@ -1774,9 +1843,9 @@ export async function main(argv: string[]): Promise<DriveInvocation> {
     );
     return invocation(usage());
   }
-  if (feature === "memory-persist" && (kind !== "real" || llama !== "stub")) {
+  if (requiresRealStub(feature) && (kind !== "real" || llama !== "stub")) {
     process.stderr.write(
-      "memory-persist requires --core real and the built-in stub\n",
+      `${feature} requires --core real and the built-in stub\n`,
     );
     return invocation(usage());
   }
