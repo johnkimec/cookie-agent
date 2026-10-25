@@ -237,13 +237,26 @@ public enum RuntimeSpawnError: Error, Equatable, Sendable {
     case failed(String)
 }
 
+/// True when argv has `--port` followed by `port` as its own argument.
+public func commandArgumentsContainPort(_ arguments: [String], port: Int) -> Bool {
+    let needle = String(port)
+    var index = 0
+    while index + 1 < arguments.count {
+        if arguments[index] == "--port", arguments[index + 1] == needle {
+            return true
+        }
+        index += 1
+    }
+    return false
+}
+
 public protocol RuntimeLaunching: Sendable {
     func start(_ spec: RuntimeProcessSpec) throws -> OwnedProcess
     func isAlive(_ pid: Int32) -> Bool
     func terminate(pid: Int32, processGroup: Int32, leadsGroup: Bool)
     func forceTerminate(pid: Int32, processGroup: Int32, leadsGroup: Bool)
     func reap(_ pid: Int32) -> Int32?
-    func isOurServer(pid: Int32, executable: String) -> Bool
+    func isOurServer(pid: Int32, executable: String, port: Int) -> Bool
 }
 
 public protocol RuntimeHealthChecking: Sendable {

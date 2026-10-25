@@ -904,6 +904,7 @@ final class RuntimeSupervisorTests: XCTestCase {
         let launcher = ScriptedLauncher()
         launcher.alive.insert(42)
         launcher.ourPids.insert(42)
+        launcher.argumentsByPid[42] = ["--port", "8080"]
         let pids = MemoryPidStore()
         pids.record = RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true)
         let supervisor = makeSupervisor(
@@ -924,6 +925,52 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertEqual(launcher.terminated, [42])
         XCTAssertTrue(launcher.killed.isEmpty)
         XCTAssertNil(pids.record)
+    }
+
+    func testRecordedServerOnAnotherPortIsNotAdopted() async {
+        let launcher = ScriptedLauncher()
+        launcher.alive.insert(42)
+        launcher.ourPids.insert(42)
+        launcher.argumentsByPid[42] = ["--port", "8081"]
+        let pids = MemoryPidStore()
+        pids.record = RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true)
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: ScriptedHealth(results: [.up]),
+            pids: pids,
+            clock: ScriptedClock()
+        )
+        await supervisor.start()
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertFalse(ownsProcess)
+        XCTAssertNil(pids.record)
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertTrue(launcher.terminated.isEmpty)
+    }
+
+    func testStopDuringProbeDoesNotSpawn() async {
+        let launcher = ScriptedLauncher()
+        let health = HoldProbe(holdAfter: 1)
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: health,
+            pids: MemoryPidStore(),
+            clock: ScriptedClock()
+        )
+        let running = Task { await supervisor.start() }
+        await health.waitUntilHeld()
+        await supervisor.stop()
+        health.releaseHold()
+        await running.value
+        XCTAssertTrue(launcher.started.isEmpty)
+    }
+
+    func testCommandArgumentsContainPort() {
+        XCTAssertTrue(commandArgumentsContainPort(["--port", "8080"], port: 8080))
+        XCTAssertTrue(commandArgumentsContainPort(["--embeddings", "--port", "8081", "-ngl", "99"], port: 8081))
+        XCTAssertFalse(commandArgumentsContainPort(["--port", "8081"], port: 8080))
+        XCTAssertFalse(commandArgumentsContainPort(["--port"], port: 8080))
+        XCTAssertFalse(commandArgumentsContainPort(["--port=8080"], port: 8080))
     }
 
     func testLaunchWritesPidFileUnderDataDir() async throws {
@@ -1036,7 +1083,20 @@ final class RuntimeSupervisorTests: XCTestCase {
             logFile: log
         ))
         XCTAssertTrue(launcher.isAlive(slept.pid))
-        XCTAssertTrue(launcher.isOurServer(pid: slept.pid, executable: "/bin/sleep"))
+        XCTAssertFalse(launcher.isOurServer(pid: slept.pid, executable: "/bin/sleep", port: 8080))
+        let ported = try launcher.start(RuntimeProcessSpec(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 30", "--port", "8080"],
+            logFile: log
+        ))
+        XCTAssertTrue(launcher.isOurServer(pid: ported.pid, executable: "/bin/sh", port: 8080))
+        XCTAssertFalse(launcher.isOurServer(pid: ported.pid, executable: "/bin/sh", port: 8081))
+        XCTAssertFalse(launcher.isOurServer(pid: ported.pid, executable: "/bin/sleep", port: 8080))
+        launcher.terminate(
+            pid: ported.pid,
+            processGroup: ported.processGroup,
+            leadsGroup: ported.leadsGroup
+        )
         XCTAssertEqual(slept.processGroup, slept.pid)
         XCTAssertTrue(slept.leadsGroup)
         XCTAssertEqual(getpgid(slept.pid), slept.pid)
@@ -1291,6 +1351,54 @@ final class RuntimeServersTests: XCTestCase {
         XCTAssertEqual(plan.chatLaunch.port, 8080)
     }
 
+    func testEmbedPortMatchingChatPortSkips() async {
+        let chatLauncher = ScriptedLauncher()
+        let calls = FactoryCalls()
+        let plan = RuntimeServers.make(
+            environment: [
+                "COOKIE_LLAMA_PORT": "18080",
+                "COOKIE_EMBED_PORT": "18080",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: false,
+            modelExists: { _ in true },
+            chatFactory: { launch in
+                calls.noteChat()
+                return RuntimeSupervisor(
+                    launch: launch,
+                    launcher: chatLauncher,
+                    health: ScriptedHealth(results: [.up]),
+                    pidStore: MemoryPidStore(),
+                    clock: ScriptedClock(),
+                    pollInterval: 0
+                )
+            },
+            embedFactory: { _ in
+                calls.noteEmbed()
+                return RuntimeSupervisor(
+                    launch: sampleLaunch(),
+                    launcher: ScriptedLauncher(),
+                    health: ScriptedHealth(results: [.down]),
+                    pidStore: MemoryPidStore(),
+                    clock: ScriptedClock(),
+                    pollInterval: 0
+                )
+            }
+        )
+        XCTAssertEqual(calls.chat, 1)
+        XCTAssertEqual(calls.embed, 0)
+        XCTAssertNil(plan.servers.embed)
+        XCTAssertEqual(plan.embedSkip, "embed port 18080 matches chat port; skipping llama-embed")
+        XCTAssertEqual(plan.chatLaunch.port, 18080)
+        await plan.servers.start()
+        let chatStatus = await plan.servers.chat.status
+        XCTAssertEqual(chatStatus.state, .up)
+        XCTAssertEqual(chatStatus.modelId, "Qwen3.6-35B-A3B")
+        XCTAssertTrue(chatLauncher.started.isEmpty)
+        await plan.servers.stop()
+    }
+
     func testStopWaitsForBothServers() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cookie-both-\(UUID().uuidString)", isDirectory: true)
@@ -1525,6 +1633,7 @@ private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
     private(set) var lastStartedPid: Int32?
     var alive: Set<Int32> = []
     var ourPids: Set<Int32> = []
+    var argumentsByPid: [Int32: [String]] = [:]
     var deathsRemaining: Int
     var failStarts: Int
     var termKills = true
@@ -1555,6 +1664,7 @@ private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
         started.append(spec)
         lastStartedPid = pid
         ourPids.insert(pid)
+        argumentsByPid[pid] = spec.arguments
         if deathsRemaining > 0 {
             deathsRemaining -= 1
         } else {
@@ -1594,10 +1704,68 @@ private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
         isAlive(pid) ? nil : 1
     }
 
-    func isOurServer(pid: Int32, executable: String) -> Bool {
+    func isOurServer(pid: Int32, executable: String, port: Int) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return ourPids.contains(pid) && executable == RuntimeLaunch.defaultBinary
+        guard ourPids.contains(pid), executable == RuntimeLaunch.defaultBinary else { return false }
+        guard let arguments = argumentsByPid[pid] else { return true }
+        return commandArgumentsContainPort(arguments, port: port)
+    }
+}
+
+/// The first `holdAfter` probes return immediately. The next one waits
+/// until `releaseHold`, so a test can call `stop` during that probe.
+private final class HoldProbe: RuntimeHealthChecking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let holdAfter: Int
+
+    init(holdAfter: Int) {
+        self.holdAfter = holdAfter
+    }
+
+    func probe(port: Int) async -> RuntimeProbe {
+        let shouldHold: Bool
+        lock.lock()
+        entered += 1
+        shouldHold = entered > holdAfter && !released
+        lock.unlock()
+        if shouldHold {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if released {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
+        return .down
+    }
+
+    func waitUntilHeld() async {
+        while true {
+            lock.lock()
+            let held = entered > holdAfter
+            lock.unlock()
+            if held { return }
+            await Task.yield()
+        }
+    }
+
+    func releaseHold() {
+        lock.lock()
+        released = true
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }
 

@@ -1177,9 +1177,6 @@ open_clean_check() {
   fi
   local embed_file embed_owned="" embed_term_port="8081"
   embed_file="$support/logs/llama-embed.pid"
-  if [[ -f "$embed_file" ]]; then
-    embed_owned="$(awk 'NF >= 1 { print $1; exit }' "$embed_file")"
-  fi
   if [[ -f "$support/logs/llama-embed.log" ]]; then
     local embed_parsed
     embed_parsed="$(awk 'match($0, /--port [0-9]+/) { print substr($0, RSTART+7, RLENGTH-7); exit }' "$support/logs/llama-embed.log" || true)"
@@ -1189,6 +1186,11 @@ open_clean_check() {
   fi
   if [[ "$runtime" == "real" ]]; then
     assert_both_servers "$term_port" "$embed_term_port" "$support"
+  fi
+  # The pid file appears while the servers become healthy. Read it after
+  # that wait, or a real launch looks like the embedder never started.
+  if [[ -f "$embed_file" ]]; then
+    embed_owned="$(awk 'NF >= 1 { print $1; exit }' "$embed_file")"
   fi
   local signal_mark
   signal_mark="$(shell_log_bytes "$shell_log")"
