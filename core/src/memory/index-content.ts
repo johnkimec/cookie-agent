@@ -1,7 +1,11 @@
 import type Database from "better-sqlite3";
 import { chunkText, estimateTokens } from "./chunk.ts";
 import type { Embedder } from "./embedder.ts";
-import { EMBED_MODEL_ID, prefixDocument } from "./http-embedder.ts";
+import {
+  DEFAULT_EMBED_BATCH_SIZE,
+  EMBED_MODEL_ID,
+  prefixDocument,
+} from "./http-embedder.ts";
 import type { VectorIndex } from "./vectors.ts";
 
 export interface IndexStats {
@@ -53,6 +57,13 @@ interface PlannedFact {
 }
 
 /**
+ * Turn chunks taken in one `indexPending` call.
+ * A turn already started is finished, so a long turn can land a few past this.
+ * Facts use the same cap, separately.
+ */
+export const INDEX_PASS_CHUNK_CAP = 64;
+
+/**
  * Embed stored turns and facts that this model has not indexed yet.
  * Turns are split into chunks of at most 512 estimated tokens and written
  * to `chunks` and `vec_chunks`. A fact is one `vec_facts` row, the first
@@ -60,7 +71,9 @@ interface PlannedFact {
  * Document text is prefixed with `search_document: ` before `embed`.
  * The raw chunk text is what retrieval shows.
  * Vectors are written before `embed_index`. A crash between the two
- * retries the turn. A down embedder writes nothing.
+ * retries the turn. Each embed batch is its own commit.
+ * A down embedder writes no new vectors. It still deletes vectors for
+ * facts that were superseded or whose `valid_until` has passed.
  */
 export class ContentIndexer {
   private readonly db: Database.Database;
@@ -80,6 +93,17 @@ export class ContentIndexer {
   }
 
   async indexPending(): Promise<IndexStats> {
+    const stats: IndexStats = {
+      turns: 0,
+      facts: 0,
+      chunks: 0,
+      skipped: false,
+    };
+    try {
+      await this.deleteDeadFactVectors();
+    } catch {
+      return { turns: 0, facts: 0, chunks: 0, skipped: true };
+    }
     let up = false;
     try {
       up = await this.available();
@@ -87,70 +111,158 @@ export class ContentIndexer {
       up = false;
     }
     if (!up) {
-      return { turns: 0, facts: 0, chunks: 0, skipped: true };
+      return { ...stats, skipped: true };
     }
     try {
-      const planned = planTurnChunks(this.pendingTurns());
-      const facts = planFacts(this.pendingFacts());
-      const inputs = [
-        ...planned.map((chunk) => prefixDocument(chunk.text)),
-        ...facts.map((fact) => prefixDocument(fact.text)),
-      ];
-      const vectors = await embedAll(this.embedder, inputs);
-      if (vectors.length !== inputs.length) {
-        throw new Error(
-          `embedder returned ${vectors.length} of ${inputs.length}`,
+      const planned = takeChunkPass(this.pendingTurns(), INDEX_PASS_CHUNK_CAP);
+      const started = new Set<string>();
+      for (
+        let offset = 0;
+        offset < planned.length;
+        offset += DEFAULT_EMBED_BATCH_SIZE
+      ) {
+        const batch = planned.slice(offset, offset + DEFAULT_EMBED_BATCH_SIZE);
+        const vectors = await embedAll(
+          this.embedder,
+          batch.map((chunk) => prefixDocument(chunk.text)),
         );
+        if (vectors.length !== batch.length) {
+          throw new Error(
+            `embedder returned ${vectors.length} of ${batch.length}`,
+          );
+        }
+        await this.writeTurnBatch(batch, vectors, started);
+        stats.chunks += batch.length;
       }
-      await this.writeTurns(planned, vectors.slice(0, planned.length));
-      await this.writeFacts(facts, vectors.slice(planned.length));
-      return {
-        turns: new Set(planned.map((chunk) => chunk.turnId)).size,
-        facts: facts.length,
-        chunks: planned.length,
-        skipped: false,
-      };
+      stats.turns = started.size;
+      const facts = planFacts(this.pendingFacts()).slice(
+        0,
+        INDEX_PASS_CHUNK_CAP,
+      );
+      for (
+        let offset = 0;
+        offset < facts.length;
+        offset += DEFAULT_EMBED_BATCH_SIZE
+      ) {
+        const batch = facts.slice(offset, offset + DEFAULT_EMBED_BATCH_SIZE);
+        const vectors = await embedAll(
+          this.embedder,
+          batch.map((fact) => prefixDocument(fact.text)),
+        );
+        if (vectors.length !== batch.length) {
+          throw new Error(
+            `embedder returned ${vectors.length} of ${batch.length}`,
+          );
+        }
+        await this.writeFactBatch(batch, vectors);
+        stats.facts += batch.length;
+      }
     } catch {
-      return { turns: 0, facts: 0, chunks: 0, skipped: true };
+      stats.skipped = true;
     }
+    return stats;
   }
 
   private pendingTurns(): PendingTurn[] {
-    return this.db
+    const rows = this.db
       .prepare(
-        `SELECT id, session_id, content FROM turns t
-         WHERE NOT EXISTS (
-           SELECT 1 FROM embed_index e
-           WHERE e.source = 'turn' AND e.source_id = t.id AND e.model = ?
-         )
-         ORDER BY created_at, id`,
+        `SELECT t.id, t.session_id, t.content,
+          (
+            SELECT count(*) FROM embed_index e
+            WHERE e.source = 'turn' AND e.source_id = t.id AND e.model = ?
+          ) AS indexed
+         FROM turns t
+         ORDER BY t.created_at, t.id`,
       )
-      .all(this.model) as PendingTurn[];
+      .all(this.model) as Array<PendingTurn & { indexed: number }>;
+    const pending: PendingTurn[] = [];
+    for (const row of rows) {
+      const expected = chunkText(row.content).length;
+      if (expected === 0 || row.indexed === expected) {
+        continue;
+      }
+      pending.push({
+        id: row.id,
+        session_id: row.session_id,
+        content: row.content,
+      });
+    }
+    return pending;
   }
 
   private pendingFacts(): PendingFact[] {
+    const now = this.now();
     return this.db
       .prepare(
         `SELECT id, text FROM facts f
-         WHERE NOT EXISTS (
-           SELECT 1 FROM embed_index e
-           WHERE e.source = 'fact' AND e.source_id = f.id AND e.model = ?
-         )
+         WHERE f.superseded_by IS NULL
+           AND (f.valid_until IS NULL OR f.valid_until > ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM embed_index e
+             WHERE e.source = 'fact' AND e.source_id = f.id AND e.model = ?
+           )
          ORDER BY created_at, id`,
       )
-      .all(this.model) as PendingFact[];
+      .all(now, this.model) as PendingFact[];
   }
 
-  private async writeTurns(
-    planned: PlannedChunk[],
+  /**
+   * Drop vec rows for facts that are superseded or expired.
+   * `embed_index` goes second so a crash still finds the id next pass.
+   */
+  private async deleteDeadFactVectors(): Promise<void> {
+    const now = this.now();
+    const rows = this.db
+      .prepare(
+        `SELECT f.id FROM facts f
+         WHERE (
+           f.superseded_by IS NOT NULL
+           OR (f.valid_until IS NOT NULL AND f.valid_until <= ?)
+         )
+         AND (
+           EXISTS (
+             SELECT 1 FROM embed_index e
+             WHERE e.source = 'fact' AND e.source_id = f.id
+           )
+           OR EXISTS (SELECT 1 FROM vec_facts v WHERE v.fact_id = f.id)
+         )`,
+      )
+      .all(now) as Array<{ id: string }>;
+    if (rows.length === 0) {
+      return;
+    }
+    const ids = rows.map((row) => row.id);
+    await this.vectors.delete(ids);
+    const drop = this.db.transaction(() => {
+      for (const id of ids) {
+        this.db
+          .prepare(
+            "DELETE FROM embed_index WHERE source = 'fact' AND source_id = ?",
+          )
+          .run(id);
+      }
+    });
+    drop();
+  }
+
+  private async writeTurnBatch(
+    batch: PlannedChunk[],
     vectors: Float32Array[],
+    started: Set<string>,
   ): Promise<void> {
-    const turnIds = [...new Set(planned.map((chunk) => chunk.turnId))];
-    for (const turnId of turnIds) {
+    const opening: string[] = [];
+    for (const chunk of batch) {
+      if (started.has(chunk.turnId)) {
+        continue;
+      }
+      started.add(chunk.turnId);
+      opening.push(chunk.turnId);
+    }
+    for (const turnId of opening) {
       await this.vectors.delete(this.chunkIds(turnId));
     }
-    for (let index = 0; index < planned.length; index += 1) {
-      const chunk = planned[index];
+    for (let index = 0; index < batch.length; index += 1) {
+      const chunk = batch[index];
       const vector = vectors[index];
       if (chunk === undefined || vector === undefined) {
         throw new Error("chunk vector missing");
@@ -159,7 +271,7 @@ export class ContentIndexer {
     }
     const now = this.now();
     const write = this.db.transaction(() => {
-      for (const turnId of turnIds) {
+      for (const turnId of opening) {
         this.db
           .prepare(
             "DELETE FROM embed_index WHERE source = 'turn' AND source_id = ?",
@@ -167,7 +279,7 @@ export class ContentIndexer {
           .run(turnId);
         this.db.prepare("DELETE FROM chunks WHERE first_turn = ?").run(turnId);
       }
-      for (const chunk of planned) {
+      for (const chunk of batch) {
         this.db
           .prepare(
             `INSERT INTO chunks (
@@ -193,7 +305,7 @@ export class ContentIndexer {
     write();
   }
 
-  private async writeFacts(
+  private async writeFactBatch(
     facts: PlannedFact[],
     vectors: Float32Array[],
   ): Promise<void> {
@@ -203,6 +315,7 @@ export class ContentIndexer {
       if (fact === undefined || vector === undefined) {
         throw new Error("fact vector missing");
       }
+      await this.vectors.delete([fact.id]);
       await this.vectors.upsert("vec_facts", fact.id, vector);
     }
     const now = this.now();
@@ -233,6 +346,31 @@ export class ContentIndexer {
       .all(turnId) as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }
+}
+
+/**
+ * Whole turns until the next one would pass `cap`.
+ * The first turn is kept even when it is longer than `cap`.
+ */
+function takeChunkPass(
+  turns: readonly PendingTurn[],
+  cap: number,
+): PlannedChunk[] {
+  const planned: PlannedChunk[] = [];
+  for (const turn of turns) {
+    const chunks = planTurnChunks([turn]);
+    if (chunks.length === 0) {
+      continue;
+    }
+    if (planned.length > 0 && planned.length + chunks.length > cap) {
+      break;
+    }
+    planned.push(...chunks);
+    if (planned.length >= cap) {
+      break;
+    }
+  }
+  return planned;
 }
 
 function planTurnChunks(turns: readonly PendingTurn[]): PlannedChunk[] {
