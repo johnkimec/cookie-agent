@@ -27,7 +27,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install dependencies
@@ -58,7 +58,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install dependencies
@@ -73,3 +73,20 @@ jobs:
 
       - name: Package Cookie Agent.app
         run: app/Scripts/package-app.sh "${{ runner.temp }}/Cookie Agent.app"
+
+  type-strip-warning:
+    name: Type-stripping stderr (Node 22.13)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22.13
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+
+      - name: Type-stripping warning stays off stderr
+        env:
+          COOKIE_EXPECT_TYPE_STRIP_WARNING: "1"
+        run: node core/scripts/check-type-strip-stderr.mjs

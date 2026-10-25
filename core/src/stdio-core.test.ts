@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, it } from "vitest";
+import { TYPE_STRIP_NODE_ARGS } from "./node-launch.ts";
 import { protocolErrors } from "./protocol/errors.ts";
 import {
   isCookieMessage,
@@ -37,7 +38,7 @@ class StdioClient {
   constructor(env: NodeJS.ProcessEnv) {
     this.child = spawn(
       process.execPath,
-      ["--experimental-strip-types", entry.pathname],
+      [...TYPE_STRIP_NODE_ARGS, entry.pathname],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, ...env },

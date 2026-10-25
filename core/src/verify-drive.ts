@@ -24,6 +24,10 @@ import { dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CORE_SERVER_NAME } from "./identity.ts";
+import {
+  nodeSupportsTypeStripping,
+  TYPE_STRIP_NODE_ARGS,
+} from "./node-launch.ts";
 import { protocolErrors } from "./protocol/errors.ts";
 import {
   countWords,
@@ -196,15 +200,11 @@ class CoreSession {
     if (llama === "stub") {
       env.COOKIE_LLAMA_PORT = llamaPort;
     }
-    const child = spawn(
-      process.execPath,
-      ["--experimental-strip-types", entry],
-      {
-        cwd: repoRoot,
-        stdio: ["pipe", "pipe", "pipe"],
-        env,
-      },
-    );
+    const child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, entry], {
+      cwd: repoRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+      env,
+    });
     const session = new CoreSession(child);
     writePidFile(session.pid, dataDir);
     return session;
@@ -1181,9 +1181,8 @@ async function runRuntimeRestart(
 }
 
 async function doctor(kind: CoreKind, llama: LlamaMode): Promise<number> {
-  const major = Number(process.versions.node.split(".")[0]);
-  if (!Number.isFinite(major) || major < 22) {
-    process.stdout.write(`not-ok\nnode ${process.version}\n`);
+  if (!nodeSupportsTypeStripping(process.version)) {
+    process.stdout.write(`not-ok\nnode ${process.version} requires >=22.6\n`);
     return 1;
   }
   try {
@@ -1211,6 +1210,8 @@ async function doctor(kind: CoreKind, llama: LlamaMode): Promise<number> {
     ) {
       throw new Error("core did not probe /health");
     }
+    // Any non-empty stderr fails. The type-stripping ExperimentalWarning
+    // is kept off this stream by TYPE_STRIP_NODE_ARGS, not by ignoring it.
     const stderr = session.stderrText().trim();
     if (stderr !== "") {
       throw new Error(`stderr: ${stderr}`);
@@ -1344,6 +1345,9 @@ async function driveFeature(
     } else {
       summary = await runModelStatus(session, kind);
     }
+    // Any non-empty stderr fails, except the restart drive's stream error.
+    // The type-stripping ExperimentalWarning is not that error. Spawn flags
+    // remove it; this check does not.
     const stderr = session.stderrText().trim();
     if (stderr !== "" && feature !== "runtime-restart") {
       throw new Error(`stderr: ${stderr}`);

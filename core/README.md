@@ -1,6 +1,6 @@
 # core
 
-TypeScript agent core for Cookie (Node 22+, AI SDK 7). `src/index.ts` speaks protocol 0.1 on stdio and dials a local OpenAI-compatible runtime. Mac tools stay in the Swift shell. This package builds and tests on Linux with no model weights.
+TypeScript agent core for Cookie (Node 22.6+, AI SDK 7). `src/index.ts` speaks protocol 0.1 on stdio and dials a local OpenAI-compatible runtime. Mac tools stay in the Swift shell. This package builds and tests on Linux with no model weights.
 
 `src/fake-core.ts` is the canned stand-in. Keep it working: the Swift shell is built against it. It does not dial llama-server.
 

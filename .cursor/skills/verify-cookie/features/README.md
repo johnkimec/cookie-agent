@@ -6,7 +6,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 
 ## Baseline preconditions
 
-- Repository root, Node 22, pnpm 10, and `pnpm install` already run.
+- Repository root, Node 22.6 or newer (`.nvmrc` is `22`), pnpm 10, and `pnpm install` already run.
 - The default core under test is the fake core (`pnpm fake-core`), which speaks protocol `0.1` and does not load a model. `--core real` selects the real core (`pnpm core`) and a stub on port `18080`.
 - Set `COOKIE_DATA_DIR` to a new temporary directory for every run. The helper does this itself.
 - Set `COOKIE_LLAMA_PORT=18080`. Never use `8080`. That is the product default and may be John's real `llama-server`.

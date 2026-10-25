@@ -1,6 +1,6 @@
 /**
  * Stdio entry for the real core.
- * Run: node --experimental-strip-types src/stdio-core.ts
+ * Run: node --experimental-strip-types --disable-warning=ExperimentalWarning src/stdio-core.ts
  * Logs go to stderr. stdout is protocol only.
  */
 
