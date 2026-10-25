@@ -5,6 +5,10 @@ use framework "AppKit"
 use scripting additions
 
 on run
+	set cookieProc to my cookieDriveProcess()
+	tell application "System Events"
+		set drivePid to unix id of cookieProc
+	end tell
 	set opts to 1
 	set rawWindows to current application's CGWindowListCopyWindowInfo(opts, 0)
 	set windowX to 0
@@ -13,13 +17,13 @@ on run
 	set windowH to 0
 	set found to false
 	repeat with entry in rawWindows
-		set ownerObj to entry's valueForKey:"kCGWindowOwnerName"
+		set ownerObj to entry's valueForKey:"kCGWindowOwnerPID"
 		if ownerObj is missing value then
-			set ownerName to ""
+			set ownerPid to 0
 		else
-			set ownerName to ownerObj as string
+			set ownerPid to ownerObj as integer
 		end if
-		if ownerName is "CookieAgent" then
+		if ownerPid is drivePid then
 			set bounds to entry's valueForKey:"kCGWindowBounds"
 			set candidateW to (bounds's valueForKey:"Width") as real
 			set candidateH to (bounds's valueForKey:"Height") as real
@@ -32,7 +36,7 @@ on run
 			end if
 		end if
 	end repeat
-	if found is false then error "no CookieAgent window to click outside"
+	if found is false then error "no drive window to click outside"
 	set screens to current application's NSScreen's screens() as list
 	set primaryH to 0
 	repeat with screen in screens

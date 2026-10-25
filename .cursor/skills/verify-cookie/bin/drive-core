@@ -3,4 +3,4 @@
 set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)"
 cd "$ROOT"
-exec node --experimental-strip-types --disable-warning=ExperimentalWarning "$ROOT/core/src/verify-drive.ts" "$@"
+exec node --experimental-strip-types --disable-warning=ExperimentalWarning "$ROOT/core/src/verify-drive-entry.ts" "$@"

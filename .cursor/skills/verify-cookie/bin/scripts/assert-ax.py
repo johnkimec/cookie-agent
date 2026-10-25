@@ -227,7 +227,7 @@ def cmd_offline(path: str, expected: str) -> None:
     text = pathlib.Path(path).read_text()
     cookie = row(text, "cookie.turn.cookie.0")
     you = row(text, "cookie.turn.you.0")
-    badge = row(text, "cookie.badge.on-device.0")
+    badge = row(text, "cookie.badge.on-device")
     if cookie is None or cookie["value"] != expected:
         raise SystemExit("reply " + repr(None if cookie is None else cookie["value"]))
     if you is None or you["label"] != "you":
@@ -244,7 +244,7 @@ def cmd_sample_line(label_path: str, ax_path: str, full: str) -> None:
         cookie = row(text, "cookie.turn.cookie.0") if text else None
         you = row(text, "cookie.turn.you.0") if text else None
         mascot = row(text, "cookie.popup.mascot") if text else None
-        badge = row(text, "cookie.badge.on-device.0") if text else None
+        badge = row(text, "cookie.badge.on-device") if text else None
     except SystemExit:
         cookie = you = mascot = badge = None
     cookie_value = "" if cookie is None else cookie["value"]

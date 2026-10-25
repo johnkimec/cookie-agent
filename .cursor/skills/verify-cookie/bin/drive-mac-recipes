@@ -51,9 +51,11 @@ refresh_command() {
 
 focused_launch() {
   refresh_command
-  note "launch $BIN"
-  "$BIN" >>"$evidence/app-stdout.txt" 2>>"$evidence/app-stderr.txt" &
-  APP_PID=$!
+  if [[ -z "${DRIVE_PROCESS_NAME:-}" || "$DRIVE_PROCESS_NAME" == "CookieAgent" ]]; then
+    install_prepared_identity "$SOURCE_APP"
+  fi
+  note "launch $BIN process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID"
+  launch_direct
   if ! wait_for_menu; then
     fail "menu bar did not appear"
   fi
@@ -79,7 +81,7 @@ quit_focused() {
 
 require_port_free() {
   if port_listening 18080; then
-    fail "port 18080 is already listening; this recipe will not kill it"
+    fail "port 18080 is already listening; this recipe leaves that listener alone"
   fi
 }
 
@@ -107,7 +109,7 @@ use_fake_core() {
 }
 
 start_up_stub() {
-  local node_bin attempt
+  local node_bin attempt pid
   node_bin="$(command -v node || true)"
   [[ -n "$node_bin" ]] || fail "node is not on PATH"
   require_port_free
@@ -118,7 +120,8 @@ start_up_stub() {
       note "up stub pid=$STUB_PID"
       return 0
     fi
-    if ! kill -0 "$STUB_PID" 2>/dev/null; then
+    pid="$STUB_PID"
+    if ! kill -0 "$pid" 2>/dev/null; then
       fail "up stub exited"
     fi
     sleep 0.1
@@ -303,7 +306,7 @@ recipe_menu_option_click() {
   use_fake_core
   focused_launch
   close_popup_if_open
-  osascript_run "$SCRIPTS/option-click.applescript"
+  option_click_status
   sleep 0.6
   if [[ "$(popup_is_open)" != "yes" ]]; then
     fail "option-click did not open the popup"
@@ -319,7 +322,7 @@ recipe_popup_option_click() {
   use_fake_core
   focused_launch
   close_popup_if_open
-  osascript_run "$SCRIPTS/option-click.applescript"
+  option_click_status
   sleep 0.6
   if [[ "$(popup_is_open)" != "yes" ]]; then
     fail "option-click did not open the panel"
@@ -350,7 +353,7 @@ toggle_hotkey() {
   local want="$1"
   local why="$2"
   local attempt state
-  osascript_run "$SCRIPTS/hotkey-option-space.applescript"
+  send_key_code 49 option
   for attempt in $(seq 1 20); do
     state="$(popup_is_open)"
     if [[ "$state" == "$want" ]]; then
@@ -735,7 +738,8 @@ recipe_status_offline_chat() {
   assert_no_egress "$APP_PID"
   note "status-offline-chat on-device reply, status stayed $STATUS_UP_QWEN"
   quit_focused
-  if ! kill -0 "$STUB_PID" 2>/dev/null; then
+  pid="$STUB_PID"
+  if ! kill -0 "$pid" 2>/dev/null; then
     fail "quit stopped the stub this app did not launch"
   fi
   note "unowned stub $STUB_PID still listening"

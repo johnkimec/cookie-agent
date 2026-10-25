@@ -19,6 +19,8 @@ public struct CoreLaunch: Equatable, Sendable {
     /// Product default is 8080, applied by the core when this variable is
     /// absent (contract decision 8). The shell must not substitute the
     /// verification port 18080. Verification exports 18080 itself.
+    /// `COOKIE_EMBED_PORT` is different: the shell writes the resolved port
+    /// (default 8081) onto the child even when the parent left it unset.
     /// Finder's PATH does not include Homebrew or a user pnpm install.
     public static let toolPathExtras = [
         "/opt/homebrew/bin",
@@ -65,6 +67,9 @@ public struct CoreLaunch: Equatable, Sendable {
         }
         if env["COOKIE_LLAMA_PORT"]?.isEmpty ?? false {
             env.removeValue(forKey: "COOKIE_LLAMA_PORT")
+        }
+        if let embedPort = parseEmbedPort(env["COOKIE_EMBED_PORT"]) {
+            env["COOKIE_EMBED_PORT"] = String(embedPort)
         }
         let command = env["COOKIE_CORE_COMMAND"].flatMap { $0.isEmpty ? nil : $0 } ?? defaultCommand
         let parts = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)

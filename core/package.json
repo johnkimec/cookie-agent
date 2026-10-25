@@ -12,7 +12,10 @@
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "spike-sqlite": "node scripts/spike-sqlite.mjs"
+    "spike-sqlite": "node scripts/spike-sqlite.mjs",
+    "check-embed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/check-embed.ts",
+    "bench-retrieval": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/bench-retrieval.ts",
+    "memory": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/memory/dump-cli.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.77",

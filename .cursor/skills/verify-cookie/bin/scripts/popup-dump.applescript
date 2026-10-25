@@ -4,9 +4,9 @@
 -- A handler tells System Events itself. attribute is not in scope otherwise.
 on run
 	set linesOut to {}
+	set cookieProc to my cookieDriveProcess()
 	tell application "System Events"
-		if not (exists process "CookieAgent") then error "CookieAgent is not running"
-		tell process "CookieAgent"
+		tell cookieProc
 			set popupWindow to missing value
 			repeat with candidate in windows
 				if my windowName(candidate) is "Ask Cookie…" or my subroleText(candidate) is "AXSystemDialog" then

@@ -11,6 +11,7 @@
     "lint": "pnpm --filter @cookie-agent/core lint",
     "typecheck": "pnpm --filter @cookie-agent/core typecheck",
     "test": "pnpm --filter @cookie-agent/core test",
-    "spike-sqlite": "pnpm --filter @cookie-agent/core spike-sqlite"
+    "spike-sqlite": "pnpm --filter @cookie-agent/core spike-sqlite",
+    "memory": "pnpm --filter @cookie-agent/core memory"
   }
 }

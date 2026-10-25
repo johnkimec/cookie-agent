@@ -19,11 +19,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { mkdir, readdir, readlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { mkdir, readdir, readlink, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { CORE_SERVER_NAME } from "./identity.ts";
+import { dumpMemory } from "./memory/dump.ts";
+import { MEMORY_DB_FILENAME } from "./memory/path.ts";
 import {
   nodeSupportsTypeStripping,
   TYPE_STRIP_NODE_ARGS,
@@ -60,6 +63,8 @@ type DriveFeature =
   | "chat-streaming"
   | "model-status"
   | "chat-history"
+  | "memory-persist"
+  | "memory-embed-down"
   | "runtime-restart";
 const schemaPath = join(repoRoot, "protocol/schema/cookie-rpc.schema.json");
 const llamaPort = "18080";
@@ -189,6 +194,7 @@ class CoreSession {
     deltaMs: string,
     kind: CoreKind,
     llama: LlamaMode,
+    extra?: NodeJS.ProcessEnv,
   ): CoreSession {
     mkdirSync(dataDir, { recursive: true });
     const entry = kind === "real" ? realCorePath : fakeCorePath;
@@ -196,6 +202,7 @@ class CoreSession {
       ...process.env,
       COOKIE_DATA_DIR: dataDir,
       COOKIE_FAKE_DELTA_MS: deltaMs,
+      ...extra,
     };
     if (llama === "stub") {
       env.COOKIE_LLAMA_PORT = llamaPort;
@@ -264,6 +271,24 @@ class CoreSession {
     }
     const [code] = (await once(this.child, "exit")) as [number | null];
     return code;
+  }
+
+  /** Keep an earlier process's transcript ahead of this one. */
+  mergeEarlier(earlier: CoreSession): void {
+    const combined = [...earlier.transcript, ...this.transcript];
+    this.transcript.splice(0, this.transcript.length);
+    for (let index = 0; index < combined.length; index += 1) {
+      const entry = combined[index];
+      if (entry === undefined) {
+        continue;
+      }
+      this.transcript.push({
+        seq: index,
+        direction: entry.direction,
+        message: entry.message,
+      });
+    }
+    this.stderr.unshift(...earlier.stderr);
   }
 
   private record(direction: "client" | "server", message: unknown): void {
@@ -1180,6 +1205,298 @@ async function runRuntimeRestart(
   ].join("\n");
 }
 
+const PERSIST_CONVERSATION = "conv-persist";
+
+async function collectReply(
+  session: CoreSession,
+  id: string,
+  text: string,
+  timeoutMs: number,
+  conversationId: string = PERSIST_CONVERSATION,
+): Promise<string> {
+  session.send({
+    jsonrpc: "2.0",
+    id,
+    method: "chat.send",
+    params: { conversationId, text },
+  });
+  const ack = await session.response(id, timeoutMs);
+  if (!isRecord(ack.result)) {
+    throw new Error(`chat.send ${id} failed`);
+  }
+  const parts: string[] = [];
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, `chat ${id}`)),
+      "chat",
+    );
+    if (message.method === "chat.delta") {
+      const params = asRecord(message.params, "delta");
+      if (typeof params.text !== "string" || params.text.length === 0) {
+        throw new Error("empty delta");
+      }
+      parts.push(params.text);
+      continue;
+    }
+    if (message.method === "runtime.status") {
+      continue;
+    }
+    if (message.method !== "chat.done") {
+      throw new Error(`unexpected ${String(message.method)}`);
+    }
+    const params = asRecord(message.params, "done");
+    if (params.finishReason !== "stop") {
+      throw new Error(`finishReason ${String(params.finishReason)}`);
+    }
+    return parts.join("");
+  }
+}
+
+function assertPersistDump(text: string): void {
+  if (!text.includes(HISTORY_CODE_WORD)) {
+    throw new Error("db dump is missing the code word");
+  }
+  let turns = 0;
+  let sessions = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("turn ")) {
+      turns += 1;
+      const row = JSON.parse(line.slice("turn ".length)) as {
+        egress?: unknown;
+      };
+      if (row.egress !== 0) {
+        throw new Error("stored turn egress is not 0");
+      }
+      continue;
+    }
+    if (line.startsWith("session ")) {
+      sessions += 1;
+      const row = JSON.parse(line.slice("session ".length)) as {
+        ended_at?: unknown;
+      };
+      if (row.ended_at !== null) {
+        throw new Error("shutdown set ended_at");
+      }
+    }
+  }
+  if (sessions !== 1) {
+    throw new Error(`sessions ${String(sessions)}`);
+  }
+  if (turns < 4) {
+    throw new Error(`turns ${String(turns)}`);
+  }
+}
+
+async function runMemoryPersist(
+  first: CoreSession,
+  dataDir: string,
+  port: string,
+): Promise<{ summary: string; dbText: string; session: CoreSession }> {
+  await waitForRuntimeUp(first, "real", readTimeoutMs, port);
+  await collectReply(first, "2", HISTORY_FIRST_PROMPT, readTimeoutMs);
+  first.send({ jsonrpc: "2.0", id: "3", method: "shutdown", params: {} });
+  const shutdown = await first.response("3", readTimeoutMs);
+  const shutdownResult = asRecord(shutdown.result, "shutdown result");
+  if (shutdownResult.ok !== true) {
+    throw new Error("shutdown was not ok");
+  }
+  const code = await first.waitForExit();
+  if (code !== 0) {
+    throw new Error(`core exit ${String(code)}`);
+  }
+  const firstStderr = first.stderrText().trim();
+  if (firstStderr !== "") {
+    throw new Error(`stderr: ${firstStderr}`);
+  }
+  forgetPid(first.pid);
+
+  const second = CoreSession.spawn(dataDir, "0", "real", "stub");
+  try {
+    await waitForRuntimeUp(second, "real", readTimeoutMs, port);
+    const reply = await collectReply(
+      second,
+      "2",
+      HISTORY_SECOND_PROMPT,
+      readTimeoutMs,
+    );
+    if (!reply.toLowerCase().includes(HISTORY_CODE_WORD.toLowerCase())) {
+      throw new Error(
+        `relaunch reply did not contain ${HISTORY_CODE_WORD}: ${reply.slice(0, 200)}`,
+      );
+    }
+    second.send({ jsonrpc: "2.0", id: "3", method: "shutdown", params: {} });
+    const again = await second.response("3", readTimeoutMs);
+    const againResult = asRecord(again.result, "second shutdown");
+    if (againResult.ok !== true) {
+      throw new Error("second shutdown was not ok");
+    }
+    const secondCode = await second.waitForExit();
+    if (secondCode !== 0) {
+      throw new Error(`core exit ${String(secondCode)}`);
+    }
+    const secondStderr = second.stderrText().trim();
+    if (secondStderr !== "") {
+      throw new Error(`stderr: ${secondStderr}`);
+    }
+    second.mergeEarlier(first);
+    const dbText = dumpMemory(join(dataDir, MEMORY_DB_FILENAME));
+    assertPersistDump(dbText);
+    return {
+      summary: ["ok", "persist true", "egress 0", ""].join("\n"),
+      dbText,
+      session: second,
+    };
+  } catch (error) {
+    await second.dispose();
+    forgetPid(second.pid);
+    throw error;
+  }
+}
+
+const EMBED_DOWN_SEED = "conv-seed";
+const EMBED_DOWN_ASK = "conv-ask";
+const EMBED_DOWN_SEED_TEXT = `The ECE midterm is Friday. Remember ${HISTORY_CODE_WORD}.`;
+const EMBED_DOWN_ASK_TEXT = "What did I say about the ECE midterm last week?";
+
+function reserveClosedPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        reject(new Error("embed port was not a tcp port"));
+        return;
+      }
+      const port = address.port;
+      server.close((error) => {
+        if (error !== undefined) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+function lastUserTextOf(messages: unknown): string {
+  if (!Array.isArray(messages)) {
+    return "";
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (typeof message !== "object" || message === null) {
+      continue;
+    }
+    const record = message as { role?: unknown; content?: unknown };
+    if (record.role !== "user") {
+      continue;
+    }
+    if (typeof record.content === "string") {
+      return record.content;
+    }
+  }
+  return "";
+}
+
+function assertEmbedDownDump(text: string): void {
+  if (!text.includes(HISTORY_CODE_WORD)) {
+    throw new Error("db dump is missing the code word");
+  }
+  let turns = 0;
+  let sessions = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("turn ")) {
+      turns += 1;
+      const row = JSON.parse(line.slice("turn ".length)) as {
+        egress?: unknown;
+      };
+      if (row.egress !== 0) {
+        throw new Error("stored turn egress is not 0");
+      }
+      continue;
+    }
+    if (line.startsWith("session ")) {
+      sessions += 1;
+    }
+  }
+  if (sessions < 2) {
+    throw new Error(`sessions ${String(sessions)}`);
+  }
+  if (turns < 4) {
+    throw new Error(`turns ${String(turns)}`);
+  }
+}
+
+async function runMemoryEmbedDown(
+  session: CoreSession,
+  dataDir: string,
+  port: string,
+  stub: LlamaStub,
+): Promise<{ summary: string; dbText: string }> {
+  await waitForRuntimeUp(session, "real", readTimeoutMs, port);
+  await collectReply(
+    session,
+    "2",
+    EMBED_DOWN_SEED_TEXT,
+    readTimeoutMs,
+    EMBED_DOWN_SEED,
+  );
+  const reply = await collectReply(
+    session,
+    "3",
+    EMBED_DOWN_ASK_TEXT,
+    readTimeoutMs,
+    EMBED_DOWN_ASK,
+  );
+  if (reply.trim() === "") {
+    throw new Error("embed-down reply was empty");
+  }
+  if (!reply.toLowerCase().includes(HISTORY_CODE_WORD.toLowerCase())) {
+    throw new Error(
+      `embed-down reply did not contain ${HISTORY_CODE_WORD}: ${reply.slice(0, 200)}`,
+    );
+  }
+  const ask = [...stub.chats]
+    .reverse()
+    .find((chat) => lastUserTextOf(chat.messages) === EMBED_DOWN_ASK_TEXT);
+  if (ask === undefined) {
+    throw new Error("stub did not see the ask");
+  }
+  const blob = JSON.stringify(ask.messages).toLowerCase();
+  const needle = HISTORY_CODE_WORD.toLowerCase();
+  if (!blob.includes(needle)) {
+    throw new Error("ask prompt did not contain the code word");
+  }
+  if (lastUserTextOf(ask.messages).toLowerCase().includes(needle)) {
+    throw new Error("ask last user text contained the code word");
+  }
+  await assertSockets(session.pid, "real", port);
+  session.send({ jsonrpc: "2.0", id: "4", method: "shutdown", params: {} });
+  const shutdown = await session.response("4", readTimeoutMs);
+  const shutdownResult = asRecord(shutdown.result, "shutdown result");
+  if (shutdownResult.ok !== true) {
+    throw new Error("shutdown was not ok");
+  }
+  const code = await session.waitForExit();
+  if (code !== 0) {
+    throw new Error(`core exit ${String(code)}`);
+  }
+  const stderr = session.stderrText().trim();
+  if (stderr !== "") {
+    throw new Error(`stderr: ${stderr}`);
+  }
+  const dbText = dumpMemory(join(dataDir, MEMORY_DB_FILENAME));
+  assertEmbedDownDump(dbText);
+  return {
+    summary: ["ok", "embedDown true", "recall true", "egress 0", ""].join("\n"),
+    dbText,
+  };
+}
+
 async function doctor(kind: CoreKind, llama: LlamaMode): Promise<number> {
   if (!nodeSupportsTypeStripping(process.version)) {
     process.stdout.write(`not-ok\nnode ${process.version} requires >=22.6\n`);
@@ -1272,6 +1589,7 @@ async function writeEvidence(
   session: CoreSession,
   summary: string,
   timings?: string,
+  dbText?: string,
 ): Promise<void> {
   await mkdir(evidenceDir, { recursive: true });
   const lines = session.transcript
@@ -1289,6 +1607,9 @@ async function writeEvidence(
   await writeFile(join(evidenceDir, "summary.txt"), summary);
   if (timings !== undefined) {
     await writeFile(join(evidenceDir, "timings.txt"), timings);
+  }
+  if (dbText !== undefined) {
+    await writeFile(join(evidenceDir, "db.txt"), dbText);
   }
 }
 
@@ -1325,16 +1646,41 @@ async function driveFeature(
   let session: CoreSession | null = null;
   let summary = "not-ok\n";
   let timings: string | undefined;
+  let dbText: string | undefined;
   let code = 1;
   try {
     if (kind === "real" && llama === "stub") {
-      stub = await startLlamaStub(Number(llamaPort));
+      stub = await startLlamaStub(
+        Number(llamaPort),
+        feature === "memory-persist" || feature === "memory-embed-down"
+          ? { recallWord: HISTORY_CODE_WORD }
+          : {},
+      );
     }
-    session = CoreSession.spawn(dataDir, deltaMs, kind, llama);
+    const extraEnv =
+      feature === "memory-embed-down"
+        ? { COOKIE_EMBED_PORT: String(await reserveClosedPort()) }
+        : undefined;
+    session = CoreSession.spawn(dataDir, deltaMs, kind, llama, extraEnv);
     if (feature === "chat-history") {
       const produced = await runChatHistory(session, port);
       summary = produced.summary;
       timings = produced.timings;
+    } else if (feature === "memory-persist") {
+      if (stub === null) {
+        throw new Error("memory-persist has no llama stub");
+      }
+      const produced = await runMemoryPersist(session, dataDir, port);
+      summary = produced.summary;
+      dbText = produced.dbText;
+      session = produced.session;
+    } else if (feature === "memory-embed-down") {
+      if (stub === null) {
+        throw new Error("memory-embed-down has no llama stub");
+      }
+      const produced = await runMemoryEmbedDown(session, dataDir, port, stub);
+      summary = produced.summary;
+      dbText = produced.dbText;
     } else if (feature === "runtime-restart") {
       if (stub === null) {
         throw new Error("runtime-restart has no llama stub");
@@ -1371,6 +1717,7 @@ async function driveFeature(
         session,
         summary,
         timings,
+        dbText,
       );
     }
     await stub?.close();
@@ -1398,6 +1745,8 @@ function usage(): number {
       "  drive-core drive chat-streaming --evidence <dir> [--core fake|real]",
       "  drive-core drive model-status --evidence <dir> [--core fake|real]",
       "  drive-core drive chat-history --evidence <dir> --core real --llama external",
+      "  drive-core drive memory-persist --evidence <dir> --core real",
+      "  drive-core drive memory-embed-down --evidence <dir> --core real",
       "  drive-core drive runtime-restart --evidence <dir> --core real",
       "  drive-core drive menu-bar-icon",
       "  drive-core drive hotkey-popup",
@@ -1444,7 +1793,99 @@ function llamaMode(args: string[]): LlamaMode | null {
   return null;
 }
 
-async function main(argv: string[]): Promise<number> {
+export type DriveInvocation = {
+  code: number;
+  /**
+   * Absolute directory for a drive that must write evidence.
+   * Doctor, cleanup, usage, and the unreachable Mac drives leave this null.
+   */
+  evidenceDir: string | null;
+  /**
+   * Epoch ms taken immediately before that drive. Null when no evidence
+   * is required. A file older than this was not written by the drive.
+   */
+  startedAt: number | null;
+  /** Names that must exist under evidenceDir and be at least as new as startedAt. */
+  evidenceFiles: readonly string[];
+};
+
+const baseEvidenceFiles = [
+  "command.txt",
+  "transcript.jsonl",
+  "stderr.txt",
+  "summary.txt",
+] as const;
+
+/**
+ * Whole-second mtimes (some filesystems) can sit up to a second behind
+ * Date.now() for a write that just happened. A reused directory's files
+ * are older than that.
+ */
+const evidenceMtimeSlackMs = 1000;
+
+function evidenceFilesFor(feature: DriveFeature): readonly string[] {
+  const files: string[] = [...baseEvidenceFiles];
+  if (feature === "chat-history") {
+    files.push("timings.txt");
+  }
+  if (feature === "memory-persist" || feature === "memory-embed-down") {
+    files.push("db.txt");
+  }
+  return files;
+}
+
+function invocation(code: number): DriveInvocation {
+  return {
+    code,
+    evidenceDir: null,
+    startedAt: null,
+    evidenceFiles: [],
+  };
+}
+
+async function evidenceWasWritten(
+  evidenceDir: string,
+  files: readonly string[],
+  startedAt: number,
+): Promise<boolean> {
+  try {
+    for (const name of files) {
+      const info = await stat(join(evidenceDir, name));
+      if (info.mtimeMs + evidenceMtimeSlackMs < startedAt) {
+        return false;
+      }
+    }
+    return files.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exit status for one drive-core invocation.
+ *
+ * A drive that should write evidence exits 1 when it reports success and
+ * any required file is missing or older than the start of that drive.
+ * Doctor and cleanup pass a successful code through with a null directory.
+ */
+export async function resolveDriveExit(run: DriveInvocation): Promise<number> {
+  if (
+    run.evidenceDir !== null &&
+    run.startedAt !== null &&
+    run.code === 0 &&
+    !(await evidenceWasWritten(
+      run.evidenceDir,
+      run.evidenceFiles,
+      run.startedAt,
+    ))
+  ) {
+    process.stderr.write("drive-core: no evidence written\n");
+    return 1;
+  }
+  return run.code;
+}
+
+export async function main(argv: string[]): Promise<DriveInvocation> {
   const [command, feature, ...rest] = argv;
   if (command === "doctor") {
     const kind = coreKind(argv.slice(1));
@@ -1454,30 +1895,32 @@ async function main(argv: string[]): Promise<number> {
       llama === null ||
       (llama === "external" && kind !== "real")
     ) {
-      return usage();
+      return invocation(usage());
     }
-    return doctor(kind, llama);
+    return invocation(await doctor(kind, llama));
   }
   if (command === "cleanup") {
-    return cleanupAsync();
+    return invocation(await cleanupAsync());
   }
   if (command !== "drive") {
-    return usage();
+    return invocation(usage());
   }
   if (feature === "menu-bar-icon" || feature === "hotkey-popup") {
-    return unreachable();
+    return invocation(unreachable());
   }
   if (
     feature !== "chat-streaming" &&
     feature !== "model-status" &&
     feature !== "chat-history" &&
+    feature !== "memory-persist" &&
+    feature !== "memory-embed-down" &&
     feature !== "runtime-restart"
   ) {
-    return usage();
+    return invocation(usage());
   }
   const evidence = evidenceArg(rest);
   if (evidence === null) {
-    return usage();
+    return invocation(usage());
   }
   const kind = coreKind(rest);
   const llama = llamaMode(rest);
@@ -1486,40 +1929,46 @@ async function main(argv: string[]): Promise<number> {
     llama === null ||
     (llama === "external" && kind !== "real")
   ) {
-    return usage();
+    return invocation(usage());
   }
   if (feature === "chat-history" && llama !== "external") {
     process.stderr.write(
       "chat-history requires --core real --llama external\n",
     );
-    return usage();
+    return invocation(usage());
+  }
+  if (feature === "memory-persist" && (kind !== "real" || llama !== "stub")) {
+    process.stderr.write(
+      "memory-persist requires --core real and the built-in stub\n",
+    );
+    return invocation(usage());
+  }
+  if (
+    feature === "memory-embed-down" &&
+    (kind !== "real" || llama !== "stub")
+  ) {
+    process.stderr.write(
+      "memory-embed-down requires --core real and the built-in stub\n",
+    );
+    return invocation(usage());
   }
   if (feature === "runtime-restart" && (kind !== "real" || llama !== "stub")) {
     process.stderr.write(
       "runtime-restart requires --core real and the built-in stub\n",
     );
-    return usage();
+    return invocation(usage());
   }
-  return driveFeature(feature, evidence, kind, llama);
+  const startedAt = Date.now();
+  return {
+    code: await driveFeature(feature, evidence, kind, llama),
+    evidenceDir: resolve(repoRoot, evidence),
+    startedAt,
+    evidenceFiles: evidenceFilesFor(feature),
+  };
 }
 
-function isDirectRun(): boolean {
-  const entry = process.argv[1];
-  if (entry === undefined) {
-    return false;
-  }
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (isDirectRun()) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      process.exit(code);
-    })
-    .catch((error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : "verify-drive failed";
-      process.stderr.write(`${message}\n`);
-      process.exit(1);
-    });
+const directEntry = process.argv[1];
+if (directEntry !== undefined && basename(directEntry) === "verify-drive.ts") {
+  process.stderr.write("run bin/drive-core (or verify-drive-entry.ts)\n");
+  process.exit(1);
 }

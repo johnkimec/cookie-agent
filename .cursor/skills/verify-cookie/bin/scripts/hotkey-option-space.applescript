@@ -1,7 +1,5 @@
--- Synthetic ⌥Space. Carbon RegisterEventHotKey may ignore it.
--- key code 49 is the space bar.
+-- Option-space is sent by send_key_code in drive-mac, which checks the
+-- frontmost pid, process name, and bundle id. This file does not send a key.
 on run
-	tell application "System Events"
-		key code 49 using option down
-	end tell
+	error "call send_key_code 49 option"
 end run

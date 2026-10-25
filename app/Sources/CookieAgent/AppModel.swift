@@ -14,16 +14,18 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var launchFailure: ShellLaunchFailure?
 
     let localOnly = true
-    let conversationID = "conv-\(UUID().uuidString)"
+    let conversationID: String
 
     var onPopup: ((Bool) -> Void)?
     var onLayout: (() -> Void)?
 
+    private let turns: PopupChatSession
     private var supervisor: CoreSupervisor?
     private var transport: ProcessTransport?
-    private var runtimeSupervisor: RuntimeSupervisor?
+    private var runtimeServers: RuntimeServers?
     private var eventsTask: Task<Void, Never>?
     private var runtimeEventsTask: Task<Void, Never>?
+    private var embedEventsTask: Task<Void, Never>?
     private var coreReady = false
     private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
@@ -56,6 +58,24 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         return CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
     }
 
+    init() {
+        let id = "conv-\(UUID().uuidString)"
+        conversationID = id
+        let session = PopupChatSession(conversationID: id)
+        turns = session
+        session.onChange = { [weak self] in
+            self?.publishTurns()
+        }
+        session.onSendFailure = { [weak self] failure in
+            self?.handleSendFailure(failure)
+        }
+        session.onCancelFailure = { [weak self] description in
+            DispatchQueue.main.async {
+                self?.log("cancel: \(description)")
+            }
+        }
+    }
+
     func start() {
         let plistRoot = Bundle.main.object(forInfoDictionaryKey: "CookieRepoRoot") as? String
         let launch = CoreLaunch.resolve(
@@ -73,9 +93,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
         let inherited = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
         let portText = parseLlamaPort(launch.environment["COOKIE_LLAMA_PORT"]).map(String.init) ?? "invalid"
+        let embedPortText = launch.environment["COOKIE_EMBED_PORT"] ?? "invalid"
         let command = ([launch.executable] + launch.arguments).joined(separator: " ")
         log(
-            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) core=\(command) cwd=\(launch.workingDirectory.path) coreRoot=\(launch.coreRootReady) commandReady=\(launch.commandReady) path=\(launch.environment["PATH"] ?? "")"
+            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) embedPort=\(embedPortText) core=\(command) cwd=\(launch.workingDirectory.path) coreRoot=\(launch.coreRootReady) commandReady=\(launch.commandReady) path=\(launch.environment["PATH"] ?? "")"
         )
         guard launch.coreRootReady, launch.commandReady else {
             if !launch.coreRootReady {
@@ -92,6 +113,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let supervisor = CoreSupervisor(transport: transport)
         self.transport = transport
         self.supervisor = supervisor
+        turns.attach(supervisor)
         let events = supervisor.events
         eventsTask = Task { [weak self] in
             for await event in events {
@@ -100,26 +122,42 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
         if launch.supervisesRuntime {
             let providedData = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
-            let runtimeLaunch = RuntimeLaunch.resolve(
+            let plan = RuntimeServers.make(
                 environment: launch.environment,
                 homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
                 dataDirectory: launch.environment["COOKIE_DATA_DIR"] ?? "",
                 recordsStablePid: !providedData
             )
-            let runtime = RuntimeSupervisor.live(launch: runtimeLaunch)
-            self.runtimeSupervisor = runtime
-            self.runtime = RuntimeStatus(state: .loading, modelId: runtimeLaunch.modelId)
+            let servers = plan.servers
+            self.runtimeServers = servers
+            self.runtime = RuntimeStatus(state: .loading, modelId: plan.chatLaunch.modelId)
+            self.turns.noteRuntime(.loading)
             log(
-                "llama=\(runtimeLaunch.executable) \(runtimeLaunch.arguments.joined(separator: " ")) log=\(runtimeLaunch.logFile) pid=\(runtimeLaunch.pidFile)"
+                "llama=\(plan.chatLaunch.executable) \(plan.chatLaunch.arguments.joined(separator: " ")) log=\(plan.chatLaunch.logFile) pid=\(plan.chatLaunch.pidFile)"
             )
-            let runtimeEvents = runtime.events
+            if let skip = plan.embedSkip {
+                log(skip)
+            } else {
+                log(
+                    "llama-embed=\(plan.embedLaunch.executable) \(plan.embedLaunch.arguments.joined(separator: " ")) log=\(plan.embedLaunch.logFile) pid=\(plan.embedLaunch.pidFile)"
+                )
+            }
+            let runtimeEvents = servers.chat.events
             runtimeEventsTask = Task { [weak self] in
                 for await status in runtimeEvents {
                     self?.applySupervisorStatus(status)
                 }
             }
+            if let embed = servers.embed {
+                let embedEvents = embed.events
+                embedEventsTask = Task {
+                    for await status in embedEvents {
+                        logShell("embed runtime \(status.state.rawValue)")
+                    }
+                }
+            }
             Task {
-                await runtime.start()
+                await servers.start()
             }
         }
         Task { [weak self] in
@@ -133,8 +171,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// `applicationShouldTerminate` calls this and replies only after the
-    /// owned server has exited. A second call (willTerminate) does not
+    /// `applicationShouldTerminate` calls this and replies only after both
+    /// owned servers have exited. A second call (willTerminate) does not
     /// start another shutdown.
     ///
     /// The reply is scheduled on the main run loop in the modal-panel mode.
@@ -181,57 +219,38 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func openPopup() {
         lastToggle = Date()
-        var next = conversation
-        next.noteOpen(
+        let wasOpen = popupOpen
+        turns.open(
             at: Date(),
             ttl: resolvedDraftTTL(environment: ProcessInfo.processInfo.environment)
         )
-        conversation = next
-        if !popupOpen {
-            popupOpen = true
-            onPopup?(true)
-        } else {
+        if wasOpen {
             onPopup?(true)
         }
-        onLayout?()
     }
 
     func closePopup() {
         guard popupOpen else { return }
-        var next = conversation
-        next.noteClose(at: Date())
-        conversation = next
-        popupOpen = false
-        onPopup?(false)
+        turns.close(at: Date())
     }
 
+    func setDraft(_ text: String) {
+        turns.setDraft(text)
+    }
+
+    /// Return, the send button, and AXConfirm. Stops a reply that is still arriving.
     func submit() {
-        let text = conversation.draft
-        var next = conversation
-        let action = next.prepareSend(runtime: runtime.state)
-        conversation = next
-        onLayout?()
-        guard case .send(let body) = action else { return }
-        guard let supervisor else {
-            rollback(body)
-            return
-        }
-        let conversationID = self.conversationID
-        Task { [weak self] in
-            do {
-                let ack = try await supervisor.sendChat(conversationId: conversationID, text: body)
-                self?.noteAck(ack.messageId)
-            } catch {
-                self?.handleSendFailure(error, restoring: body)
-            }
-        }
+        turns.pressReturn()
+    }
+
+    /// Escape. Stops a reply that is still arriving and leaves the panel open.
+    /// Closes the panel when nothing is arriving.
+    func pressEscape() {
+        turns.pressEscape()
     }
 
     func recallLast() {
-        var next = conversation
-        next.recallLastUserText()
-        conversation = next
-        onLayout?()
+        turns.recallLast()
     }
 
     func quit() {
@@ -243,49 +262,44 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         transport?.stop()
         eventsTask?.cancel()
         runtimeEventsTask?.cancel()
-        await runtimeSupervisor?.stop()
+        embedEventsTask?.cancel()
+        await runtimeServers?.stop()
     }
 
-    private func noteAck(_ messageID: String) {
-        DispatchQueue.main.async { [weak self] in
+    private func publishTurns() {
+        let apply = { [weak self] in
             guard let self else { return }
-            var next = self.conversation
-            next.noteAck(messageID: messageID)
-            self.conversation = next
-        }
-    }
-
-    private func rollback(_ text: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            var next = self.conversation
-            next.rollbackSend(restoredText: text)
-            self.conversation = next
+            let snap = self.turns.snapshot
+            self.conversation = snap.conversation
+            if self.popupOpen != snap.popupOpen {
+                self.popupOpen = snap.popupOpen
+                self.onPopup?(self.popupOpen)
+            }
             self.onLayout?()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
         }
     }
 
     private func handle(_ event: CoreEvent) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            var next = self.conversation
             switch event {
             case .runtime(let status):
-                if self.runtimeSupervisor == nil {
-                    next.noteRuntime(status.state)
-                    self.conversation = next
+                if self.runtimeServers == nil {
                     self.runtime = status
+                    self.turns.noteRuntime(status.state)
                 }
             case .delta(let delta):
-                next.applyDelta(delta)
-                self.conversation = next
+                self.turns.ingestDelta(delta)
             case .done(let done):
-                next.applyDone(done)
-                self.conversation = next
+                self.turns.ingestDone(done)
             case .rpcError, .decodeFailed:
-                break
+                self.onLayout?()
             }
-            self.onLayout?()
         }
     }
 
@@ -300,12 +314,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private func applySupervisorStatus(_ status: RuntimeStatus) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            var next = self.conversation
-            next.noteRuntime(status.state)
-            self.conversation = next
             self.runtime = status
+            self.turns.noteRuntime(status.state)
             self.pendingPush = status
-            self.onLayout?()
             self.flushPush()
         }
     }
@@ -322,47 +333,33 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func handleSendFailure(_ error: Error, restoring text: String) {
-        let code: Int?
-        if let core = error as? CoreError, case .rpc(let body) = core {
-            code = body.code
-        } else {
-            code = nil
-        }
-        let description = String(describing: error)
+    /// The session has already restored the draft. This only sets the quiet line.
+    private func handleSendFailure(_ failure: PopupSendFailure) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            switch presentChatSendFailure(code: code, runtime: self.runtime.state) {
+            switch presentChatSendFailure(code: failure.code, runtime: self.runtime.state) {
             case .stillLoading:
-                var next = self.conversation
-                next.rollbackSend(restoredText: text)
-                next.refusal = nil
-                self.conversation = next
+                self.turns.clearRefusal()
                 if self.runtime.state != .loading {
                     self.runtime = RuntimeStatus(
                         state: .loading,
                         modelId: self.runtime.modelId ?? defaultModelID
                     )
+                    self.turns.noteRuntime(.loading)
                 }
-                self.onLayout?()
                 self.confirmRuntime()
             case .notReady:
-                var next = self.conversation
-                next.rollbackSend(restoredText: text)
-                next.refusal = .notReady
-                self.conversation = next
-                self.onLayout?()
+                self.turns.setRefusal(.notReady)
             case .failed:
-                self.log("send: \(description)")
-                self.rollback(text)
+                self.log("send: \(failure.description)")
             }
         }
     }
 
     private func confirmRuntime() {
-        guard let runtimeSupervisor else { return }
+        guard let chat = runtimeServers?.chat else { return }
         Task { [weak self] in
-            let status = await runtimeSupervisor.confirm()
+            let status = await chat.confirm()
             self?.applySupervisorStatus(status)
         }
     }

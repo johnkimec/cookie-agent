@@ -1,12 +1,26 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { TYPE_STRIP_NODE_ARGS } from "./node-launch.ts";
 import { isCookieMessage, messageErrors } from "./protocol/validate.ts";
-import { decodeProcAddress, HISTORY_CODE_WORD } from "./verify-drive.ts";
+import {
+  type DriveInvocation,
+  decodeProcAddress,
+  HISTORY_CODE_WORD,
+  resolveDriveExit,
+} from "./verify-drive.ts";
 import { startLlamaStub } from "./verify-llama-stub.ts";
 
 const exec = promisify(execFile);
@@ -38,6 +52,42 @@ function run(
     encoding: "utf8",
     timeout: 20000,
   });
+}
+
+function nodeEval(source: string) {
+  return exec(
+    process.execPath,
+    [...TYPE_STRIP_NODE_ARGS, "--input-type=module", "-e", source],
+    { cwd: repoRoot, encoding: "utf8", timeout: 20000 },
+  );
+}
+
+function capturedFailure(error: unknown): {
+  code?: number;
+  stdout?: string;
+  stderr?: string;
+} {
+  return error as { code?: number; stdout?: string; stderr?: string };
+}
+
+function exitForEvidence(
+  evidenceDir: string,
+  startedAt: number,
+  evidenceFiles: readonly string[],
+) {
+  const run: DriveInvocation = {
+    code: 0,
+    evidenceDir,
+    startedAt,
+    evidenceFiles,
+  };
+  return nodeEval(
+    `import { resolveDriveExit } from "./core/src/verify-drive.ts";
+     process.exit(await resolveDriveExit(${JSON.stringify(run)}));`,
+  ).then(
+    (result) => ({ code: 0, stderr: result.stderr }),
+    (error: unknown) => capturedFailure(error),
+  );
 }
 
 describe("verify-cookie drive-core", () => {
@@ -242,6 +292,99 @@ describe("verify-cookie drive-core", () => {
     }
   }, 20000);
 
+  it("drives memory persist across a core restart on the stub", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        ["drive", "memory-persist", "--evidence", evidence, "--core", "real"],
+        root,
+      );
+      expect(result.stdout).toContain("persist true\n");
+      expect(result.stdout).toContain("egress 0\n");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      const initializes = transcript
+        .split("\n")
+        .filter((line) => line.includes('"method":"initialize"')).length;
+      expect(initializes).toBe(2);
+      expect(transcript).toContain(HISTORY_CODE_WORD);
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain(HISTORY_CODE_WORD);
+      expect(dbText).toContain('"egress":0');
+      expect(dbText).not.toContain('"egress":1');
+      for (const line of transcript.split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        const entry = JSON.parse(line) as { message: unknown };
+        expect(
+          isCookieMessage(entry.message),
+          messageErrors(entry.message),
+        ).toBe(true);
+      }
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it("drives BM25 recall when the embedder port is closed", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        [
+          "drive",
+          "memory-embed-down",
+          "--evidence",
+          evidence,
+          "--core",
+          "real",
+        ],
+        root,
+      );
+      expect(result.stdout).toContain("embedDown true\n");
+      expect(result.stdout).toContain("recall true\n");
+      expect(result.stdout).toContain("egress 0\n");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain(HISTORY_CODE_WORD);
+      expect(transcript).toContain("conv-ask");
+      expect(transcript).toContain(
+        "What did I say about the ECE midterm last week?",
+      );
+      const askSend = transcript.split("\n").find((line) => {
+        return (
+          line.includes('"method":"chat.send"') && line.includes("conv-ask")
+        );
+      });
+      expect(askSend).toBeDefined();
+      expect(askSend?.toLowerCase()).not.toContain(
+        HISTORY_CODE_WORD.toLowerCase(),
+      );
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain(HISTORY_CODE_WORD);
+      expect(dbText).toContain('"egress":0');
+      expect(dbText).not.toContain('"egress":1');
+      for (const line of transcript.split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        const entry = JSON.parse(line) as { message: unknown };
+        expect(
+          isCookieMessage(entry.message),
+          messageErrors(entry.message),
+        ).toBe(true);
+      }
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it("drives a llama stub restart through up, down, loading, and up", async () => {
     const root = await runtime();
     const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
@@ -334,5 +477,159 @@ describe("verify-cookie drive-core", () => {
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
+  });
+
+  it("drives through a symlinked checkout and writes evidence", async () => {
+    const root = await runtime();
+    const linkParent = await mkdtemp(join(tmpdir(), "cookie-link-"));
+    const link = join(linkParent, "cookie");
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    await symlink(repoRoot, link);
+    const linked = join(link, ".cursor/skills/verify-cookie/bin/drive-core");
+    try {
+      const doctor = await exec(linked, ["doctor"], {
+        cwd: link,
+        env: { ...process.env, COOKIE_VERIFY_RUNTIME: root },
+        encoding: "utf8",
+        timeout: 20000,
+      });
+      expect(doctor.stdout).toContain("ok\n");
+      expect(doctor.stdout).toContain("server cookie-fake-core\n");
+      expect(doctor.stderr).toBe("");
+
+      const result = await exec(
+        linked,
+        ["drive", "chat-streaming", "--evidence", evidence],
+        {
+          cwd: link,
+          env: { ...process.env, COOKIE_VERIFY_RUNTIME: root },
+          encoding: "utf8",
+          timeout: 20000,
+        },
+      );
+      expect(result.stdout).toContain("deltas 3\n");
+      expect(result.stdout).toContain("finishReason stop\n");
+      expect(result.stdout).toContain("cancelled true\n");
+      expect(result.stderr).toBe("");
+      expect(await readFile(join(evidence, "summary.txt"), "utf8")).toContain(
+        "deltas 3\n",
+      );
+      expect(
+        await readFile(join(evidence, "transcript.jsonl"), "utf8"),
+      ).toContain("chat.delta");
+      expect(await readFile(join(evidence, "command.txt"), "utf8")).toContain(
+        "drive chat-streaming --evidence",
+      );
+      expect(await readFile(join(evidence, "stderr.txt"), "utf8")).toBe("");
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+      await rm(linkParent, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it("exits 1 when verify-drive.ts is executed directly", async () => {
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const failed = await exec(
+        process.execPath,
+        [
+          ...TYPE_STRIP_NODE_ARGS,
+          join(repoRoot, "core/src/verify-drive.ts"),
+          "drive",
+          "chat-streaming",
+          "--evidence",
+          evidence,
+        ],
+        { cwd: repoRoot, encoding: "utf8", timeout: 20000 },
+      ).then(
+        () => ({ code: 0, stdout: "", stderr: "" }),
+        (error: unknown) => capturedFailure(error),
+      );
+      expect(failed.code).toBe(1);
+      expect(failed.stdout ?? "").toBe("");
+      expect(failed.stderr).toContain(
+        "run bin/drive-core (or verify-drive-entry.ts)\n",
+      );
+      await expect(stat(join(evidence, "summary.txt"))).rejects.toThrow();
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects stale evidence and a missing db.txt or timings.txt", async () => {
+    const baseFiles = [
+      "command.txt",
+      "transcript.jsonl",
+      "stderr.txt",
+      "summary.txt",
+    ];
+    expect(
+      await resolveDriveExit({
+        code: 0,
+        evidenceDir: null,
+        startedAt: null,
+        evidenceFiles: [],
+      }),
+    ).toBe(0);
+
+    const staleDir = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    const missingDir = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    const freshDir = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const staleAt = new Date(Date.now() - 60_000);
+      for (const name of baseFiles) {
+        const path = join(staleDir, name);
+        await writeFile(path, "stale\n");
+        await utimes(path, staleAt, staleAt);
+      }
+      const stale = await exitForEvidence(staleDir, Date.now(), baseFiles);
+      expect(stale.code).toBe(1);
+      expect(stale.stderr).toContain("drive-core: no evidence written\n");
+
+      const startedAt = Date.now();
+      for (const name of baseFiles) {
+        await writeFile(join(missingDir, name), "fresh\n");
+      }
+      const missingDb = await exitForEvidence(missingDir, startedAt, [
+        ...baseFiles,
+        "db.txt",
+      ]);
+      expect(missingDb.code).toBe(1);
+      expect(missingDb.stderr).toContain("drive-core: no evidence written\n");
+      const missingTimings = await exitForEvidence(missingDir, startedAt, [
+        ...baseFiles,
+        "timings.txt",
+      ]);
+      expect(missingTimings.code).toBe(1);
+      expect(missingTimings.stderr).toContain(
+        "drive-core: no evidence written\n",
+      );
+
+      const freshStart = Date.now();
+      for (const name of [...baseFiles, "db.txt", "timings.txt"]) {
+        await writeFile(join(freshDir, name), "fresh\n");
+      }
+      const fresh = await exitForEvidence(freshDir, freshStart, [
+        ...baseFiles,
+        "db.txt",
+        "timings.txt",
+      ]);
+      expect(fresh.code).toBe(0);
+      expect(fresh.stderr).toBe("");
+    } finally {
+      await rm(staleDir, { recursive: true, force: true });
+      await rm(missingDir, { recursive: true, force: true });
+      await rm(freshDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not start a drive when verify-drive.ts is imported", async () => {
+    const result = await nodeEval(
+      `import { HISTORY_CODE_WORD } from "./core/src/verify-drive.ts";
+       if (HISTORY_CODE_WORD !== "marmalade417") process.exit(2);
+       process.stdout.write("imported\\n");`,
+    );
+    expect(result.stdout).toBe("imported\n");
+    expect(result.stderr).toBe("");
   });
 });

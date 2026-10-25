@@ -8,9 +8,9 @@ on run argv
 	set foundMark to ""
 	set foundValue to ""
 	set nameList to {}
+	set cookieProc to my cookieDriveProcess()
 	tell application "System Events"
-		if not (exists process "CookieAgent") then error "CookieAgent is not running"
-		tell process "CookieAgent"
+		tell cookieProc
 			set statusItem to missing value
 			repeat with barIndex from 1 to (count of menu bars)
 				if (count of menu bar items of menu bar barIndex) > 0 then

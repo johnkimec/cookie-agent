@@ -8,9 +8,9 @@ on run argv
 	if (count of argv) ≥ 2 then set actionName to item 2 of argv
 	set fieldText to system attribute "COOKIE_AX_TEXT"
 	if fieldText is missing value then set fieldText to ""
+	set cookieProc to my cookieDriveProcess()
 	tell application "System Events"
-		if not (exists process "CookieAgent") then error "CookieAgent is not running"
-		tell process "CookieAgent"
+		tell cookieProc
 			set popupWindow to missing value
 			repeat with candidate in windows
 				if my windowName(candidate) is "Ask Cookie…" then set popupWindow to candidate

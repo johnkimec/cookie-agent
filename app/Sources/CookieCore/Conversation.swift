@@ -145,6 +145,11 @@ public struct PopupConversation: Equatable, Sendable {
     public mutating func applyDone(_ done: ChatDoneParams) {
         guard replyInFlight else { return }
         if let inflightMessageID, done.messageId != inflightMessageID { return }
+        settleInFlightReply()
+    }
+
+    /// The reply is no longer arriving. Keeps whatever cookie text is already shown.
+    public mutating func settleInFlightReply() {
         replyInFlight = false
         cookieTextStarted = false
         inflightMessageID = nil

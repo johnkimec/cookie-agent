@@ -1,8 +1,8 @@
 -- Option-click the status item. The panel reads NSEvent.modifierFlags.
 on run
+	set cookieProc to my cookieDriveProcess()
 	tell application "System Events"
-		if not (exists process "CookieAgent") then error "CookieAgent is not running"
-		tell process "CookieAgent"
+		tell cookieProc
 			set statusItem to missing value
 			repeat with barIndex from 1 to (count of menu bars)
 				if (count of menu bar items of menu bar barIndex) > 0 then
@@ -14,7 +14,7 @@ on run
 		key down option
 		delay 0.1
 		try
-			tell process "CookieAgent" to click statusItem
+			tell cookieProc to click statusItem
 			key up option
 		on error errText
 			try

@@ -91,6 +91,26 @@ public actor CoreSupervisor {
         return result.result
     }
 
+    /// `chat.cancel`. The core answers `{ cancelled: false }` when that reply
+    /// has already finished, and does not send a second `chat.done`.
+    public func cancelChat(
+        conversationId: String,
+        messageId: String,
+        timeout seconds: Double = 20
+    ) async throws -> ChatCancelResult {
+        let id = nextRequestID()
+        let message = WireMessage.chatCancelRequest(RpcRequest(
+            id: id,
+            method: "chat.cancel",
+            params: ChatCancelParams(conversationId: conversationId, messageId: messageId)
+        ))
+        let response = try await request(message, id: id, seconds: seconds)
+        guard case .chatCancelResult(let result) = response else {
+            throw CoreError.unexpected("chat.cancel result")
+        }
+        return result.result
+    }
+
     /// Shell → core notification. The core does not echo it. `loading` and
     /// `up` include `modelId`. `down` omits it.
     public func pushRuntime(_ status: RuntimeStatus) throws {
