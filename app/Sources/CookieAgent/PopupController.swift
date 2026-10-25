@@ -199,7 +199,9 @@ final class PopupController: NSObject, @unchecked Sendable {
 
     private func handleKey(_ event: NSEvent) -> NSEvent? {
         guard model.popupOpen, event.keyCode == 53 else { return event }
-        model.closePopup()
+        // The monitor swallows Escape, so the field does not see it too.
+        // While a reply is arriving this stops the reply and leaves the panel up.
+        model.pressEscape()
         return nil
     }
 
@@ -271,21 +273,20 @@ struct PopupRoot: View {
     }
 
     private var inputRow: some View {
-        HStack(alignment: .center, spacing: 10) {
+        let control = popupSendControl(
+            runtime: model.runtime.state,
+            replyInFlight: model.conversation.replyInFlight
+        )
+        return HStack(alignment: .center, spacing: 10) {
             CookiePlaceholder(pose: model.pose)
             VStack(alignment: .leading, spacing: 4) {
                 AskField(
                     text: Binding(
                         get: { model.conversation.draft },
-                        set: { newValue in
-                            var next = model.conversation
-                            next.draft = newValue
-                            model.conversation = next
-                            model.onLayout?()
-                        }
+                        set: { model.setDraft($0) }
                     ),
                     onSubmit: { model.submit() },
-                    onEscape: { model.closePopup() },
+                    onEscape: { model.pressEscape() },
                     onEditLast: { model.recallLast() }
                 )
                 .accessibilityLabel(CookieCopy.ask)
@@ -309,13 +310,13 @@ struct PopupRoot: View {
                 }
             }
             IdentifiedButton(
-                title: "⏎",
-                identifier: CookieAX.popupSend,
-                enabled: sendEnabled(runtime: model.runtime.state)
+                title: control.title,
+                identifier: control.identifier,
+                enabled: control.enabled
             ) {
                 model.submit()
             }
-            .help(CookieCopy.ask)
+            .help(control.stopsReply ? CookieCopy.stop : CookieCopy.ask)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

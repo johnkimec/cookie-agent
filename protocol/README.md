@@ -98,7 +98,7 @@ Params: `conversationId` and `messageId`. Result: `{ "cancelled": true }` if tha
 
 When it does cancel, the core sends `chat.done` with `finishReason: "cancelled"` and then the `chat.cancel` result. No further deltas follow.
 
-The UI spec does not name a cancel control. Esc closes the popup. It is not specified as cancel.
+The shell's Stop control sends this method while a reply is arriving (decision 15). Idle Esc still closes the popup and does not cancel.
 
 ### `runtime.status`
 
@@ -211,3 +211,4 @@ enum RuntimeState: String, Codable {
 12. `chat.send` acks with `messageId` before the stream. `chat.done` is a notification, not that ack.
 13. One in-flight chat per core in the fake core. A second send gets `-32003`. Task A can keep or relax that when it replaces the fake.
 14. The fake core announces `up` / `fake-local` so the shell can render the warm path with no model. The real core must not copy that default.
+15. John's M1 answer (2026-10-25) supersedes decision 10 for the popup. While a reply is arriving, the send control is labelled `Stop` and Return sends `chat.cancel`. Escape stops that reply and leaves the panel open; Escape closes the panel only when nothing is streaming. The wire method is unchanged. `Stop` is placeholder copy pending John's review.

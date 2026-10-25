@@ -51,6 +51,7 @@ Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another ap
 | Input | `cookie.popup.input` | `Ask Cookie…` |
 | Mascot | `cookie.popup.mascot` | `Cookie, listening`, `Cookie, thinking`, `Cookie, talking`, or `Cookie, offline` |
 | Send mark | `cookie.popup.send` | `⏎` |
+| Stop (same control, while a reply is arriving) | `cookie.popup.stop` | `Stop` |
 | Refusal line | `cookie.popup.refusal` | `Cookie's model isn't ready yet.` or `Cookie's still answering.` |
 | Loading line | `cookie.popup.loading` | `Loading the model…` |
 | You turn | `cookie.turn.you.<n>` | `you` |
@@ -63,4 +64,4 @@ The Mac recipe is `.cursor/skills/verify-cookie/bin/drive-mac`. It does not run 
 
 ## M0 scope
 
-The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no cancel control and no screen chip. While `runtime.status` is `loading`, Send is disabled and the popup shows `Loading the model…` (`cookie.popup.loading`) instead of the refusal line. A `chat.send` error `-32002` while the runtime is not `down` is that loading state. Once the runtime is `up`, the menu status line includes the model name (`Qwen3.6` for `Qwen3.6-35B-A3B`). Escape closes the popup and does not cancel a stream. `Loading the model…` is placeholder copy pending John's review.
+The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no screen chip. While `runtime.status` is `loading` and no reply is arriving, Send is disabled and the popup shows `Loading the model…` (`cookie.popup.loading`) instead of the refusal line. A `chat.send` error `-32002` while the runtime is not `down` is that loading state. Once the runtime is `up`, the menu status line includes the model name (`Qwen3.6` for `Qwen3.6-35B-A3B`). While a reply is arriving, that same control is Stop (`cookie.popup.stop`, label `Stop`) and stays enabled. Return and Stop send one `chat.cancel`. The partial reply stays. The control returns to `⏎` (`cookie.popup.send`) when `chat.done` arrives or the cancel result arrives. Escape during a reply stops it and leaves the panel open. Escape when nothing is streaming closes the panel. Clicking outside closes the panel and does not cancel. `Loading the model…` and `Stop` are placeholder copy pending John's review.

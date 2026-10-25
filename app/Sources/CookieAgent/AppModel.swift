@@ -14,11 +14,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var launchFailure: ShellLaunchFailure?
 
     let localOnly = true
-    let conversationID = "conv-\(UUID().uuidString)"
+    let conversationID: String
 
     var onPopup: ((Bool) -> Void)?
     var onLayout: (() -> Void)?
 
+    private let turns: PopupChatSession
     private var supervisor: CoreSupervisor?
     private var transport: ProcessTransport?
     private var runtimeServers: RuntimeServers?
@@ -55,6 +56,24 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             return launchFailure.statusLine
         }
         return CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
+    }
+
+    init() {
+        let id = "conv-\(UUID().uuidString)"
+        conversationID = id
+        let session = PopupChatSession(conversationID: id)
+        turns = session
+        session.onChange = { [weak self] in
+            self?.publishTurns()
+        }
+        session.onSendFailure = { [weak self] failure in
+            self?.handleSendFailure(failure)
+        }
+        session.onCancelFailure = { [weak self] description in
+            DispatchQueue.main.async {
+                self?.log("cancel: \(description)")
+            }
+        }
     }
 
     func start() {
@@ -94,6 +113,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let supervisor = CoreSupervisor(transport: transport)
         self.transport = transport
         self.supervisor = supervisor
+        turns.attach(supervisor)
         let events = supervisor.events
         eventsTask = Task { [weak self] in
             for await event in events {
@@ -111,6 +131,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             let servers = plan.servers
             self.runtimeServers = servers
             self.runtime = RuntimeStatus(state: .loading, modelId: plan.chatLaunch.modelId)
+            self.turns.noteRuntime(.loading)
             log(
                 "llama=\(plan.chatLaunch.executable) \(plan.chatLaunch.arguments.joined(separator: " ")) log=\(plan.chatLaunch.logFile) pid=\(plan.chatLaunch.pidFile)"
             )
@@ -198,54 +219,35 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func openPopup() {
         lastToggle = Date()
-        var next = conversation
-        next.noteOpen(at: Date())
-        conversation = next
-        if !popupOpen {
-            popupOpen = true
-            onPopup?(true)
-        } else {
+        let wasOpen = popupOpen
+        turns.open(at: Date())
+        if wasOpen {
             onPopup?(true)
         }
-        onLayout?()
     }
 
     func closePopup() {
         guard popupOpen else { return }
-        var next = conversation
-        next.noteClose(at: Date())
-        conversation = next
-        popupOpen = false
-        onPopup?(false)
+        turns.close(at: Date())
     }
 
+    func setDraft(_ text: String) {
+        turns.setDraft(text)
+    }
+
+    /// Return, the send button, and AXConfirm. Stops a reply that is still arriving.
     func submit() {
-        let text = conversation.draft
-        var next = conversation
-        let action = next.prepareSend(runtime: runtime.state)
-        conversation = next
-        onLayout?()
-        guard case .send(let body) = action else { return }
-        guard let supervisor else {
-            rollback(body)
-            return
-        }
-        let conversationID = self.conversationID
-        Task { [weak self] in
-            do {
-                let ack = try await supervisor.sendChat(conversationId: conversationID, text: body)
-                self?.noteAck(ack.messageId)
-            } catch {
-                self?.handleSendFailure(error, restoring: body)
-            }
-        }
+        turns.pressReturn()
+    }
+
+    /// Escape. Stops a reply that is still arriving and leaves the panel open.
+    /// Closes the panel when nothing is arriving.
+    func pressEscape() {
+        turns.pressEscape()
     }
 
     func recallLast() {
-        var next = conversation
-        next.recallLastUserText()
-        conversation = next
-        onLayout?()
+        turns.recallLast()
     }
 
     func quit() {
@@ -261,46 +263,40 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         await runtimeServers?.stop()
     }
 
-    private func noteAck(_ messageID: String) {
-        DispatchQueue.main.async { [weak self] in
+    private func publishTurns() {
+        let apply = { [weak self] in
             guard let self else { return }
-            var next = self.conversation
-            next.noteAck(messageID: messageID)
-            self.conversation = next
-        }
-    }
-
-    private func rollback(_ text: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            var next = self.conversation
-            next.rollbackSend(restoredText: text)
-            self.conversation = next
+            let snap = self.turns.snapshot
+            self.conversation = snap.conversation
+            if self.popupOpen != snap.popupOpen {
+                self.popupOpen = snap.popupOpen
+                self.onPopup?(self.popupOpen)
+            }
             self.onLayout?()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
         }
     }
 
     private func handle(_ event: CoreEvent) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            var next = self.conversation
             switch event {
             case .runtime(let status):
                 if self.runtimeServers == nil {
-                    next.noteRuntime(status.state)
-                    self.conversation = next
                     self.runtime = status
+                    self.turns.noteRuntime(status.state)
                 }
             case .delta(let delta):
-                next.applyDelta(delta)
-                self.conversation = next
+                self.turns.ingestDelta(delta)
             case .done(let done):
-                next.applyDone(done)
-                self.conversation = next
+                self.turns.ingestDone(done)
             case .rpcError, .decodeFailed:
-                break
+                self.onLayout?()
             }
-            self.onLayout?()
         }
     }
 
@@ -315,12 +311,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private func applySupervisorStatus(_ status: RuntimeStatus) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            var next = self.conversation
-            next.noteRuntime(status.state)
-            self.conversation = next
             self.runtime = status
+            self.turns.noteRuntime(status.state)
             self.pendingPush = status
-            self.onLayout?()
             self.flushPush()
         }
     }
@@ -337,39 +330,25 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func handleSendFailure(_ error: Error, restoring text: String) {
-        let code: Int?
-        if let core = error as? CoreError, case .rpc(let body) = core {
-            code = body.code
-        } else {
-            code = nil
-        }
-        let description = String(describing: error)
+    /// The session has already restored the draft. This only sets the quiet line.
+    private func handleSendFailure(_ failure: PopupSendFailure) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            switch presentChatSendFailure(code: code, runtime: self.runtime.state) {
+            switch presentChatSendFailure(code: failure.code, runtime: self.runtime.state) {
             case .stillLoading:
-                var next = self.conversation
-                next.rollbackSend(restoredText: text)
-                next.refusal = nil
-                self.conversation = next
+                self.turns.clearRefusal()
                 if self.runtime.state != .loading {
                     self.runtime = RuntimeStatus(
                         state: .loading,
                         modelId: self.runtime.modelId ?? defaultModelID
                     )
+                    self.turns.noteRuntime(.loading)
                 }
-                self.onLayout?()
                 self.confirmRuntime()
             case .notReady:
-                var next = self.conversation
-                next.rollbackSend(restoredText: text)
-                next.refusal = .notReady
-                self.conversation = next
-                self.onLayout?()
+                self.turns.setRefusal(.notReady)
             case .failed:
-                self.log("send: \(description)")
-                self.rollback(text)
+                self.log("send: \(failure.description)")
             }
         }
     }
