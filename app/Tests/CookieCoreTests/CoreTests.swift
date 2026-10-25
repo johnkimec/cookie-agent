@@ -389,7 +389,7 @@ final class TerminationHopTests: XCTestCase {
             + TerminationHop.sigkillWaitSeconds
         XCTAssertEqual(TerminationHop.replyBackstopSeconds, 15)
         XCTAssertGreaterThan(TerminationHop.replyBackstopSeconds, reap)
-        XCTAssertEqual(TerminationHop.replyModes, [.common, .modalPanel])
+        XCTAssertEqual(TerminationHop.replyModes, [.common, TerminationHop.modalPanel])
     }
 
     /// A signal source calls this from a background queue. The block has to
@@ -420,7 +420,7 @@ final class TerminationHopTests: XCTestCase {
             }
             let deadline = Date().addingTimeInterval(1)
             while !viaRunLoop && Date() < deadline {
-                RunLoop.current.run(mode: .modalPanel, before: Date().addingTimeInterval(0.05))
+                RunLoop.current.run(mode: TerminationHop.modalPanel, before: Date().addingTimeInterval(0.05))
             }
             XCTAssertTrue(viaRunLoop)
             XCTAssertFalse(viaMainQueue)

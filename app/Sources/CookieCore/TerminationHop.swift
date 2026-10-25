@@ -8,10 +8,14 @@ import Foundation
 /// reply scheduled with `DispatchQueue.main.async` never runs. The run
 /// loop does run blocks scheduled for `.modalPanel`.
 public enum TerminationHop {
+    /// `NSModalPanelRunLoopMode`. AppKit exposes this as
+    /// `RunLoop.Mode.modalPanel`; Foundation does not.
+    public static let modalPanel = RunLoop.Mode(rawValue: "NSModalPanelRunLoopMode")
+
     /// Modes `NSApplication` uses while `.terminateLater` is pending.
     /// `.common` includes the modal-panel mode; listing both matches the
     /// run loop `terminate` actually spins.
-    public static let replyModes: [RunLoop.Mode] = [.common, .modalPanel]
+    public static let replyModes: [RunLoop.Mode] = [.common, modalPanel]
 
     /// Core `shutdown` timeout, then SIGTERM grace, then the SIGKILL wait.
     /// A shorter backstop can reply while the owned server is still alive.
