@@ -364,7 +364,8 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertEqual(status.state, .up)
         XCTAssertEqual(status.modelId, "Qwen3.6-35B-A3B")
         XCTAssertTrue(launcher.started.isEmpty)
-        XCTAssertFalse(await supervisor.isOwningProcess)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertFalse(ownsProcess)
         await supervisor.stop()
         XCTAssertTrue(launcher.terminated.isEmpty)
     }
@@ -382,7 +383,8 @@ final class RuntimeSupervisorTests: XCTestCase {
         let status = await supervisor.status
         XCTAssertEqual(status.state, .up)
         XCTAssertTrue(launcher.started.isEmpty)
-        XCTAssertFalse(await supervisor.isOwningProcess)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertFalse(ownsProcess)
     }
 
     func testBackoffThenHealthy() async {
@@ -400,7 +402,8 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertEqual(status.state, .up)
         XCTAssertEqual(launcher.started.count, 2)
         XCTAssertEqual(clock.recorded(), [1])
-        XCTAssertTrue(await supervisor.isOwningProcess)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertTrue(ownsProcess)
         await supervisor.stop()
         XCTAssertEqual(launcher.terminated.count, 1)
     }
@@ -421,7 +424,8 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertEqual(launcher.started[0].logFile, "/tmp/cookie-data/logs/llama-server.log")
         XCTAssertEqual(clock.recorded(), [1, 2])
         XCTAssertNil(pids.record)
-        XCTAssertFalse(await supervisor.isOwningProcess)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertFalse(ownsProcess)
     }
 
     func testSpawnFailureGivesUp() async {
@@ -496,7 +500,8 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertTrue(launcher.terminated.isEmpty)
         XCTAssertTrue(launcher.started.isEmpty)
         XCTAssertNil(pids.record)
-        XCTAssertFalse(await supervisor.isOwningProcess)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertFalse(ownsProcess)
         await supervisor.stop()
         XCTAssertTrue(launcher.terminated.isEmpty)
     }
@@ -517,7 +522,8 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertNil(pids.record)
         let status = await supervisor.status
         XCTAssertEqual(status.state, .up)
-        XCTAssertFalse(await supervisor.isOwningProcess)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertFalse(ownsProcess)
     }
 
     func testLauncherWritesLogAndStopsSleep() throws {
@@ -597,11 +603,15 @@ private final class ScriptedClock: RuntimeClock, @unchecked Sendable {
 
     func sleep(seconds: Double) async {
         if seconds > 0 {
-            lock.lock()
-            sleeps.append(seconds)
-            lock.unlock()
+            note(seconds)
         }
         await Task.yield()
+    }
+
+    private func note(_ seconds: Double) {
+        lock.lock()
+        sleeps.append(seconds)
+        lock.unlock()
     }
 
     func recorded() -> [Double] {
@@ -620,6 +630,10 @@ private final class ScriptedHealth: RuntimeHealthChecking, @unchecked Sendable {
     }
 
     func probe(port: Int) async -> RuntimeProbe {
+        nextProbe()
+    }
+
+    private func nextProbe() -> RuntimeProbe {
         lock.lock()
         defer { lock.unlock() }
         if results.isEmpty { return .down }
@@ -636,6 +650,10 @@ private final class LivingHealth: RuntimeHealthChecking, @unchecked Sendable {
     }
 
     func probe(port: Int) async -> RuntimeProbe {
+        living()
+    }
+
+    private func living() -> RuntimeProbe {
         launcher.hasLivingProcess ? .up : .down
     }
 }
