@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -39,15 +39,11 @@ class StdioClient {
   private stderrEnded = false;
   private readonly stderrWaiters: Array<() => void> = [];
 
-  constructor(env: NodeJS.ProcessEnv) {
-    this.child = spawn(
-      process.execPath,
-      [...TYPE_STRIP_NODE_ARGS, entry.pathname],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, ...env },
-      },
-    );
+  constructor(env: NodeJS.ProcessEnv, entryPath = entry.pathname) {
+    this.child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, entryPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+    });
     children.push(this.child);
     if (
       this.child.stdout === null ||
@@ -225,6 +221,40 @@ describe("stdio core", () => {
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_THINKING");
+  });
+
+  it("starts through a symlinked path", async () => {
+    const port = await closedPort();
+    const dataDir = await mkdtemp(join(tmpdir(), "cookie-stdio-"));
+    const linkDir = await mkdtemp(join(tmpdir(), "cookie-index-link-"));
+    const link = join(linkDir, "index.ts");
+    await symlink(entry.pathname, link);
+    try {
+      const client = new StdioClient(
+        {
+          COOKIE_LLAMA_PORT: String(port),
+          COOKIE_DATA_DIR: dataDir,
+        },
+        link,
+      );
+      client.send({
+        jsonrpc: "2.0",
+        id: "1",
+        method: "initialize",
+        params: {
+          protocolVersion: "0.1",
+          clientInfo: { name: "cookie-test", version: "0.0.0" },
+          capabilities: {},
+        },
+      });
+      const ready = await client.response("1");
+      expect(ready.result).toMatchObject({
+        serverInfo: { name: "cookie-core", version: "0.0.0" },
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(linkDir, { recursive: true, force: true });
+    }
   });
 });
 
