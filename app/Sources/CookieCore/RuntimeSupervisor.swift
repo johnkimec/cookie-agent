@@ -234,7 +234,11 @@ public actor RuntimeSupervisor {
             return .cleared
         }
         let alive = launcher.isAlive(record.pid)
-        let ours = alive && launcher.isOurServer(pid: record.pid, executable: launch.executable)
+        let ours = alive && launcher.isOurServer(
+            pid: record.pid,
+            executable: launch.executable,
+            port: port
+        )
         guard ours else {
             pidStore.remove()
             return .cleared
@@ -365,6 +369,9 @@ public actor RuntimeSupervisor {
             case .down:
                 break
             }
+            // Quit can land during the probe. Starting after that leaves a
+            // server this app no longer owns.
+            if stopped { return }
             failures += 1
             if failures > RuntimeLaunch.maxStartAttempts {
                 giveUp()
@@ -459,6 +466,116 @@ public actor RuntimeSupervisor {
         guard !stopped, generation == watchGeneration else { return }
         forgetProcess(removePid: true)
         await runOwned(port: port, initialBackoff: true)
+    }
+}
+
+/// Chat server plus the optional embedding server. Each one is a
+/// `RuntimeSupervisor`. Embed failures stay on the embed instance.
+public struct RuntimeServers: Sendable {
+    public let chat: RuntimeSupervisor
+    public let embed: RuntimeSupervisor?
+
+    public init(chat: RuntimeSupervisor, embed: RuntimeSupervisor?) {
+        self.chat = chat
+        self.embed = embed
+    }
+
+    public func start() async {
+        async let chatStarted: Void = chat.start()
+        if let embed {
+            async let embedStarted: Void = embed.start()
+            _ = await (chatStarted, embedStarted)
+        } else {
+            await chatStarted
+        }
+    }
+
+    /// SIGTERM both process groups together. Returns after each owned
+    /// server has exited and that server's pid file has been removed.
+    public func stop() async {
+        async let chatStopped: Void = chat.stop()
+        if let embed {
+            async let embedStopped: Void = embed.stop()
+            _ = await (chatStopped, embedStopped)
+        } else {
+            await chatStopped
+        }
+    }
+}
+
+public struct RuntimeServerPlan: Sendable {
+    public var chatLaunch: RuntimeLaunch
+    public var embedLaunch: RuntimeLaunch
+    public var embedSkip: String?
+    public var servers: RuntimeServers
+
+    public init(
+        chatLaunch: RuntimeLaunch,
+        embedLaunch: RuntimeLaunch,
+        embedSkip: String?,
+        servers: RuntimeServers
+    ) {
+        self.chatLaunch = chatLaunch
+        self.embedLaunch = embedLaunch
+        self.embedSkip = embedSkip
+        self.servers = servers
+    }
+}
+
+public extension RuntimeServers {
+    /// Build both supervisors. A missing embed model, an invalid
+    /// `COOKIE_EMBED_PORT`, or an embed port equal to the chat port skips
+    /// the embedder and leaves chat running.
+    static func make(
+        environment: [String: String],
+        homeDirectory: URL,
+        dataDirectory: String,
+        recordsStablePid: Bool,
+        modelExists: @escaping @Sendable (String) -> Bool = { path in
+            FileManager.default.fileExists(atPath: path)
+        },
+        chatFactory: @escaping @Sendable (RuntimeLaunch) -> RuntimeSupervisor = { launch in
+            RuntimeSupervisor.live(launch: launch)
+        },
+        embedFactory: @escaping @Sendable (RuntimeLaunch) -> RuntimeSupervisor = { launch in
+            RuntimeSupervisor.live(launch: launch)
+        }
+    ) -> RuntimeServerPlan {
+        let chatLaunch = RuntimeLaunch.resolve(
+            environment: environment,
+            homeDirectory: homeDirectory,
+            dataDirectory: dataDirectory,
+            recordsStablePid: recordsStablePid
+        )
+        let embedLaunch = RuntimeLaunch.resolveEmbed(
+            environment: environment,
+            homeDirectory: homeDirectory,
+            dataDirectory: dataDirectory,
+            recordsStablePid: recordsStablePid
+        )
+        let chat = chatFactory(chatLaunch)
+        let embed: RuntimeSupervisor?
+        let skip: String?
+        if embedLaunch.port == nil {
+            let raw = environment["COOKIE_EMBED_PORT"] ?? ""
+            skip = "embed port invalid \(raw); skipping llama-embed"
+            embed = nil
+        } else if let embedPort = embedLaunch.port, embedPort == chatLaunch.port {
+            skip = "embed port \(embedPort) matches chat port; skipping llama-embed"
+            embed = nil
+        } else if !modelExists(embedLaunch.modelPath) {
+            skip = "embed model missing \(embedLaunch.modelPath); skipping llama-embed"
+            embed = nil
+        } else {
+            skip = nil
+            embed = embedFactory(embedLaunch)
+        }
+        return RuntimeServerPlan(
+            chatLaunch: chatLaunch,
+            embedLaunch: embedLaunch,
+            embedSkip: skip,
+            servers: RuntimeServers(chat: chat, embed: embed)
+        )
     }
 }
 
@@ -574,12 +691,13 @@ public final class DarwinRuntimeLauncher: RuntimeLaunching, @unchecked Sendable 
         return nil
     }
 
-    public func isOurServer(pid: Int32, executable: String) -> Bool {
+    public func isOurServer(pid: Int32, executable: String, port: Int) -> Bool {
         guard let path = executablePath(pid: pid) else { return false }
-        if path == executable { return true }
         let running = (path as NSString).lastPathComponent
         let expected = (executable as NSString).lastPathComponent
-        return !expected.isEmpty && running == expected
+        let sameBinary = path == executable || (!expected.isEmpty && running == expected)
+        guard sameBinary, let arguments = processArguments(pid: pid) else { return false }
+        return commandArgumentsContainPort(arguments, port: port)
     }
 
     private func exitCode(_ pid: Int32) -> Int32? {
@@ -603,6 +721,40 @@ public final class DarwinRuntimeLauncher: RuntimeLaunching, @unchecked Sendable 
             return (status >> 8) & 0xff
         }
         return 128 + (status & 0x7f)
+    }
+
+    /// `KERN_PROCARGS2`: argc, the exec path, NUL padding, then argv.
+    private func processArguments(pid: Int32) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        if sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) != 0 || size <= MemoryLayout<Int32>.size {
+            return nil
+        }
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: size)
+        defer { buffer.deallocate() }
+        var copied = size
+        if sysctl(&mib, u_int(mib.count), buffer, &copied, nil, 0) != 0 || copied <= MemoryLayout<Int32>.size {
+            return nil
+        }
+        let argc = buffer.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }
+        guard argc > 0 else { return nil }
+        var cursor = buffer.advanced(by: MemoryLayout<Int32>.size)
+        let end = buffer.advanced(by: copied)
+        while cursor < end, cursor.pointee != 0 {
+            cursor = cursor.advanced(by: 1)
+        }
+        while cursor < end, cursor.pointee == 0 {
+            cursor = cursor.advanced(by: 1)
+        }
+        var arguments: [String] = []
+        arguments.reserveCapacity(Int(argc))
+        for _ in 0..<argc {
+            guard cursor < end else { return nil }
+            let word = String(cString: cursor)
+            arguments.append(word)
+            cursor = cursor.advanced(by: word.utf8.count + 1)
+        }
+        return arguments
     }
 
     private func executablePath(pid: Int32) -> String? {
