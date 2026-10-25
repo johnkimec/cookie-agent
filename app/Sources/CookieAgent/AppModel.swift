@@ -182,7 +182,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func openPopup() {
         lastToggle = Date()
         var next = conversation
-        next.noteOpen(at: Date())
+        next.noteOpen(
+            at: Date(),
+            ttl: resolvedDraftTTL(environment: ProcessInfo.processInfo.environment)
+        )
         conversation = next
         if !popupOpen {
             popupOpen = true

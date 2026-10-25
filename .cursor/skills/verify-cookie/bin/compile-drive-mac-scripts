@@ -1,6 +1,6 @@
 #!/bin/bash
-# Compile every AppleScript embedded in drive-mac.
-# A handler that uses System Events terms outside
+# Compile every AppleScript embedded in drive-mac, and every script
+# under bin/scripts/. A handler that uses System Events terms outside
 # `tell application "System Events"` fails here (error -2741) instead of
 # on a Mac during drive-mac.
 set -euo pipefail
@@ -55,28 +55,37 @@ for n, block in enumerate(blocks, 1):
 print(f"extracted {len(blocks)}")
 PY
 
-fail=0
-count=0
-for script in "$tmpdir"/script-*.applescript; do
+compile_one() {
+  local script="$1"
+  local err="$tmpdir/compile.err"
   count=$((count + 1))
-  err="$tmpdir/compile.err"
   : >"$err"
   if osacompile -o /dev/null "$script" 2>"$err"; then
     echo "compiled $script"
-    continue
+    return 0
   fi
   # Some macOS versions will not write a compiled script to /dev/null.
   # A syntax error fails this second compile too.
   if osacompile -o "$tmpdir/compiled.scpt" "$script" 2>>"$err"; then
     rm -f "$tmpdir/compiled.scpt"
     echo "compiled $script"
-    continue
+    return 0
   fi
   echo "compile failed: $script" >&2
   cat "$err" >&2
   echo "-----" >&2
   cat "$script" >&2
   fail=1
+}
+
+fail=0
+count=0
+for script in "$tmpdir"/script-*.applescript; do
+  compile_one "$script"
+done
+shopt -s nullglob
+for script in "$ROOT"/scripts/*.applescript; do
+  compile_one "$script"
 done
 
 if [[ "$count" -lt 1 ]]; then

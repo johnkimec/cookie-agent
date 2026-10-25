@@ -72,6 +72,36 @@ public enum PopupLayout {
     public static let draftTTL: TimeInterval = 600
 }
 
+/// Product default is 10 minutes. `COOKIE_DRAFT_TTL_SECONDS` shortens that
+/// window for a drive-mac recipe. Unset, empty, and out-of-range values
+/// stay on the product default, and a value cannot lengthen it.
+public func resolvedDraftTTL(environment: [String: String]) -> TimeInterval {
+    guard let raw = environment["COOKIE_DRAFT_TTL_SECONDS"], !raw.isEmpty else {
+        return PopupLayout.draftTTL
+    }
+    guard let value = Double(raw), value > 0, value <= PopupLayout.draftTTL else {
+        return PopupLayout.draftTTL
+    }
+    return value
+}
+
+/// Custom accessibility actions that replay Shift-Return, ⌘K, and Up.
+/// System Events keystrokes go to the frontmost app, not this panel.
+/// Unset leaves the field's actions unchanged.
+public func cookieDriveKeysEnabled(environment: [String: String]) -> Bool {
+    environment["COOKIE_DRIVE_KEYS"] == "1"
+}
+
+/// Where Shift-Return should insert after an accessibility set.
+/// System Events replaces the field text and does not leave the caret
+/// where typing would. Unset returns nil so the setter stays as it is.
+public func driveCaretLocation(textLength: Int, environment: [String: String]) -> Int? {
+    guard cookieDriveKeysEnabled(environment: environment), textLength >= 0 else {
+        return nil
+    }
+    return textLength
+}
+
 public enum MenuGlyph: String, Equatable, Sendable {
     case idle
     case listening

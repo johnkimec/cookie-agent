@@ -10,17 +10,22 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 usage() {
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--runtime fake|real] [--evidence dir]" >&2
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all|menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
 }
 
 feature="all"
 runtime="fake"
 evidence=""
+focused=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     menu-bar-icon|hotkey-popup|chat|all)
       feature="$1"
+      ;;
+    menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only)
+      feature="$1"
+      focused=1
       ;;
     --runtime)
       [[ $# -ge 2 ]] || usage
@@ -38,9 +43,13 @@ while [[ $# -gt 0 ]]; do
     *)
       usage
       ;;
-  esac
+    esac
   shift
 done
+
+if [[ "$focused" == "1" && -z "$evidence" ]]; then
+  usage
+fi
 
 port="${COOKIE_LLAMA_PORT:-}"
 data="${COOKIE_DATA_DIR:-}"
@@ -73,7 +82,35 @@ fi
 log() { printf '%s\n' "$*"; }
 
 APP_PID=""
+STUB_PID=""
+pid_is_fault_stub() {
+  local pid="$1"
+  pid_alive "$pid" || return 1
+  ps -p "$pid" -o command= 2>/dev/null | grep -E 'llama-fault-stub|llama-fault-wrapper' >/dev/null
+}
+
+stop_stub_pid() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  if ! pid_is_fault_stub "$pid"; then
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local attempt
+  for attempt in $(seq 1 20); do
+    pid_alive "$pid" || return 0
+    sleep 0.2
+  done
+  if pid_is_fault_stub "$pid"; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+}
+
 cleanup() {
+  if [[ -n "${STUB_PID:-}" ]] && declare -F pid_alive >/dev/null; then
+    stop_stub_pid "$STUB_PID" || true
+    STUB_PID=""
+  fi
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill "$APP_PID" 2>/dev/null || true
     local attempt
@@ -86,12 +123,13 @@ cleanup() {
     fi
     wait "$APP_PID" 2>/dev/null || true
   fi
+  if declare -F pid_file_pid >/dev/null && declare -F pid_alive >/dev/null; then
+    local fault
+    fault="$(pid_file_pid || true)"
+    stop_stub_pid "$fault" || true
+  fi
 }
 trap cleanup EXIT
-
-log "launch $BIN"
-"$BIN" &
-APP_PID=$!
 
 osascript_run() {
   /usr/bin/osascript "$@"
@@ -637,6 +675,17 @@ PY
   done
   return 1
 }
+
+if [[ "$focused" == "1" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/.cursor/skills/verify-cookie/bin/drive-mac-recipes"
+  run_focused_recipe
+  exit 0
+fi
+
+log "launch $BIN"
+"$BIN" &
+APP_PID=$!
 
 log "wait for menu bar"
 if ! wait_for_menu; then

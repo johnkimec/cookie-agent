@@ -83,6 +83,35 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(PopupLayout.mascot, 40)
         XCTAssertEqual(PopupLayout.draftTTL, 600)
     }
+
+    func testDraftTTLOverrideStaysInsideTheProductWindow() {
+        XCTAssertEqual(resolvedDraftTTL(environment: [:]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": ""]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "0"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "-3"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "nope"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "601"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "2"]), 2)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "2.5"]), 2.5)
+        XCTAssertFalse(cookieDriveKeysEnabled(environment: [:]))
+        XCTAssertFalse(cookieDriveKeysEnabled(environment: ["COOKIE_DRIVE_KEYS": "0"]))
+        XCTAssertTrue(cookieDriveKeysEnabled(environment: ["COOKIE_DRIVE_KEYS": "1"]))
+        XCTAssertNil(driveCaretLocation(textLength: 5, environment: [:]))
+        XCTAssertNil(driveCaretLocation(textLength: 5, environment: ["COOKIE_DRIVE_KEYS": "0"]))
+        XCTAssertEqual(driveCaretLocation(textLength: 5, environment: ["COOKIE_DRIVE_KEYS": "1"]), 5)
+        XCTAssertEqual(driveCaretLocation(textLength: 0, environment: ["COOKIE_DRIVE_KEYS": "1"]), 0)
+    }
+
+    func testShortDraftTTLClearsOnOpen() {
+        var chat = PopupConversation(draft: "expires")
+        let saved = Date(timeIntervalSince1970: 1_000)
+        chat.noteClose(at: saved)
+        let ttl = resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "2"])
+        chat.noteOpen(at: saved.addingTimeInterval(2), ttl: ttl)
+        XCTAssertEqual(chat.draft, "expires")
+        chat.noteOpen(at: saved.addingTimeInterval(2.01), ttl: ttl)
+        XCTAssertEqual(chat.draft, "")
+    }
 }
 
 final class ConversationTests: XCTestCase {
