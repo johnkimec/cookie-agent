@@ -339,6 +339,22 @@ describe("memory.remember and memory.forget", () => {
     );
     expect(ambiguous).toMatchObject({ forgotten: false, reason: "ambiguous" });
     expect(derived.listFacts()).toHaveLength(2);
+    derived.insertFact(fact({ id: "exact", text: "midterm notes" }));
+    const exact = await tools[MEMORY_FORGET_TOOL]?.execute?.(
+      { text: "midterm notes" },
+      toolOptions,
+    );
+    expect(exact).toMatchObject({
+      forgotten: true,
+      factIds: ["exact"],
+      candidates: [
+        { id: "a", text: "alpha midterm notes" },
+        { id: "b", text: "beta midterm notes" },
+      ],
+    });
+    expect(derived.factById("exact")).toBeNull();
+    expect(derived.factById("a")).not.toBeNull();
+    expect(derived.factById("b")).not.toBeNull();
   });
 
   it("refuses a secret and does not write a fact", async () => {
@@ -722,6 +738,15 @@ describe("consolidation", () => {
     });
     await job.consolidate();
     expect(derived.factById("stale")?.supersededBy).toMatch(/^marker-/);
+    const staleMarker = derived.factById(
+      derived.factById("stale")?.supersededBy ?? "",
+    );
+    expect(staleMarker?.text).toBe("Superseded stale");
+    expect(staleMarker?.text).not.toContain("beta");
+    const freshMarker = derived.factById(
+      derived.factById("fresh")?.supersededBy ?? "",
+    );
+    expect(freshMarker?.text ?? "").not.toContain("alpha");
     expect(activeFacts(derived, DAY).map((row) => row.id)).toEqual(["copy"]);
     expect(derived.factById("fresh")?.supersededBy).toMatch(/^marker-/);
     expect(

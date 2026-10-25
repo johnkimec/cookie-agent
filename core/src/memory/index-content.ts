@@ -123,6 +123,9 @@ export class ContentIndexer {
            SELECT 1 FROM embed_index e
            WHERE e.source = 'turn' AND e.source_id = t.id AND e.model = ?
          )
+           AND NOT EXISTS (
+             SELECT 1 FROM forgotten_turns f WHERE f.turn_id = t.id
+           )
          ORDER BY created_at, id`,
       )
       .all(this.model) as PendingTurn[];
@@ -136,6 +139,7 @@ export class ContentIndexer {
            SELECT 1 FROM embed_index e
            WHERE e.source = 'fact' AND e.source_id = f.id AND e.model = ?
          )
+           AND (f.subject IS NULL OR f.subject != 'memory:tombstone')
          ORDER BY created_at, id`,
       )
       .all(this.model) as PendingFact[];

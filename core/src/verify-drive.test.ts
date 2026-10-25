@@ -330,6 +330,61 @@ describe("verify-cookie drive-core", () => {
     }
   }, 20000);
 
+  it("drives BM25 recall when the embedder port is closed", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        [
+          "drive",
+          "memory-embed-down",
+          "--evidence",
+          evidence,
+          "--core",
+          "real",
+        ],
+        root,
+      );
+      expect(result.stdout).toContain("embedDown true\n");
+      expect(result.stdout).toContain("recall true\n");
+      expect(result.stdout).toContain("egress 0\n");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain(HISTORY_CODE_WORD);
+      expect(transcript).toContain("conv-ask");
+      expect(transcript).toContain(
+        "What did I say about the ECE midterm last week?",
+      );
+      const askSend = transcript.split("\n").find((line) => {
+        return (
+          line.includes('"method":"chat.send"') && line.includes("conv-ask")
+        );
+      });
+      expect(askSend).toBeDefined();
+      expect(askSend?.toLowerCase()).not.toContain(
+        HISTORY_CODE_WORD.toLowerCase(),
+      );
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain(HISTORY_CODE_WORD);
+      expect(dbText).toContain('"egress":0');
+      expect(dbText).not.toContain('"egress":1');
+      for (const line of transcript.split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        const entry = JSON.parse(line) as { message: unknown };
+        expect(
+          isCookieMessage(entry.message),
+          messageErrors(entry.message),
+        ).toBe(true);
+      }
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it("drives a llama stub restart through up, down, loading, and up", async () => {
     const root = await runtime();
     const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));

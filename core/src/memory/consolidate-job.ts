@@ -66,10 +66,12 @@ export class LocalConsolidator {
     await this.mergeDuplicates(signal);
     await yieldBatch();
     throwIfAborted(signal);
-    capProfile(
-      this.options.derived.listProfile(),
-      PROFILE_TOKEN_CAP,
-      this.options.log ?? (() => undefined),
+    this.options.derived.replaceProfile(
+      capProfile(
+        this.options.derived.listProfile(),
+        PROFILE_TOKEN_CAP,
+        this.options.log ?? (() => undefined),
+      ),
     );
     await yieldBatch();
     throwIfAborted(signal);
@@ -95,7 +97,6 @@ export class LocalConsolidator {
     for (const fact of due) {
       throwIfAborted(signal);
       const marker = tombstone(this.options.ids(), fact, now);
-      marker.text = `Expired: ${fact.text}`;
       this.options.derived.insertFact(marker);
       this.options.derived.updateFact({ ...fact, supersededBy: marker.id });
     }
@@ -110,7 +111,9 @@ export class LocalConsolidator {
       if (dropped.has(fact.id)) {
         continue;
       }
-      await embedFact(this.options, fact);
+      if (!(await this.options.vectors.has("vec_facts", fact.id))) {
+        await embedFact(this.options, fact);
+      }
       const embedding = await this.options.embedder.embed(
         prefixQuery(fact.text),
       );
@@ -129,8 +132,7 @@ export class LocalConsolidator {
         }
         const loser = pickLoser(fact, other);
         const winner = loser.id === fact.id ? other : fact;
-        const marker = tombstone(this.options.ids(), loser, now);
-        marker.text = `Merged into ${winner.id}: ${loser.text}`;
+        const marker = tombstone(this.options.ids(), loser, now, winner.id);
         this.options.derived.insertFact(marker);
         this.options.derived.updateFact({
           ...loser,

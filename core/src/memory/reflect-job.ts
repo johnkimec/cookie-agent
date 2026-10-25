@@ -128,7 +128,12 @@ export class LocalReflector implements Reflector {
     const planned = await this.planFacts(extracted.facts, turnById, forgotten);
     const now = this.options.now();
     const journal = this.planJournal(sessionId, extracted.journal, now);
-    const profile = this.planProfile(extracted.profile, now);
+    const profile = this.planProfile(
+      extracted.profile,
+      now,
+      planned.inserts,
+      turns,
+    );
     const summary = cleanSummary(extracted.summary);
     this.options.derived.transaction(() => {
       if (journal !== null) {
@@ -143,10 +148,12 @@ export class LocalReflector implements Reflector {
       for (const row of profile) {
         this.options.derived.upsertProfile(row);
       }
-      capProfile(
-        this.options.derived.listProfile(),
-        PROFILE_TOKEN_CAP,
-        this.options.log ?? (() => undefined),
+      this.options.derived.replaceProfile(
+        capProfile(
+          this.options.derived.listProfile(),
+          PROFILE_TOKEN_CAP,
+          this.options.log ?? (() => undefined),
+        ),
       );
       if (summary !== null) {
         this.options.derived.setSummary(sessionId, summary);
@@ -230,7 +237,12 @@ export class LocalReflector implements Reflector {
     return { inserts, updates };
   }
 
-  private planProfile(rows: ReflectProfile[], now: number): ProfileRecord[] {
+  private planProfile(
+    rows: ReflectProfile[],
+    now: number,
+    facts: readonly FactRecord[],
+    turns: readonly TurnRecord[],
+  ): ProfileRecord[] {
     const planned: ProfileRecord[] = [];
     for (const row of rows) {
       if (!promoteProfile(row) || isSecret(row.value) || isSecret(row.key)) {
@@ -246,7 +258,7 @@ export class LocalReflector implements Reflector {
         value,
         pinned: row.pinned && row.statedByJohn,
         shareable: row.shareable && !row.sensitive,
-        sourceTurn: null,
+        sourceTurn: sourceForProfile(value, facts, turns),
         updatedAt: now,
       });
     }
@@ -281,6 +293,30 @@ function cleanSummary(summary: string): string | null {
     return null;
   }
   return text;
+}
+
+/** Turn or fact that states this profile value, when one is in the batch. */
+export function sourceForProfile(
+  value: string,
+  facts: readonly FactRecord[],
+  turns: readonly TurnRecord[],
+): string | null {
+  const needle = value.trim().toLowerCase();
+  if (needle.length < 4) {
+    return null;
+  }
+  for (const fact of facts) {
+    const text = fact.text.toLowerCase();
+    if (text.includes(needle) || needle.includes(text)) {
+      return fact.sourceTurn;
+    }
+  }
+  for (const turn of turns) {
+    if (turn.content.toLowerCase().includes(needle)) {
+      return turn.id;
+    }
+  }
+  return null;
 }
 
 export function promoteProfile(row: ReflectProfile): boolean {

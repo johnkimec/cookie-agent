@@ -11,7 +11,6 @@ import {
   SYSTEM_PROMPT,
 } from "./identity.ts";
 import type { MemoryHost } from "./memory/host.ts";
-import { userTurnId } from "./memory/runtime.ts";
 import { type ConversationHistory, ConversationMemory } from "./memory.ts";
 import { isAbortError } from "./model/ai-sdk-provider.ts";
 import type {
@@ -567,16 +566,27 @@ export class AgentCore {
 
   private async runStream(flight: Flight): Promise<void> {
     let stream: ModelStream;
+    let messages: Awaited<ReturnType<ConversationHistory["messagesFor"]>>;
     try {
-      const messages = await this.history.messagesFor(
+      messages = await this.history.messagesFor(
         flight.conversationId,
         flight.userText,
         flight.abort.signal,
       );
-      const storedTurn = this.history.currentUserTurnId?.() ?? null;
-      if (storedTurn !== null) {
-        this.memoryHost?.noteUserTurn?.(storedTurn);
-      }
+    } catch (error) {
+      this.failStream(flight, error);
+      return;
+    }
+    // Cancel during retrieval already emitted chat.done. Do not start
+    // the user-facing stream after that.
+    if (flight.cancelled || this.inflight !== flight) {
+      return;
+    }
+    const storedTurn = this.history.currentUserTurnId?.() ?? null;
+    if (storedTurn !== null) {
+      this.memoryHost?.noteUserTurn?.(storedTurn);
+    }
+    try {
       stream = this.provider.streamChat({
         system: this.memoryHost?.systemPrompt ?? SYSTEM_PROMPT,
         messages,
@@ -773,9 +783,6 @@ export class AgentCore {
         modelId: this.provider.modelId,
         usage,
         latencyMs: Math.max(0, this.now() - flight.startedAt),
-        userTurnId:
-          this.memoryHost?.storedUserTurnId?.(flight.messageId) ??
-          userTurnId(flight.messageId),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : "memory failed";

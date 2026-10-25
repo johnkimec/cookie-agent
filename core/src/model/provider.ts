@@ -37,5 +37,13 @@ export interface ModelProvider {
     abortSignal: AbortSignal;
     /** When set, the model may call these tools before the reply text. */
     tools?: ToolSet;
+    /** Rerank asks for a short JSON object. Chat leaves this unset. */
+    maxOutputTokens?: number;
+    responseFormat?: {
+      type: "json";
+      name: string;
+      description?: string;
+      schema: Record<string, unknown>;
+    };
   }): ModelStream;
 }

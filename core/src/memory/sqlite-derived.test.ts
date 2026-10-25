@@ -11,6 +11,7 @@ import { LocalConsolidator } from "./consolidate-job.ts";
 import { sequentialIds } from "./derived.ts";
 import { openReadonlyDatabase } from "./dump.ts";
 import { FakeEmbedder } from "./embedder.ts";
+import { HybridRetriever } from "./hybrid-retrieve.ts";
 import { activeFacts, withoutSuperseded } from "./policy.ts";
 import { LocalReflector, rebuildDerivedMemory } from "./reflect-job.ts";
 import { InMemoryRetriever } from "./retrieve.ts";
@@ -298,6 +299,15 @@ describe("sqlite derived memory", () => {
       ...turn("t1", "ses-1", "The locker code is 4417"),
       createdAt: nowMs,
     });
+    store.appendTurn({
+      ...turn("t1a", "ses-1", "Saved: your locker code is 4417."),
+      role: "assistant",
+      createdAt: nowMs + 1,
+    });
+    store.appendTurn({
+      ...turn("tForget", "ses-1", "Forget that code"),
+      createdAt: nowMs + 2,
+    });
     const embedder = new FakeEmbedder();
     const vectors = new InMemoryVectorIndex();
     const prompts: string[] = [];
@@ -393,6 +403,7 @@ describe("sqlite derived memory", () => {
       store.listChunks("ses-1").some((chunk) => chunk.text.includes("4417")),
     ).toBe(true);
 
+    runtime.host.noteUserTurn?.("tForget");
     const dropped = await runtime.host.tools[MEMORY_FORGET_TOOL]?.execute?.(
       { text: "4417" },
       toolOptions,
@@ -415,7 +426,7 @@ describe("sqlite derived memory", () => {
     expect(
       store.listJournal().some((entry) => entry.entry.includes("4417")),
     ).toBe(false);
-    expect(store.forgottenTurnIds()).toEqual(["t1"]);
+    expect(store.forgottenTurnIds()).toEqual(["t1", "t1a", "tForget"]);
     expect(logs.join("\n")).not.toContain("4417");
     expect(store.recentTurns("ses-1", 10).map((row) => row.content)).toContain(
       "The locker code is 4417",
@@ -439,6 +450,20 @@ describe("sqlite derived memory", () => {
     }>;
     expect(turnRows.some((row) => row.content.includes("4417"))).toBe(true);
     db.close();
+
+    const hybrid = new HybridRetriever({
+      db: store.database(),
+      vectors: new InMemoryVectorIndex(),
+      embedder,
+      store,
+      available: async () => false,
+    });
+    const retrieved = await hybrid.retrieve("4417");
+    expect(retrieved.map((hit) => hit.text).join("\n")).not.toContain("4417");
+    expect(retrieved.map((hit) => hit.text).join("\n")).not.toContain("Saved:");
+    expect(retrieved.map((hit) => hit.text).join("\n")).not.toContain(
+      "Forget that code",
+    );
 
     const retriever = new InMemoryRetriever();
     retriever.add({

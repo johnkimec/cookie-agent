@@ -1,7 +1,13 @@
 import type { Memory } from "./types.ts";
 
-/** Hybrid retrieval. BM25, kNN, and rerank are later steps. */
-export type Retrieve = (query: string) => Promise<Memory[]>;
+/**
+ * Hybrid retrieval. The optional signal is the chat turn's abort.
+ * `chat.cancel` aborts it so retrieval and rerank stop waiting.
+ */
+export type Retrieve = (
+  query: string,
+  signal?: AbortSignal,
+) => Promise<Memory[]>;
 
 /** Substring match over a fixed list. Enough to pin the function shape. */
 export class InMemoryRetriever {

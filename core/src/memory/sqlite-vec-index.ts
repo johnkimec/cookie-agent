@@ -57,6 +57,19 @@ export class SqliteVecIndex implements VectorIndex {
       );
   }
 
+  async has(table: VectorTable, id: string): Promise<boolean> {
+    if (table === "vec_facts") {
+      const row = this.db
+        .prepare("SELECT fact_id FROM vec_facts WHERE fact_id = ?")
+        .get(id);
+      return row !== undefined;
+    }
+    const row = this.db
+      .prepare("SELECT chunk_id FROM vec_chunks WHERE chunk_id = ?")
+      .get(id);
+    return row !== undefined;
+  }
+
   async delete(ids: string[]): Promise<void> {
     if (ids.length === 0) {
       return;

@@ -20,6 +20,8 @@ export interface VectorIndex {
    * `SqliteVecIndex` deletes the id from both tables.
    */
   delete(ids: string[]): Promise<void>;
+  /** True when this id already has a row in `table`. */
+  has(table: VectorTable, id: string): Promise<boolean>;
 }
 
 function cosineDistance(left: Float32Array, right: Float32Array): number {
@@ -97,5 +99,9 @@ export class InMemoryVectorIndex implements VectorIndex {
         rows.delete(id);
       }
     }
+  }
+
+  async has(table: VectorTable, id: string): Promise<boolean> {
+    return this.tables.get(table)?.has(id) === true;
   }
 }
