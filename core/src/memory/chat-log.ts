@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import type { ChatTurnCommit, ConversationHistory } from "../memory.ts";
+import type { ContentIndexer } from "./index-content.ts";
 import type { SqliteMemoryStore } from "./sqlite-store.ts";
 
 /** Recent turns loaded into one prompt. Context budgets land in Step 2. */
@@ -12,9 +13,17 @@ const HISTORY_TURN_LIMIT = 10_000;
  */
 export class ChatLog implements ConversationHistory {
   private readonly store: SqliteMemoryStore;
+  private readonly indexer: ContentIndexer | null;
+  private indexTail: Promise<void> = Promise.resolve();
 
-  constructor(store: SqliteMemoryStore) {
+  constructor(store: SqliteMemoryStore, indexer: ContentIndexer | null = null) {
     this.store = store;
+    this.indexer = indexer;
+  }
+
+  /** Resolves when indexing started by `commit` has finished. */
+  flushIndex(): Promise<void> {
+    return this.indexTail;
   }
 
   messagesFor(conversationId: string, userText: string): ModelMessage[] {
@@ -59,25 +68,36 @@ export class ChatLog implements ConversationHistory {
       latencyMs: null,
       createdAt: started,
     });
-    if (turn.assistantText.length === 0) {
+    if (turn.assistantText.length > 0) {
+      this.store.appendTurn({
+        id: `${turn.conversationId}-${count + 2}-assistant`,
+        sessionId: turn.conversationId,
+        role: "assistant",
+        content: turn.assistantText,
+        tainted: false,
+        model: turn.modelId,
+        egress: false,
+        escalatedFrom: null,
+        tokensIn: turn.usage.inputTokens,
+        tokensCached: null,
+        tokensOut: turn.usage.outputTokens,
+        costUsd: 0,
+        latencyMs: turn.latencyMs,
+        createdAt: started + 1,
+      });
+    }
+    this.scheduleIndex();
+  }
+
+  private scheduleIndex(): void {
+    const indexer = this.indexer;
+    if (indexer === null) {
       return;
     }
-    this.store.appendTurn({
-      id: `${turn.conversationId}-${count + 2}-assistant`,
-      sessionId: turn.conversationId,
-      role: "assistant",
-      content: turn.assistantText,
-      tainted: false,
-      model: turn.modelId,
-      egress: false,
-      escalatedFrom: null,
-      tokensIn: turn.usage.inputTokens,
-      tokensCached: null,
-      tokensOut: turn.usage.outputTokens,
-      costUsd: 0,
-      latencyMs: turn.latencyMs,
-      createdAt: started + 1,
-    });
+    this.indexTail = this.indexTail
+      .then(() => indexer.indexPending())
+      .then(() => undefined)
+      .catch(() => undefined);
   }
 
   close(): void {

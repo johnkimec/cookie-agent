@@ -102,6 +102,12 @@ export class SqliteMemoryStore implements MemoryStore {
     return this.now();
   }
 
+  /** Same connection migration 001 and 002 opened. Indexing uses it. */
+  database(): ReturnType<typeof openMemoryDatabase> {
+    this.requireOpen();
+    return this.db;
+  }
+
   close(): void {
     if (this.closed) {
       return;
