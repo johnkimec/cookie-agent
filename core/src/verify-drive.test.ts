@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import {
+  mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -18,6 +20,7 @@ import { isCookieMessage, messageErrors } from "./protocol/validate.ts";
 import {
   type DriveInvocation,
   decodeProcAddress,
+  deletableScratch,
   HISTORY_CODE_WORD,
   resolveDriveExit,
 } from "./verify-drive.ts";
@@ -69,6 +72,17 @@ function capturedFailure(error: unknown): {
   stderr?: string;
 } {
   return error as { code?: number; stdout?: string; stderr?: string };
+}
+
+/** `runModelStatus` and `unreachable` each branch on `process.platform`. */
+function macSurfaceLine(): string {
+  return process.platform === "darwin"
+    ? "verified-unreachable: requires the Mac app from task B\n"
+    : "verified-unreachable on Linux: requires macOS\n";
+}
+
+async function expectScratchGone(path: string): Promise<void> {
+  await expect(stat(path)).rejects.toThrow();
 }
 
 function exitForEvidence(
@@ -151,7 +165,7 @@ describe("verify-cookie drive-core", () => {
       const cleaned = await run(["cleanup"], root);
       expect(cleaned.stdout).toBe("ok\n");
       for (const dir of dataDirs) {
-        await expect(stat(dir)).rejects.toThrow();
+        await expectScratchGone(dir);
       }
       const survived = await readFile(
         join(evidence, "transcript.jsonl"),
@@ -575,9 +589,7 @@ describe("verify-cookie drive-core", () => {
       expect(result.stdout).toContain("loading refused\n");
       expect(result.stdout).toContain("down refused\n");
       expect(result.stdout).toContain("recovered stop\n");
-      expect(result.stdout).toContain(
-        "verified-unreachable on Linux: requires macOS\n",
-      );
+      expect(result.stdout).toContain(macSurfaceLine());
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
@@ -592,9 +604,41 @@ describe("verify-cookie drive-core", () => {
       );
       expect(failed).not.toBeNull();
       expect(failed?.code).toBe(2);
-      expect(failed?.stdout).toBe(
-        "verified-unreachable on Linux: requires macOS\n",
-      );
+      expect(failed?.stdout).toBe(macSurfaceLine());
+    }
+  });
+
+  it("resolves a symlinked runtime root and rejects paths outside it", async () => {
+    const realRoot = await mkdtemp(join(tmpdir(), "cookie-real-"));
+    const linkParent = await mkdtemp(join(tmpdir(), "cookie-link-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "cookie-outside-"));
+    const linkRoot = join(linkParent, "runtime");
+    const outsideLink = join(linkParent, "outside");
+    await symlink(realRoot, linkRoot);
+    await symlink(outside, outsideLink);
+    await mkdir(join(realRoot, "inside"));
+    const insideReal = join(realRoot, "inside");
+    const insideLink = join(linkRoot, "inside");
+    const previous = process.env.COOKIE_VERIFY_RUNTIME;
+    process.env.COOKIE_VERIFY_RUNTIME = linkRoot;
+    try {
+      const resolvedInside = await realpath(insideReal);
+      expect(deletableScratch(insideLink)).toBe(resolvedInside);
+      expect(deletableScratch(insideReal)).toBe(resolvedInside);
+      expect(deletableScratch(outside)).toBeNull();
+      expect(deletableScratch(await realpath(outside))).toBeNull();
+      expect(deletableScratch(outsideLink)).toBeNull();
+      expect(deletableScratch(join(linkRoot, "missing"))).toBeNull();
+      expect(deletableScratch(join(realRoot, "missing"))).toBeNull();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COOKIE_VERIFY_RUNTIME;
+      } else {
+        process.env.COOKIE_VERIFY_RUNTIME = previous;
+      }
+      await rm(realRoot, { recursive: true, force: true });
+      await rm(linkParent, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 
@@ -619,7 +663,7 @@ describe("verify-cookie drive-core", () => {
       expect(
         await readFile(join(evidence, "transcript.jsonl"), "utf8"),
       ).toContain("kept");
-      await expect(stat(scratch)).rejects.toThrow();
+      await expectScratchGone(scratch);
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }

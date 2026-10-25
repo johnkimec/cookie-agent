@@ -339,13 +339,23 @@ function forgetPid(pid: number): void {
   }
 }
 
-function deletableScratch(dir: string): string | null {
-  const root = resolve(runtimeRoot());
-  let target = resolve(dir);
+/**
+ * Real path of a scratch directory cleanup may delete.
+ * Both sides are realpath'd so `/tmp` and `/private/tmp` (and a symlinked
+ * runtime root) compare as the same directory. A realpath failure is a
+ * reject: the lexical path is not trusted.
+ */
+export function deletableScratch(dir: string): string | null {
+  if (dir.trim() === "") {
+    return null;
+  }
+  let root: string;
+  let target: string;
   try {
-    target = realpathSync(target);
+    root = realpathSync(resolve(runtimeRoot()));
+    target = realpathSync(resolve(dir));
   } catch {
-    // The directory may already be gone. Judge the lexical path.
+    return null;
   }
   if (target === root || !target.startsWith(`${root}${sep}`)) {
     return null;
