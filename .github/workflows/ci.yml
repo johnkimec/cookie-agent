@@ -90,3 +90,44 @@ jobs:
         env:
           COOKIE_EXPECT_TYPE_STRIP_WARNING: "1"
         run: node core/scripts/check-type-strip-stderr.mjs
+
+  sqlite-spike:
+    name: node:sqlite spike (Node 22.13, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: macos-26
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node 22.13
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Require runner architecture
+        run: |
+          echo "runner.os=${{ runner.os }} runner.arch=${{ runner.arch }} uname=$(uname -m)"
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            test "$(uname -m)" = "arm64"
+            test "${{ runner.arch }}" = "ARM64"
+          else
+            test "$(uname -m)" = "x86_64"
+            test "${{ runner.arch }}" = "X64"
+          fi
+
+      - name: Spike node:sqlite
+        run: pnpm spike-sqlite

@@ -11,7 +11,8 @@
     "fake-core": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/fake-core.ts",
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "spike-sqlite": "node scripts/spike-sqlite.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.77",
@@ -22,6 +23,7 @@
     "@biomejs/biome": "2.6.3",
     "@types/node": "26.6.5",
     "ajv": "8.17.1",
+    "sqlite-vec": "0.1.9",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   }
