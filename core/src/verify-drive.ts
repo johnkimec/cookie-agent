@@ -51,9 +51,29 @@ const fakeCorePath = join(repoRoot, "core/src/fake-core.ts");
 const realCorePath = join(repoRoot, "core/src/index.ts");
 
 type CoreKind = "fake" | "real";
+type LlamaMode = "stub" | "external";
+type DriveFeature =
+  | "chat-streaming"
+  | "model-status"
+  | "chat-history"
+  | "runtime-restart";
 const schemaPath = join(repoRoot, "protocol/schema/cookie-rpc.schema.json");
 const llamaPort = "18080";
 const readTimeoutMs = 5000;
+/** Cold Qwen loads are tens of seconds. External mode waits at least this long. */
+const EXTERNAL_UP_TIMEOUT_MS = 120_000;
+/** One chat line on a real model. The clock resets on each JSON-RPC line. */
+const EXTERNAL_CHAT_TIMEOUT_MS = 180_000;
+
+/**
+ * The second prompt must not contain this word. A server that only echoes
+ * the latest user text then fails the history check.
+ */
+export const HISTORY_CODE_WORD = "marmalade417";
+const HISTORY_FIRST_PROMPT = `Remember this code word: ${HISTORY_CODE_WORD}. Reply with exactly: remembered`;
+const HISTORY_SECOND_PROMPT =
+  "What code word did I ask you to remember? Reply with only that code word.";
+const HISTORY_CONVERSATION = "conv-history";
 
 interface TranscriptEntry {
   seq: number;
@@ -160,21 +180,29 @@ class CoreSession {
     });
   }
 
-  static spawn(dataDir: string, deltaMs: string, kind: CoreKind): CoreSession {
+  static spawn(
+    dataDir: string,
+    deltaMs: string,
+    kind: CoreKind,
+    llama: LlamaMode,
+  ): CoreSession {
     mkdirSync(dataDir, { recursive: true });
     const entry = kind === "real" ? realCorePath : fakeCorePath;
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      COOKIE_DATA_DIR: dataDir,
+      COOKIE_FAKE_DELTA_MS: deltaMs,
+    };
+    if (llama === "stub") {
+      env.COOKIE_LLAMA_PORT = llamaPort;
+    }
     const child = spawn(
       process.execPath,
       ["--experimental-strip-types", entry],
       {
         cwd: repoRoot,
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          COOKIE_DATA_DIR: dataDir,
-          COOKIE_LLAMA_PORT: llamaPort,
-          COOKIE_FAKE_DELTA_MS: deltaMs,
-        },
+        env,
       },
     );
     const session = new CoreSession(child);
@@ -192,8 +220,8 @@ class CoreSession {
     this.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  async next(): Promise<unknown> {
-    const message = await this.queue.next(readTimeoutMs);
+  async next(timeoutMs = readTimeoutMs): Promise<unknown> {
+    const message = await this.queue.next(timeoutMs);
     this.record("server", message);
     if (!isCookieMessage(message)) {
       throw new Error(
@@ -203,9 +231,12 @@ class CoreSession {
     return message;
   }
 
-  async response(id: string): Promise<Record<string, unknown>> {
+  async response(
+    id: string,
+    timeoutMs = readTimeoutMs,
+  ): Promise<Record<string, unknown>> {
     for (;;) {
-      const message = await this.next();
+      const message = await this.next(timeoutMs);
       if (!isRecord(message)) {
         throw new Error(`expected an object for id ${id}`);
       }
@@ -472,7 +503,22 @@ async function socketPeers(pid: number): Promise<string[]> {
   return peers;
 }
 
-async function assertSockets(pid: number, kind: CoreKind): Promise<void> {
+function effectiveLlamaPort(llama: LlamaMode): string {
+  if (llama === "stub") {
+    return llamaPort;
+  }
+  const raw = process.env.COOKIE_LLAMA_PORT;
+  if (raw === undefined || raw === "") {
+    return "8080";
+  }
+  return raw;
+}
+
+async function assertSockets(
+  pid: number,
+  kind: CoreKind,
+  port: string,
+): Promise<void> {
   if (process.platform !== "linux") {
     return;
   }
@@ -483,7 +529,7 @@ async function assertSockets(pid: number, kind: CoreKind): Promise<void> {
     }
     return;
   }
-  const allowed = new Set([`127.0.0.1:${llamaPort}`, `::1:${llamaPort}`]);
+  const allowed = new Set([`127.0.0.1:${port}`, `::1:${port}`]);
   for (const peer of peers) {
     if (!allowed.has(peer)) {
       throw new Error(`core pid ${pid} opened ${peer}`);
@@ -523,6 +569,7 @@ async function initialize(
   session: CoreSession,
   id: string,
   kind: CoreKind,
+  port: string,
 ): Promise<void> {
   session.send(initializeMessage(id));
   const response = await session.response(id);
@@ -545,7 +592,7 @@ async function initialize(
       `runtime ${String(params.state)} ${String(params.modelId)}`,
     );
   }
-  await assertSockets(session.pid, kind);
+  await assertSockets(session.pid, kind, port);
 }
 
 async function runChat(
@@ -553,7 +600,7 @@ async function runChat(
   kind: CoreKind,
   stub: LlamaStub | null,
 ): Promise<string> {
-  await initialize(session, "1", kind);
+  await initialize(session, "1", kind, llamaPort);
   const firstText = "hello from verify-cookie";
   session.send({
     jsonrpc: "2.0",
@@ -747,7 +794,7 @@ async function runModelStatus(
   session: CoreSession,
   kind: CoreKind,
 ): Promise<string> {
-  await initialize(session, "1", kind);
+  await initialize(session, "1", kind, llamaPort);
   const modelId = expectedModel(kind);
   const initial = await queryStatus(session, "2");
   if (initial.state !== "up" || initial.modelId !== modelId) {
@@ -810,7 +857,330 @@ async function runModelStatus(
   ].join("\n");
 }
 
-async function doctor(kind: CoreKind): Promise<number> {
+interface ChatTiming {
+  index: number;
+  ttftMs: number;
+  totalMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  text: string;
+}
+
+function formatTiming(row: ChatTiming): string {
+  return `chat ${row.index} ttftMs ${row.ttftMs} totalMs ${row.totalMs} inputTokens ${row.inputTokens} outputTokens ${row.outputTokens}`;
+}
+
+function remainingMs(deadline: number, label: string): number {
+  const left = deadline - Date.now();
+  if (left <= 0) {
+    throw new Error(`timed out ${label}`);
+  }
+  return left;
+}
+
+async function waitForRuntimeUp(
+  session: CoreSession,
+  kind: CoreKind,
+  timeoutMs: number,
+  port: string,
+): Promise<void> {
+  session.send(initializeMessage("1"));
+  const response = await session.response("1", timeoutMs);
+  const result = asRecord(response.result, "initialize result");
+  if (result.protocolVersion !== PROTOCOL_VERSION) {
+    throw new Error(`protocolVersion ${String(result.protocolVersion)}`);
+  }
+  const serverInfo = asRecord(result.serverInfo, "serverInfo");
+  if (serverInfo.name !== expectedServer(kind)) {
+    throw new Error(`server ${String(serverInfo.name)}`);
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const message = asRecord(
+      await session.next(
+        remainingMs(deadline, "waiting for runtime.status up"),
+      ),
+      "runtime wait",
+    );
+    if (message.method !== "runtime.status") {
+      throw new Error(
+        `unexpected ${String(message.method)} while waiting for up`,
+      );
+    }
+    const params = asRecord(message.params, "runtime.status params");
+    if (params.state === "up" && params.modelId === expectedModel(kind)) {
+      await assertSockets(session.pid, kind, port);
+      return;
+    }
+  }
+  throw new Error("timed out waiting for runtime.status up");
+}
+
+async function timedChat(
+  session: CoreSession,
+  id: string,
+  text: string,
+  index: number,
+  timeoutMs: number,
+): Promise<ChatTiming> {
+  const started = Date.now();
+  session.send({
+    jsonrpc: "2.0",
+    id,
+    method: "chat.send",
+    params: { conversationId: HISTORY_CONVERSATION, text },
+  });
+  const ack = await session.response(id, timeoutMs);
+  if (!isRecord(ack.result)) {
+    throw new Error(`chat.send ${id} failed`);
+  }
+  let ttftMs: number | null = null;
+  const parts: string[] = [];
+  const deadline = started + timeoutMs;
+  for (;;) {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, `chat ${index}`)),
+      "chat",
+    );
+    if (message.method === "chat.delta") {
+      const params = asRecord(message.params, "delta");
+      if (typeof params.text !== "string" || params.text.length === 0) {
+        throw new Error("empty delta");
+      }
+      if (ttftMs === null) {
+        ttftMs = Date.now() - started;
+      }
+      parts.push(params.text);
+      continue;
+    }
+    if (message.method === "runtime.status") {
+      const params = asRecord(message.params, "status during chat");
+      if (params.state !== "up") {
+        throw new Error(
+          `runtime dropped to ${String(params.state)} during chat ${index}`,
+        );
+      }
+      continue;
+    }
+    if (message.method !== "chat.done") {
+      throw new Error(`unexpected ${String(message.method)}`);
+    }
+    const params = asRecord(message.params, "done");
+    if (params.finishReason !== "stop") {
+      throw new Error(
+        `chat ${index} finishReason ${String(params.finishReason)}`,
+      );
+    }
+    const usage = asRecord(params.usage, "usage");
+    if (ttftMs === null) {
+      throw new Error(`chat ${index} produced no token`);
+    }
+    if (
+      typeof usage.inputTokens !== "number" ||
+      typeof usage.outputTokens !== "number"
+    ) {
+      throw new Error(`chat ${index} usage missing`);
+    }
+    return {
+      index,
+      ttftMs,
+      totalMs: Date.now() - started,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      text: parts.join(""),
+    };
+  }
+}
+
+async function runChatHistory(
+  session: CoreSession,
+  port: string,
+): Promise<{ summary: string; timings: string }> {
+  if (!HISTORY_FIRST_PROMPT.includes(HISTORY_CODE_WORD)) {
+    throw new Error("first prompt is missing the code word");
+  }
+  if (
+    HISTORY_SECOND_PROMPT.toLowerCase().includes(
+      HISTORY_CODE_WORD.toLowerCase(),
+    )
+  ) {
+    throw new Error("second prompt contains the code word");
+  }
+  await waitForRuntimeUp(session, "real", EXTERNAL_UP_TIMEOUT_MS, port);
+  const first = await timedChat(
+    session,
+    "2",
+    HISTORY_FIRST_PROMPT,
+    1,
+    EXTERNAL_CHAT_TIMEOUT_MS,
+  );
+  const second = await timedChat(
+    session,
+    "3",
+    HISTORY_SECOND_PROMPT,
+    2,
+    EXTERNAL_CHAT_TIMEOUT_MS,
+  );
+  if (!second.text.toLowerCase().includes(HISTORY_CODE_WORD.toLowerCase())) {
+    const sample = second.text.slice(0, 200);
+    throw new Error(
+      `second reply did not contain ${HISTORY_CODE_WORD}: ${sample}`,
+    );
+  }
+  session.send({ jsonrpc: "2.0", id: "4", method: "shutdown", params: {} });
+  const shutdown = await session.response("4", readTimeoutMs);
+  const shutdownResult = asRecord(shutdown.result, "shutdown result");
+  if (shutdownResult.ok !== true) {
+    throw new Error("shutdown was not ok");
+  }
+  const code = await session.waitForExit();
+  if (code !== 0) {
+    throw new Error(`core exit ${String(code)}`);
+  }
+  const lines = [formatTiming(first), formatTiming(second)];
+  const timings = [
+    `conversation ${HISTORY_CONVERSATION}`,
+    `codeWord ${HISTORY_CODE_WORD}`,
+    ...lines,
+    "",
+  ].join("\n");
+  return {
+    summary: ["ok", "history true", ...lines, ""].join("\n"),
+    timings,
+  };
+}
+
+async function runRuntimeRestart(
+  session: CoreSession,
+  stub: LlamaStub,
+): Promise<string> {
+  await initialize(session, "1", "real", llamaPort);
+  const states = ["up"];
+  const note = (message: Record<string, unknown>): void => {
+    if (message.method !== "runtime.status") {
+      return;
+    }
+    const params = asRecord(message.params, "runtime.status");
+    const state = String(params.state);
+    if (states[states.length - 1] === state) {
+      throw new Error(`duplicate runtime.status ${state}`);
+    }
+    states.push(state);
+  };
+  const deadline = Date.now() + 15_000;
+  stub.holdAfterFirstChunk(true);
+  session.send({
+    jsonrpc: "2.0",
+    id: "2",
+    method: "chat.send",
+    params: { conversationId: "conv-restart", text: "hold this reply" },
+  });
+  const ack = await session.response("2", 5000);
+  const messageId = asRecord(ack.result, "chat.send result").messageId;
+  if (typeof messageId !== "string") {
+    throw new Error("restart chat has no messageId");
+  }
+  let sawDelta = false;
+  while (!sawDelta) {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, "waiting for a delta")),
+      "restart delta",
+    );
+    note(message);
+    if (message.method === "chat.delta") {
+      sawDelta = true;
+    }
+  }
+  await stub.kill();
+  let sawError = false;
+  while (!sawError || states[states.length - 1] !== "down") {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, "waiting for down")),
+      "restart death",
+    );
+    note(message);
+    if (message.method !== "chat.done") {
+      continue;
+    }
+    const params = asRecord(message.params, "inflight done");
+    if (params.messageId !== messageId) {
+      throw new Error("inflight chat.done messageId");
+    }
+    if (params.finishReason !== "error") {
+      throw new Error(`inflight finishReason ${String(params.finishReason)}`);
+    }
+    const usage = asRecord(params.usage, "inflight usage");
+    if (usage.inputTokens !== 0 || usage.outputTokens !== 0) {
+      throw new Error("inflight error usage was not zero");
+    }
+    sawError = true;
+  }
+  stub.setHealth("loading");
+  await stub.resume();
+  while (states[states.length - 1] !== "loading") {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, "waiting for loading")),
+      "restart loading",
+    );
+    note(message);
+  }
+  stub.setHealth("up");
+  while (states[states.length - 1] !== "up") {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, "waiting for up")),
+      "restart up",
+    );
+    note(message);
+  }
+  if (states.join(" ") !== "up down loading up") {
+    throw new Error(`status ${states.join(" ")}`);
+  }
+  stub.holdAfterFirstChunk(false);
+  session.send({
+    jsonrpc: "2.0",
+    id: "3",
+    method: "chat.send",
+    params: { conversationId: "conv-restart", text: "after restart" },
+  });
+  const recovered = await session.response("3", 5000);
+  if (!isRecord(recovered.result)) {
+    throw new Error("recovery chat.send failed");
+  }
+  let recoveredFinish = "";
+  while (recoveredFinish === "") {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, "recovery")),
+      "recovery",
+    );
+    note(message);
+    if (message.method === "chat.done") {
+      recoveredFinish = String(
+        asRecord(message.params, "recovered").finishReason,
+      );
+    }
+  }
+  if (recoveredFinish !== "stop") {
+    throw new Error(`recovery finishReason ${recoveredFinish}`);
+  }
+  if (states.join(" ") !== "up down loading up") {
+    throw new Error(`status after recovery ${states.join(" ")}`);
+  }
+  session.send({ jsonrpc: "2.0", id: "4", method: "shutdown", params: {} });
+  await session.response("4");
+  const code = await session.waitForExit();
+  if (code !== 0) {
+    throw new Error(`core exit ${String(code)}`);
+  }
+  return [
+    "ok",
+    "status up down loading up",
+    "inflight error",
+    "recovered stop",
+    "",
+  ].join("\n");
+}
+
+async function doctor(kind: CoreKind, llama: LlamaMode): Promise<number> {
   const major = Number(process.versions.node.split(".")[0]);
   if (!Number.isFinite(major) || major < 22) {
     process.stdout.write(`not-ok\nnode ${process.version}\n`);
@@ -825,15 +1195,20 @@ async function doctor(kind: CoreKind): Promise<number> {
   const runDir = join(runtimeRoot(), `doctor-${process.pid}-${Date.now()}`);
   const dataDir = join(runDir, "data");
   rememberScratch(runDir);
+  const port = effectiveLlamaPort(llama);
   let stub: LlamaStub | null = null;
   let session: CoreSession | null = null;
   try {
-    if (kind === "real") {
+    if (kind === "real" && llama === "stub") {
       stub = await startLlamaStub(Number(llamaPort));
     }
-    session = CoreSession.spawn(dataDir, "0", kind);
-    await initialize(session, "1", kind);
-    if (kind === "real" && (stub === null || stub.healthHits < 1)) {
+    session = CoreSession.spawn(dataDir, "0", kind, llama);
+    await initialize(session, "1", kind, port);
+    if (
+      llama === "stub" &&
+      kind === "real" &&
+      (stub === null || stub.healthHits < 1)
+    ) {
       throw new Error("core did not probe /health");
     }
     const stderr = session.stderrText().trim();
@@ -853,7 +1228,7 @@ async function doctor(kind: CoreKind): Promise<number> {
         `protocolVersion ${PROTOCOL_VERSION}`,
         `server ${expectedServer(kind)}`,
         `runtime up ${expectedModel(kind)}`,
-        `llamaPort ${llamaPort}`,
+        `llamaPort ${port}`,
         kind === "real" ? "sockets loopback" : "sockets none",
         "",
       ].join("\n"),
@@ -872,11 +1247,16 @@ async function doctor(kind: CoreKind): Promise<number> {
   }
 }
 
-function commandLines(args: string, dataDir: string, deltaMs: string): string {
+function commandLines(
+  args: string,
+  dataDir: string,
+  deltaMs: string,
+  port: string,
+): string {
   return [
     `.cursor/skills/verify-cookie/bin/drive-core ${args}`,
     `COOKIE_DATA_DIR=${dataDir}`,
-    `COOKIE_LLAMA_PORT=${llamaPort}`,
+    `COOKIE_LLAMA_PORT=${port}`,
     `COOKIE_FAKE_DELTA_MS=${deltaMs}`,
     "",
   ].join("\n");
@@ -887,8 +1267,10 @@ async function writeEvidence(
   args: string,
   dataDir: string,
   deltaMs: string,
+  port: string,
   session: CoreSession,
   summary: string,
+  timings?: string,
 ): Promise<void> {
   await mkdir(evidenceDir, { recursive: true });
   const lines = session.transcript
@@ -896,7 +1278,7 @@ async function writeEvidence(
     .join("\n");
   await writeFile(
     join(evidenceDir, "command.txt"),
-    commandLines(args, dataDir, deltaMs),
+    commandLines(args, dataDir, deltaMs, port),
   );
   await writeFile(
     join(evidenceDir, "transcript.jsonl"),
@@ -904,43 +1286,73 @@ async function writeEvidence(
   );
   await writeFile(join(evidenceDir, "stderr.txt"), session.stderrText());
   await writeFile(join(evidenceDir, "summary.txt"), summary);
+  if (timings !== undefined) {
+    await writeFile(join(evidenceDir, "timings.txt"), timings);
+  }
+}
+
+function driveArgs(
+  feature: DriveFeature,
+  evidence: string,
+  kind: CoreKind,
+  llama: LlamaMode,
+): string {
+  const parts = [`drive ${feature} --evidence ${evidence}`];
+  if (kind === "real") {
+    parts.push("--core real");
+  }
+  if (llama === "external") {
+    parts.push("--llama external");
+  }
+  return parts.join(" ");
 }
 
 async function driveFeature(
-  feature: "chat-streaming" | "model-status",
+  feature: DriveFeature,
   evidence: string,
   kind: CoreKind,
+  llama: LlamaMode,
 ): Promise<number> {
   const evidenceDir = resolve(repoRoot, evidence);
   const deltaMs = feature === "chat-streaming" ? "800" : "0";
   const runDir = join(runtimeRoot(), `${feature}-${process.pid}-${Date.now()}`);
   const dataDir = join(runDir, "data");
   rememberScratch(runDir);
-  const args =
-    kind === "real"
-      ? `drive ${feature} --evidence ${evidence} --core real`
-      : `drive ${feature} --evidence ${evidence}`;
+  const port = effectiveLlamaPort(llama);
+  const args = driveArgs(feature, evidence, kind, llama);
   let stub: LlamaStub | null = null;
   let session: CoreSession | null = null;
   let summary = "not-ok\n";
+  let timings: string | undefined;
   let code = 1;
   try {
-    if (kind === "real") {
+    if (kind === "real" && llama === "stub") {
       stub = await startLlamaStub(Number(llamaPort));
     }
-    session = CoreSession.spawn(dataDir, deltaMs, kind);
-    summary =
-      feature === "chat-streaming"
-        ? await runChat(session, kind, stub)
-        : await runModelStatus(session, kind);
+    session = CoreSession.spawn(dataDir, deltaMs, kind, llama);
+    if (feature === "chat-history") {
+      const produced = await runChatHistory(session, port);
+      summary = produced.summary;
+      timings = produced.timings;
+    } else if (feature === "runtime-restart") {
+      if (stub === null) {
+        throw new Error("runtime-restart has no llama stub");
+      }
+      summary = await runRuntimeRestart(session, stub);
+    } else if (feature === "chat-streaming") {
+      summary = await runChat(session, kind, stub);
+    } else {
+      summary = await runModelStatus(session, kind);
+    }
     const stderr = session.stderrText().trim();
-    if (stderr !== "") {
+    if (stderr !== "" && feature !== "runtime-restart") {
       throw new Error(`stderr: ${stderr}`);
     }
     code = 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : "drive failed";
     summary = `not-ok\n${message}\n`;
+    timings = undefined;
     code = 1;
   } finally {
     if (session !== null) {
@@ -951,8 +1363,10 @@ async function driveFeature(
         args,
         dataDir,
         deltaMs,
+        port,
         session,
         summary,
+        timings,
       );
     }
     await stub?.close();
@@ -976,9 +1390,11 @@ function usage(): number {
   process.stderr.write(
     [
       "usage:",
-      "  drive-core doctor [--core fake|real]",
+      "  drive-core doctor [--core fake|real] [--llama stub|external]",
       "  drive-core drive chat-streaming --evidence <dir> [--core fake|real]",
       "  drive-core drive model-status --evidence <dir> [--core fake|real]",
+      "  drive-core drive chat-history --evidence <dir> --core real --llama external",
+      "  drive-core drive runtime-restart --evidence <dir> --core real",
       "  drive-core drive menu-bar-icon",
       "  drive-core drive hotkey-popup",
       "  drive-core cleanup",
@@ -1012,14 +1428,31 @@ function coreKind(args: string[]): CoreKind | null {
   return null;
 }
 
+function llamaMode(args: string[]): LlamaMode | null {
+  const index = args.indexOf("--llama");
+  if (index < 0) {
+    return "stub";
+  }
+  const value = args[index + 1];
+  if (value === "stub" || value === "external") {
+    return value;
+  }
+  return null;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, feature, ...rest] = argv;
   if (command === "doctor") {
     const kind = coreKind(argv.slice(1));
-    if (kind === null) {
+    const llama = llamaMode(argv.slice(1));
+    if (
+      kind === null ||
+      llama === null ||
+      (llama === "external" && kind !== "real")
+    ) {
       return usage();
     }
-    return doctor(kind);
+    return doctor(kind, llama);
   }
   if (command === "cleanup") {
     return cleanupAsync();
@@ -1030,7 +1463,12 @@ async function main(argv: string[]): Promise<number> {
   if (feature === "menu-bar-icon" || feature === "hotkey-popup") {
     return unreachable();
   }
-  if (feature !== "chat-streaming" && feature !== "model-status") {
+  if (
+    feature !== "chat-streaming" &&
+    feature !== "model-status" &&
+    feature !== "chat-history" &&
+    feature !== "runtime-restart"
+  ) {
     return usage();
   }
   const evidence = evidenceArg(rest);
@@ -1038,10 +1476,27 @@ async function main(argv: string[]): Promise<number> {
     return usage();
   }
   const kind = coreKind(rest);
-  if (kind === null) {
+  const llama = llamaMode(rest);
+  if (
+    kind === null ||
+    llama === null ||
+    (llama === "external" && kind !== "real")
+  ) {
     return usage();
   }
-  return driveFeature(feature, evidence, kind);
+  if (feature === "chat-history" && llama !== "external") {
+    process.stderr.write(
+      "chat-history requires --core real --llama external\n",
+    );
+    return usage();
+  }
+  if (feature === "runtime-restart" && (kind !== "real" || llama !== "stub")) {
+    process.stderr.write(
+      "runtime-restart requires --core real and the built-in stub\n",
+    );
+    return usage();
+  }
+  return driveFeature(feature, evidence, kind, llama);
 }
 
 function isDirectRun(): boolean {

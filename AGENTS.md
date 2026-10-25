@@ -47,7 +47,7 @@ pnpm --filter @cookie-agent/core test
 
 `pnpm lint`, `pnpm typecheck`, and `pnpm test` run the same three commands.
 
-`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `pnpm core` is the real core: it dials llama-server on `127.0.0.1:$COOKIE_LLAMA_PORT` (default `8080`). Thinking stays off unless `COOKIE_THINKING=1`. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. `--core fake` is the default. `--core real` drives the real core against a stub on port `18080`. See [protocol/README.md](protocol/README.md).
+`pnpm fake-core` speaks the M0 protocol on stdio with a canned reply and no model. `pnpm core` is the real core: it dials llama-server on `127.0.0.1:$COOKIE_LLAMA_PORT` (default `8080`). Thinking stays off unless `COOKIE_THINKING=1`, and every request then sends `chat_template_kwargs.enable_thinking` false. `.cursor/skills/verify-cookie/bin/drive-core` is the scripted driver. `--core fake` is the default. `--core real` drives the real core against a stub on port `18080`. `--llama external` with `--core real` does not start that stub; it uses whatever is already serving `COOKIE_LLAMA_PORT`. See [protocol/README.md](protocol/README.md).
 
 On a Mac, build and test the shell, then launch it against the fake core. `open` drops the shell environment, so run the executable. Linux CI does not build `app/`. macOS CI does.
 

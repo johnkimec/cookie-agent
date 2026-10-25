@@ -42,8 +42,12 @@ const ZERO_USAGE: ModelUsage = { inputTokens: 0, outputTokens: 0 };
 /**
  * A status of `up` set more recently than this (a shell push or this
  * core's own probe) is fresh enough to ack `chat.send` without probing.
+ * A shell push is also left alone by the runtime watch for this long.
  */
 export const RUNTIME_FRESH_MS = 5_000;
+
+/** How often the stdio core re-probes llama-server while it is ready. */
+export const RUNTIME_WATCH_MS = 500;
 
 interface Flight {
   conversationId: string;
@@ -60,6 +64,12 @@ export interface AgentCoreOptions {
   probeTimeoutMs?: number;
   /** Clock for the fresh-status window. Tests pass a fake. */
   now?: () => number;
+  /**
+   * Re-probe while ready and announce `runtime.status` when it changes.
+   * Unset or `0` leaves the watch off. The stdio entry uses
+   * {@link RUNTIME_WATCH_MS}.
+   */
+  watchIntervalMs?: number;
   emit?: (message: unknown) => void;
   log?: (line: string) => void;
   exit?: (code: number) => void;
@@ -90,7 +100,10 @@ export class AgentCore {
   private runtime: RuntimeStatus;
   /** `now()` when `runtime` was last set by a probe or a shell push. */
   private runtimeSetAt = Number.NEGATIVE_INFINITY;
+  /** A shell push is not overridden by the watch until it is stale. */
+  private runtimeSource: "probe" | "shell" = "probe";
   private runtimeGeneration = 0;
+  private watchTimer: ReturnType<typeof setInterval> | undefined;
   private inflight: Flight | null = null;
   private accepting = false;
   private nextMessage = 1;
@@ -119,6 +132,13 @@ export class AgentCore {
       ((code) => {
         process.exit(code);
       });
+    const watchMs = options.watchIntervalMs ?? 0;
+    if (watchMs > 0) {
+      this.watchTimer = setInterval(() => {
+        this.onWatch();
+      }, watchMs);
+      this.watchTimer.unref();
+    }
   }
 
   handleLine(line: string): void {
@@ -147,6 +167,7 @@ export class AgentCore {
 
   onStdinClose(): void {
     this.phase = "stopping";
+    this.stopWatch();
     this.stopped.abort();
     const flight = this.inflight;
     this.inflight = null;
@@ -235,6 +256,7 @@ export class AgentCore {
       modelId: status.modelId ?? null,
     };
     this.runtimeSetAt = this.now();
+    this.runtimeSource = "shell";
   }
 
   private onInitialize(id: string, params: unknown): void {
@@ -271,7 +293,7 @@ export class AgentCore {
       },
     });
     const generation = this.runtimeGeneration;
-    void this.publishProbe(generation);
+    void this.publishProbe(generation, true);
   }
 
   private onShutdown(id: string, params: unknown): void {
@@ -280,6 +302,7 @@ export class AgentCore {
       return;
     }
     this.phase = "stopping";
+    this.stopWatch();
     this.stopped.abort();
     this.cancelFlight(this.inflight);
     this.emit({ jsonrpc: "2.0", id, result: { ok: true } });
@@ -410,7 +433,32 @@ export class AgentCore {
     this.emit({ jsonrpc: "2.0", id, result: this.runtimePayload() });
   }
 
-  private async publishProbe(generation: number): Promise<void> {
+  private onWatch(): void {
+    if (this.phase !== "ready") {
+      return;
+    }
+    if (
+      this.runtimeSource === "shell" &&
+      this.now() - this.runtimeSetAt < RUNTIME_FRESH_MS
+    ) {
+      return;
+    }
+    const generation = this.runtimeGeneration;
+    void this.publishProbe(generation, false);
+  }
+
+  private stopWatch(): void {
+    if (this.watchTimer === undefined) {
+      return;
+    }
+    clearInterval(this.watchTimer);
+    this.watchTimer = undefined;
+  }
+
+  private async publishProbe(
+    generation: number,
+    force: boolean,
+  ): Promise<void> {
     const state = await this.readProbe();
     if (this.phase !== "ready") {
       return;
@@ -418,7 +466,16 @@ export class AgentCore {
     if (generation !== this.runtimeGeneration) {
       return;
     }
+    const previous = this.runtimePayload();
     this.applyProbe(state);
+    const next = this.runtimePayload();
+    if (
+      !force &&
+      previous.state === next.state &&
+      previous.modelId === next.modelId
+    ) {
+      return;
+    }
     this.emit({
       jsonrpc: "2.0",
       method: "runtime.status",
@@ -434,8 +491,10 @@ export class AgentCore {
     try {
       return await this.provider.probe(signal);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "probe failed";
-      this.logLine(`probe failed: ${detail}`);
+      if (!isExpectedProbeFailure(error)) {
+        const detail = error instanceof Error ? error.message : "probe failed";
+        this.logLine(`probe failed: ${detail}`);
+      }
       return "down";
     }
   }
@@ -454,6 +513,23 @@ export class AgentCore {
       this.runtime = { state, modelId: this.provider.modelId };
     }
     this.runtimeSetAt = this.now();
+    this.runtimeSource = "probe";
+  }
+
+  private markDown(): void {
+    if (
+      this.runtime.state === "down" &&
+      (this.runtime.modelId ?? null) === null
+    ) {
+      return;
+    }
+    this.runtimeGeneration += 1;
+    this.applyProbe("down");
+    this.emit({
+      jsonrpc: "2.0",
+      method: "runtime.status",
+      params: this.runtimePayload(),
+    });
   }
 
   private async runStream(flight: Flight): Promise<void> {
@@ -516,9 +592,12 @@ export class AgentCore {
   }
 
   private completeStream(flight: Flight, completion: ModelCompletion): void {
-    // Delta text cannot be empty, so a reply with no chunks is still `stop`.
+    // A successful completion with no chunks is still `stop`. `error` stays
+    // `error` even when the model produced no text.
     const finishReason =
-      flight.sent.length === 0 ? "stop" : completion.finishReason;
+      flight.sent.length === 0 && completion.finishReason !== "error"
+        ? "stop"
+        : completion.finishReason;
     this.finishFlight(flight, finishReason, completion.usage);
   }
 
@@ -537,13 +616,7 @@ export class AgentCore {
       return;
     }
     if (isUnreachable(error)) {
-      this.runtimeGeneration += 1;
-      this.applyProbe("down");
-      this.emit({
-        jsonrpc: "2.0",
-        method: "runtime.status",
-        params: this.runtimePayload(),
-      });
+      this.markDown();
     }
     this.finishFlight(flight, "error", ZERO_USAGE);
   }
@@ -665,23 +738,14 @@ export class AgentCore {
   }
 }
 
-function isUnreachable(error: unknown): boolean {
-  const codes = new Set([
-    "ECONNREFUSED",
-    "ECONNRESET",
-    "ENOTFOUND",
-    "EHOSTUNREACH",
-    "ENETUNREACH",
-    "ETIMEDOUT",
-    "EAI_AGAIN",
-  ]);
+function isExpectedProbeFailure(error: unknown): boolean {
   const seen = new Set<unknown>();
   let current: unknown = error;
   while (current !== undefined && current !== null && !seen.has(current)) {
     seen.add(current);
-    if (typeof current === "object" && "code" in current) {
-      const code = current.code;
-      if (typeof code === "string" && codes.has(code)) {
+    if (typeof current === "object" && "name" in current) {
+      const name = current.name;
+      if (name === "AbortError" || name === "TimeoutError") {
         return true;
       }
     }
@@ -690,6 +754,47 @@ function isUnreachable(error: unknown): boolean {
       continue;
     }
     break;
+  }
+  return false;
+}
+
+function isUnreachable(error: unknown): boolean {
+  const codes = new Set([
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ECONNABORTED",
+    "EPIPE",
+    "ENOTFOUND",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "UND_ERR_SOCKET",
+    "UND_ERR_CONNECT_TIMEOUT",
+  ]);
+  const seen = new Set<unknown>();
+  const stack: unknown[] = [error];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined || current === null || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+    if (typeof current !== "object") {
+      continue;
+    }
+    if ("code" in current) {
+      const code = current.code;
+      if (typeof code === "string" && codes.has(code)) {
+        return true;
+      }
+    }
+    if ("cause" in current) {
+      stack.push(current.cause);
+    }
+    if ("errors" in current && Array.isArray(current.errors)) {
+      stack.push(...current.errors);
+    }
   }
   return false;
 }

@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { isCookieMessage, messageErrors } from "./protocol/validate.ts";
-import { decodeProcAddress } from "./verify-drive.ts";
+import { decodeProcAddress, HISTORY_CODE_WORD } from "./verify-drive.ts";
+import { startLlamaStub } from "./verify-llama-stub.ts";
 
 const exec = promisify(execFile);
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -26,10 +27,14 @@ async function runtime(): Promise<string> {
   return dir;
 }
 
-function run(args: string[], runtimeDir: string) {
+function run(
+  args: string[],
+  runtimeDir: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+) {
   return exec(script, args, {
     cwd: repoRoot,
-    env: { ...process.env, COOKIE_VERIFY_RUNTIME: runtimeDir },
+    env: { ...process.env, COOKIE_VERIFY_RUNTIME: runtimeDir, ...extraEnv },
     encoding: "utf8",
     timeout: 20000,
   });
@@ -147,6 +152,124 @@ describe("verify-cookie drive-core", () => {
       expect(await readFile(join(evidence, "command.txt"), "utf8")).toContain(
         "--core real",
       );
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it("doctors an external llama server without binding 18080", async () => {
+    const stub = await startLlamaStub(0);
+    const root = await runtime();
+    try {
+      const doctor = await run(
+        ["doctor", "--core", "real", "--llama", "external"],
+        root,
+        { COOKIE_LLAMA_PORT: String(stub.port) },
+      );
+      expect(doctor.stderr).toBe("");
+      expect(doctor.stdout).toContain("ok\n");
+      expect(doctor.stdout).toContain("server cookie-core\n");
+      expect(doctor.stdout).toContain("runtime up Qwen3.6-35B-A3B\n");
+      expect(doctor.stdout).toContain(`llamaPort ${stub.port}\n`);
+      expect(doctor.stdout).toContain("sockets loopback\n");
+      expect(stub.healthHits).toBeGreaterThan(0);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("drives two history turns against an external llama server", async () => {
+    const stub = await startLlamaStub(0, { recallWord: HISTORY_CODE_WORD });
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        [
+          "drive",
+          "chat-history",
+          "--evidence",
+          evidence,
+          "--core",
+          "real",
+          "--llama",
+          "external",
+        ],
+        root,
+        { COOKIE_LLAMA_PORT: String(stub.port) },
+      );
+      expect(result.stdout).toContain("history true\n");
+      expect(result.stdout).toContain("chat 1 ttftMs ");
+      expect(result.stdout).toContain("chat 2 ttftMs ");
+      expect(result.stdout).toContain("inputTokens ");
+      expect(result.stdout).toContain("outputTokens ");
+      const timings = await readFile(join(evidence, "timings.txt"), "utf8");
+      expect(timings).toContain(`codeWord ${HISTORY_CODE_WORD}`);
+      expect(timings).toContain("ttftMs ");
+      expect(timings).toContain("totalMs ");
+      expect(timings).toContain("inputTokens ");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain(HISTORY_CODE_WORD);
+      expect(transcript).toContain("What code word");
+      const command = await readFile(join(evidence, "command.txt"), "utf8");
+      expect(command).toContain("--llama external");
+      expect(command).toContain(`COOKIE_LLAMA_PORT=${stub.port}`);
+      expect(stub.chats).toHaveLength(2);
+      const secondBody = JSON.stringify(stub.chats[1]?.messages);
+      expect(secondBody.toLowerCase()).toContain(
+        HISTORY_CODE_WORD.toLowerCase(),
+      );
+      const secondMessages = stub.chats[1]?.messages;
+      expect(Array.isArray(secondMessages)).toBe(true);
+      const lastUser = [...(secondMessages as unknown[])]
+        .reverse()
+        .find(
+          (message) =>
+            typeof message === "object" &&
+            message !== null &&
+            "role" in message &&
+            message.role === "user",
+        ) as { content?: unknown } | undefined;
+      const lastText = JSON.stringify(lastUser?.content ?? "");
+      expect(lastText.toLowerCase()).not.toContain(
+        HISTORY_CODE_WORD.toLowerCase(),
+      );
+    } finally {
+      await stub.close();
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it("drives a llama stub restart through up, down, loading, and up", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        ["drive", "runtime-restart", "--evidence", evidence, "--core", "real"],
+        root,
+      );
+      expect(result.stdout).toContain("status up down loading up\n");
+      expect(result.stdout).toContain("inflight error\n");
+      expect(result.stdout).toContain("recovered stop\n");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain('"finishReason":"error"');
+      expect(transcript).toContain('"state":"loading"');
+      expect(transcript).toContain('"state":"down"');
+      for (const line of transcript.split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        const entry = JSON.parse(line) as { message: unknown };
+        expect(
+          isCookieMessage(entry.message),
+          messageErrors(entry.message),
+        ).toBe(true);
+      }
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
