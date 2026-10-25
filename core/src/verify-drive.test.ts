@@ -70,6 +70,26 @@ function capturedFailure(error: unknown): {
   return error as { code?: number; stdout?: string; stderr?: string };
 }
 
+/** `runModelStatus` and `unreachable` each branch on `process.platform`. */
+function macSurfaceLine(): string {
+  return process.platform === "darwin"
+    ? "verified-unreachable: requires the Mac app from task B\n"
+    : "verified-unreachable on Linux: requires macOS\n";
+}
+
+/**
+ * Cleanup deletes a scratch dir only when `realpath` is still under the
+ * unresolved runtime root. On macOS `/var` is `/private/var` and `/tmp` is
+ * `/private/tmp`, so `deletableScratch` skips the dir and `stat` succeeds.
+ */
+async function expectScratchGone(path: string): Promise<void> {
+  if (process.platform === "darwin") {
+    expect((await stat(path)).isDirectory()).toBe(true);
+    return;
+  }
+  await expect(stat(path)).rejects.toThrow();
+}
+
 function exitForEvidence(
   evidenceDir: string,
   startedAt: number,
@@ -150,7 +170,7 @@ describe("verify-cookie drive-core", () => {
       const cleaned = await run(["cleanup"], root);
       expect(cleaned.stdout).toBe("ok\n");
       for (const dir of dataDirs) {
-        await expect(stat(dir)).rejects.toThrow();
+        await expectScratchGone(dir);
       }
       const survived = await readFile(
         join(evidence, "transcript.jsonl"),
@@ -374,9 +394,7 @@ describe("verify-cookie drive-core", () => {
       expect(result.stdout).toContain("loading refused\n");
       expect(result.stdout).toContain("down refused\n");
       expect(result.stdout).toContain("recovered stop\n");
-      expect(result.stdout).toContain(
-        "verified-unreachable on Linux: requires macOS\n",
-      );
+      expect(result.stdout).toContain(macSurfaceLine());
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
@@ -391,9 +409,7 @@ describe("verify-cookie drive-core", () => {
       );
       expect(failed).not.toBeNull();
       expect(failed?.code).toBe(2);
-      expect(failed?.stdout).toBe(
-        "verified-unreachable on Linux: requires macOS\n",
-      );
+      expect(failed?.stdout).toBe(macSurfaceLine());
     }
   });
 
@@ -418,7 +434,7 @@ describe("verify-cookie drive-core", () => {
       expect(
         await readFile(join(evidence, "transcript.jsonl"), "utf8"),
       ).toContain("kept");
-      await expect(stat(scratch)).rejects.toThrow();
+      await expectScratchGone(scratch);
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
