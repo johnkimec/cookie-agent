@@ -462,6 +462,112 @@ public actor RuntimeSupervisor {
     }
 }
 
+/// Chat server plus the optional embedding server. Each one is a
+/// `RuntimeSupervisor`. Embed failures stay on the embed instance.
+public struct RuntimeServers: Sendable {
+    public let chat: RuntimeSupervisor
+    public let embed: RuntimeSupervisor?
+
+    public init(chat: RuntimeSupervisor, embed: RuntimeSupervisor?) {
+        self.chat = chat
+        self.embed = embed
+    }
+
+    public func start() async {
+        async let chatStarted: Void = chat.start()
+        if let embed {
+            async let embedStarted: Void = embed.start()
+            _ = await (chatStarted, embedStarted)
+        } else {
+            await chatStarted
+        }
+    }
+
+    /// SIGTERM both process groups together. Returns after each owned
+    /// server has exited and that server's pid file has been removed.
+    public func stop() async {
+        async let chatStopped: Void = chat.stop()
+        if let embed {
+            async let embedStopped: Void = embed.stop()
+            _ = await (chatStopped, embedStopped)
+        } else {
+            await chatStopped
+        }
+    }
+}
+
+public struct RuntimeServerPlan: Sendable {
+    public var chatLaunch: RuntimeLaunch
+    public var embedLaunch: RuntimeLaunch
+    public var embedSkip: String?
+    public var servers: RuntimeServers
+
+    public init(
+        chatLaunch: RuntimeLaunch,
+        embedLaunch: RuntimeLaunch,
+        embedSkip: String?,
+        servers: RuntimeServers
+    ) {
+        self.chatLaunch = chatLaunch
+        self.embedLaunch = embedLaunch
+        self.embedSkip = embedSkip
+        self.servers = servers
+    }
+}
+
+public extension RuntimeServers {
+    /// Build both supervisors. A missing embed model or an invalid
+    /// `COOKIE_EMBED_PORT` skips the embedder and leaves chat running.
+    static func make(
+        environment: [String: String],
+        homeDirectory: URL,
+        dataDirectory: String,
+        recordsStablePid: Bool,
+        modelExists: @escaping @Sendable (String) -> Bool = { path in
+            FileManager.default.fileExists(atPath: path)
+        },
+        chatFactory: @escaping @Sendable (RuntimeLaunch) -> RuntimeSupervisor = { launch in
+            RuntimeSupervisor.live(launch: launch)
+        },
+        embedFactory: @escaping @Sendable (RuntimeLaunch) -> RuntimeSupervisor = { launch in
+            RuntimeSupervisor.live(launch: launch)
+        }
+    ) -> RuntimeServerPlan {
+        let chatLaunch = RuntimeLaunch.resolve(
+            environment: environment,
+            homeDirectory: homeDirectory,
+            dataDirectory: dataDirectory,
+            recordsStablePid: recordsStablePid
+        )
+        let embedLaunch = RuntimeLaunch.resolveEmbed(
+            environment: environment,
+            homeDirectory: homeDirectory,
+            dataDirectory: dataDirectory,
+            recordsStablePid: recordsStablePid
+        )
+        let chat = chatFactory(chatLaunch)
+        let embed: RuntimeSupervisor?
+        let skip: String?
+        if embedLaunch.port == nil {
+            let raw = environment["COOKIE_EMBED_PORT"] ?? ""
+            skip = "embed port invalid \(raw); skipping llama-embed"
+            embed = nil
+        } else if !modelExists(embedLaunch.modelPath) {
+            skip = "embed model missing \(embedLaunch.modelPath); skipping llama-embed"
+            embed = nil
+        } else {
+            skip = nil
+            embed = embedFactory(embedLaunch)
+        }
+        return RuntimeServerPlan(
+            chatLaunch: chatLaunch,
+            embedLaunch: embedLaunch,
+            embedSkip: skip,
+            servers: RuntimeServers(chat: chat, embed: embed)
+        )
+    }
+}
+
 @_silgen_name("proc_pidpath")
 private func cookieProcPidPath(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
 

@@ -34,6 +34,8 @@ With the real core, the shell launches `llama-server` unless `GET http://127.0.0
 
 `swift test --package-path app` builds the tests. `swift run --package-path app CookieAgent` runs the same executable without the bundle. The bundle's display name is Cookie. The file name is `Cookie Agent.app`.
 
+The same supervisor also starts an embedding `llama-server` when the model file is present. The command is `llama-server --embeddings --pooling mean -m <model> --host 127.0.0.1 --port <port> -ngl 99 -c 8192 -np 4 -b 2048 -ub 2048`. The binary is the same `COOKIE_LLAMA_SERVER` override. The model defaults to `~/cookie-runtime/models/nomic-embed-text-v1.5.Q8_0.gguf` (`COOKIE_EMBED_MODEL_PATH` overrides it). The port defaults to `8081` (`COOKIE_EMBED_PORT`). The shell writes that resolved port into the core child's environment even when the parent left `COOKIE_EMBED_PORT` unset. Logs go to `<dataDir>/logs/llama-embed.log`. Pid files are `<dataDir>/logs/llama-embed.pid` and, when `COOKIE_DATA_DIR` was unset, `~/cookie-runtime/run/llama-server-<port>.pid`. A missing model file is logged and skipped. Embedder crashes do not change the menu status or block Send. Quit and SIGTERM wait until both owned servers have exited, then delete each pid file.
+
 Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another app may already own that key; the shell logs `RegisterEventHotKey failed` when registration loses.
 
 ## Accessibility identifiers

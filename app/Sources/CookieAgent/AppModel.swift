@@ -21,9 +21,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     private var supervisor: CoreSupervisor?
     private var transport: ProcessTransport?
-    private var runtimeSupervisor: RuntimeSupervisor?
+    private var runtimeServers: RuntimeServers?
     private var eventsTask: Task<Void, Never>?
     private var runtimeEventsTask: Task<Void, Never>?
+    private var embedEventsTask: Task<Void, Never>?
     private var coreReady = false
     private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
@@ -73,9 +74,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
         let inherited = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
         let portText = parseLlamaPort(launch.environment["COOKIE_LLAMA_PORT"]).map(String.init) ?? "invalid"
+        let embedPortText = launch.environment["COOKIE_EMBED_PORT"] ?? "invalid"
         let command = ([launch.executable] + launch.arguments).joined(separator: " ")
         log(
-            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) core=\(command) cwd=\(launch.workingDirectory.path) coreRoot=\(launch.coreRootReady) commandReady=\(launch.commandReady) path=\(launch.environment["PATH"] ?? "")"
+            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) embedPort=\(embedPortText) core=\(command) cwd=\(launch.workingDirectory.path) coreRoot=\(launch.coreRootReady) commandReady=\(launch.commandReady) path=\(launch.environment["PATH"] ?? "")"
         )
         guard launch.coreRootReady, launch.commandReady else {
             if !launch.coreRootReady {
@@ -100,26 +102,41 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
         if launch.supervisesRuntime {
             let providedData = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
-            let runtimeLaunch = RuntimeLaunch.resolve(
+            let plan = RuntimeServers.make(
                 environment: launch.environment,
                 homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
                 dataDirectory: launch.environment["COOKIE_DATA_DIR"] ?? "",
                 recordsStablePid: !providedData
             )
-            let runtime = RuntimeSupervisor.live(launch: runtimeLaunch)
-            self.runtimeSupervisor = runtime
-            self.runtime = RuntimeStatus(state: .loading, modelId: runtimeLaunch.modelId)
+            let servers = plan.servers
+            self.runtimeServers = servers
+            self.runtime = RuntimeStatus(state: .loading, modelId: plan.chatLaunch.modelId)
             log(
-                "llama=\(runtimeLaunch.executable) \(runtimeLaunch.arguments.joined(separator: " ")) log=\(runtimeLaunch.logFile) pid=\(runtimeLaunch.pidFile)"
+                "llama=\(plan.chatLaunch.executable) \(plan.chatLaunch.arguments.joined(separator: " ")) log=\(plan.chatLaunch.logFile) pid=\(plan.chatLaunch.pidFile)"
             )
-            let runtimeEvents = runtime.events
+            if let skip = plan.embedSkip {
+                log(skip)
+            } else {
+                log(
+                    "llama-embed=\(plan.embedLaunch.executable) \(plan.embedLaunch.arguments.joined(separator: " ")) log=\(plan.embedLaunch.logFile) pid=\(plan.embedLaunch.pidFile)"
+                )
+            }
+            let runtimeEvents = servers.chat.events
             runtimeEventsTask = Task { [weak self] in
                 for await status in runtimeEvents {
                     self?.applySupervisorStatus(status)
                 }
             }
+            if let embed = servers.embed {
+                let embedEvents = embed.events
+                embedEventsTask = Task {
+                    for await status in embedEvents {
+                        logShell("embed runtime \(status.state.rawValue)")
+                    }
+                }
+            }
             Task {
-                await runtime.start()
+                await servers.start()
             }
         }
         Task { [weak self] in
@@ -133,8 +150,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// `applicationShouldTerminate` calls this and replies only after the
-    /// owned server has exited. A second call (willTerminate) does not
+    /// `applicationShouldTerminate` calls this and replies only after both
+    /// owned servers have exited. A second call (willTerminate) does not
     /// start another shutdown.
     ///
     /// The reply is scheduled on the main run loop in the modal-panel mode.
@@ -240,7 +257,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         transport?.stop()
         eventsTask?.cancel()
         runtimeEventsTask?.cancel()
-        await runtimeSupervisor?.stop()
+        embedEventsTask?.cancel()
+        await runtimeServers?.stop()
     }
 
     private func noteAck(_ messageID: String) {
@@ -268,7 +286,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             var next = self.conversation
             switch event {
             case .runtime(let status):
-                if self.runtimeSupervisor == nil {
+                if self.runtimeServers == nil {
                     next.noteRuntime(status.state)
                     self.conversation = next
                     self.runtime = status
@@ -357,9 +375,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func confirmRuntime() {
-        guard let runtimeSupervisor else { return }
+        guard let chat = runtimeServers?.chat else { return }
         Task { [weak self] in
-            let status = await runtimeSupervisor.confirm()
+            let status = await chat.confirm()
             self?.applySupervisorStatus(status)
         }
     }

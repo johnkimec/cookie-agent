@@ -234,6 +234,48 @@ final class LaunchTests: XCTestCase {
             toolSearchPaths: []
         )
         XCTAssertNil(empty.environment["COOKIE_LLAMA_PORT"])
+        XCTAssertEqual(empty.environment["COOKIE_EMBED_PORT"], "8081")
+    }
+
+    func testEmbedPortIsPassedToCore() {
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
+        let cwd = URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true)
+        let unset = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: cwd,
+            homeDirectory: home,
+            toolSearchPaths: []
+        )
+        XCTAssertEqual(unset.environment["COOKIE_EMBED_PORT"], "8081")
+        XCTAssertNil(unset.environment["COOKIE_LLAMA_PORT"])
+        XCTAssertTrue(unset.supervisesRuntime)
+
+        let override = CoreLaunch.resolve(
+            environment: ["COOKIE_EMBED_PORT": "18081"],
+            currentDirectory: cwd,
+            homeDirectory: home,
+            toolSearchPaths: []
+        )
+        XCTAssertEqual(override.environment["COOKIE_EMBED_PORT"], "18081")
+
+        let fake = CoreLaunch.resolve(
+            environment: [
+                "COOKIE_CORE_COMMAND": "pnpm --filter @cookie-agent/core fake-core",
+            ],
+            currentDirectory: cwd,
+            homeDirectory: home,
+            toolSearchPaths: []
+        )
+        XCTAssertFalse(fake.supervisesRuntime)
+        XCTAssertEqual(fake.environment["COOKIE_EMBED_PORT"], "8081")
+
+        let invalid = CoreLaunch.resolve(
+            environment: ["COOKIE_EMBED_PORT": "nope"],
+            currentDirectory: cwd,
+            homeDirectory: home,
+            toolSearchPaths: []
+        )
+        XCTAssertEqual(invalid.environment["COOKIE_EMBED_PORT"], "nope")
     }
 
     func testProductPortIsPassedThrough() {
@@ -544,6 +586,101 @@ final class RuntimeLaunchTests: XCTestCase {
         XCTAssertEqual(launch.arguments[5], "18080")
         XCTAssertEqual(launch.logFile, "/tmp/cookie-isolated/logs/llama-server.log")
         XCTAssertNil(launch.stablePidFile)
+    }
+
+    func testEmbedDefaultArgumentsAndStablePid() {
+        let launch = RuntimeLaunch.resolveEmbed(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: true
+        )
+        XCTAssertEqual(
+            [launch.executable] + launch.arguments,
+            [
+                "/opt/homebrew/bin/llama-server",
+                "--embeddings",
+                "--pooling", "mean",
+                "-m", "/Users/john/cookie-runtime/models/nomic-embed-text-v1.5.Q8_0.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8081",
+                "-ngl", "99",
+                "-c", "8192",
+                "-np", "4",
+                "-b", "2048",
+                "-ub", "2048",
+            ]
+        )
+        XCTAssertEqual(launch.port, 8081)
+        XCTAssertEqual(launch.modelId, RuntimeLaunch.embedModelID)
+        XCTAssertEqual(launch.logFile, "/tmp/cookie-data/logs/llama-embed.log")
+        XCTAssertEqual(launch.pidFile, "/tmp/cookie-data/logs/llama-embed.pid")
+        XCTAssertEqual(launch.stablePidFile, "/Users/john/cookie-runtime/run/llama-server-8081.pid")
+    }
+
+    func testEmbedEnvironmentOverrides() {
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
+        let launch = RuntimeLaunch.resolveEmbed(
+            environment: [
+                "COOKIE_EMBED_MODEL_PATH": "~/models/nomic-embed-text-v1.5.Q8_0.gguf",
+                "COOKIE_LLAMA_SERVER": "~/bin/llama-server",
+                "COOKIE_EMBED_PORT": "18081",
+            ],
+            homeDirectory: home,
+            dataDirectory: "/tmp/cookie-isolated",
+            recordsStablePid: false
+        )
+        XCTAssertEqual(launch.executable, "/Users/john/bin/llama-server")
+        XCTAssertEqual(launch.modelPath, "/Users/john/models/nomic-embed-text-v1.5.Q8_0.gguf")
+        XCTAssertEqual(launch.port, 18081)
+        XCTAssertEqual(
+            launch.arguments,
+            [
+                "--embeddings",
+                "--pooling", "mean",
+                "-m", "/Users/john/models/nomic-embed-text-v1.5.Q8_0.gguf",
+                "--host", "127.0.0.1",
+                "--port", "18081",
+                "-ngl", "99",
+                "-c", "8192",
+                "-np", "4",
+                "-b", "2048",
+                "-ub", "2048",
+            ]
+        )
+        XCTAssertEqual(launch.logFile, "/tmp/cookie-isolated/logs/llama-embed.log")
+        XCTAssertEqual(launch.pidFile, "/tmp/cookie-isolated/logs/llama-embed.pid")
+        XCTAssertNil(launch.stablePidFile)
+
+        let chat = RuntimeLaunch.resolve(
+            environment: [
+                "COOKIE_EMBED_PORT": "18081",
+                "COOKIE_EMBED_MODEL_PATH": "~/models/nomic-embed-text-v1.5.Q8_0.gguf",
+            ],
+            homeDirectory: home,
+            dataDirectory: "/tmp/cookie-isolated",
+            recordsStablePid: false
+        )
+        XCTAssertEqual(chat.port, 8080)
+        XCTAssertFalse(chat.arguments.contains("--embeddings"))
+        XCTAssertEqual(chat.logFile, "/tmp/cookie-isolated/logs/llama-server.log")
+    }
+
+    func testEmptyEmbedOverridesUseDefaults() {
+        let launch = RuntimeLaunch.resolveEmbed(
+            environment: [
+                "COOKIE_EMBED_MODEL_PATH": "",
+                "COOKIE_LLAMA_SERVER": "",
+                "COOKIE_EMBED_PORT": "",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/ada", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: true
+        )
+        XCTAssertEqual(launch.executable, RuntimeLaunch.defaultBinary)
+        XCTAssertTrue(launch.modelPath.hasSuffix("nomic-embed-text-v1.5.Q8_0.gguf"))
+        XCTAssertEqual(launch.port, 8081)
+        XCTAssertEqual(launch.stablePidFile, "/Users/ada/cookie-runtime/run/llama-server-8081.pid")
     }
 
     func testEmptyOverridesUseDefaultsAndInvalidPortDoesNotLaunch() {
@@ -934,6 +1071,350 @@ final class RuntimeSupervisorTests: XCTestCase {
         }
         XCTAssertFalse(launcher.isAlive(stubborn.pid))
     }
+}
+
+final class RuntimeServersTests: XCTestCase {
+    func testBothServersLaunchWithExactFlags() async {
+        let chatLauncher = ScriptedLauncher()
+        let embedLauncher = ScriptedLauncher()
+        let plan = makePlan(
+            environment: [:],
+            modelExists: true,
+            chatLauncher: chatLauncher,
+            embedLauncher: embedLauncher,
+            chatHealth: [.down, .down, .up],
+            embedHealth: [.down, .down, .up]
+        )
+        XCTAssertNil(plan.embedSkip)
+        XCTAssertNotNil(plan.servers.embed)
+        await plan.servers.start()
+        XCTAssertEqual(chatLauncher.started.count, 1)
+        XCTAssertEqual(embedLauncher.started.count, 1)
+        XCTAssertEqual(
+            [chatLauncher.started[0].executable] + chatLauncher.started[0].arguments,
+            [plan.chatLaunch.executable] + plan.chatLaunch.arguments
+        )
+        XCTAssertEqual(chatLauncher.started[0].logFile, "/tmp/cookie-data/logs/llama-server.log")
+        XCTAssertEqual(
+            [embedLauncher.started[0].executable] + embedLauncher.started[0].arguments,
+            [
+                "/opt/homebrew/bin/llama-server",
+                "--embeddings",
+                "--pooling", "mean",
+                "-m", "/Users/john/cookie-runtime/models/nomic-embed-text-v1.5.Q8_0.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8081",
+                "-ngl", "99",
+                "-c", "8192",
+                "-np", "4",
+                "-b", "2048",
+                "-ub", "2048",
+            ]
+        )
+        XCTAssertEqual(embedLauncher.started[0].logFile, "/tmp/cookie-data/logs/llama-embed.log")
+        let chatStatus = await plan.servers.chat.status
+        XCTAssertEqual(chatStatus.state, .up)
+        XCTAssertEqual(chatStatus.modelId, "Qwen3.6-35B-A3B")
+        await plan.servers.stop()
+    }
+
+    func testEmbedOverridesReachTheLauncher() async {
+        let chatLauncher = ScriptedLauncher()
+        let embedLauncher = ScriptedLauncher()
+        let plan = makePlan(
+            environment: [
+                "COOKIE_LLAMA_SERVER": "/opt/homebrew/bin/llama-server",
+                "COOKIE_EMBED_PORT": "18081",
+                "COOKIE_EMBED_MODEL_PATH": "/tmp/cookie-models/nomic-embed-text-v1.5.Q8_0.gguf",
+                "COOKIE_LLAMA_PORT": "18080",
+                "COOKIE_MODEL_PATH": "/tmp/cookie-models/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+            ],
+            modelExists: true,
+            chatLauncher: chatLauncher,
+            embedLauncher: embedLauncher,
+            chatHealth: [.down, .down, .up],
+            embedHealth: [.down, .down, .up]
+        )
+        await plan.servers.start()
+        XCTAssertEqual(chatLauncher.started[0].arguments[5], "18080")
+        XCTAssertEqual(embedLauncher.started[0].arguments, [
+            "--embeddings",
+            "--pooling", "mean",
+            "-m", "/tmp/cookie-models/nomic-embed-text-v1.5.Q8_0.gguf",
+            "--host", "127.0.0.1",
+            "--port", "18081",
+            "-ngl", "99",
+            "-c", "8192",
+            "-np", "4",
+            "-b", "2048",
+            "-ub", "2048",
+        ])
+        await plan.servers.stop()
+    }
+
+    func testReuseHealthyEmbedderDoesNotSpawn() async throws {
+        let chatLauncher = ScriptedLauncher()
+        let embedLauncher = ScriptedLauncher()
+        let plan = makePlan(
+            environment: [:],
+            modelExists: true,
+            chatLauncher: chatLauncher,
+            embedLauncher: embedLauncher,
+            chatHealth: [.up],
+            embedHealth: [.up]
+        )
+        await plan.servers.start()
+        XCTAssertTrue(chatLauncher.started.isEmpty)
+        XCTAssertTrue(embedLauncher.started.isEmpty)
+        let chatOwns = await plan.servers.chat.isOwningProcess
+        let embed = try XCTUnwrap(plan.servers.embed)
+        let embedOwns = await embed.isOwningProcess
+        XCTAssertFalse(chatOwns)
+        XCTAssertFalse(embedOwns)
+        let chatStatus = await plan.servers.chat.status
+        XCTAssertEqual(chatStatus.state, .up)
+        XCTAssertEqual(chatStatus.modelId, "Qwen3.6-35B-A3B")
+        await plan.servers.stop()
+        XCTAssertTrue(chatLauncher.terminated.isEmpty)
+        XCTAssertTrue(embedLauncher.terminated.isEmpty)
+    }
+
+    func testEmbedFailureDoesNotBlockChat() async throws {
+        let chatLauncher = ScriptedLauncher()
+        let embedLauncher = ScriptedLauncher(failStarts: 3)
+        let plan = makePlan(
+            environment: [:],
+            modelExists: true,
+            chatLauncher: chatLauncher,
+            embedLauncher: embedLauncher,
+            chatHealth: [.up],
+            embedHealth: [.down]
+        )
+        await plan.servers.start()
+        let chatStatus = await plan.servers.chat.status
+        let embed = try XCTUnwrap(plan.servers.embed)
+        let embedStatus = await embed.status
+        XCTAssertEqual(chatStatus.state, .up)
+        XCTAssertEqual(chatStatus.modelId, "Qwen3.6-35B-A3B")
+        XCTAssertEqual(embedStatus.state, .down)
+        XCTAssertNil(embedStatus.modelId)
+        XCTAssertTrue(chatLauncher.started.isEmpty)
+        XCTAssertTrue(embedLauncher.started.isEmpty)
+        XCTAssertTrue(chatLauncher.terminated.isEmpty)
+        await plan.servers.stop()
+        XCTAssertTrue(chatLauncher.terminated.isEmpty)
+    }
+
+    func testMissingEmbedModelSkipsWithoutBlockingChat() async {
+        let chatLauncher = ScriptedLauncher()
+        let embedLauncher = ScriptedLauncher()
+        let calls = FactoryCalls()
+        let plan = RuntimeServers.make(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: false,
+            modelExists: { _ in false },
+            chatFactory: { launch in
+                calls.noteChat()
+                return RuntimeSupervisor(
+                    launch: launch,
+                    launcher: chatLauncher,
+                    health: ScriptedHealth(results: [.up]),
+                    pidStore: MemoryPidStore(),
+                    clock: ScriptedClock(),
+                    pollInterval: 0
+                )
+            },
+            embedFactory: { launch in
+                calls.noteEmbed()
+                return RuntimeSupervisor(
+                    launch: launch,
+                    launcher: embedLauncher,
+                    health: ScriptedHealth(results: [.down]),
+                    pidStore: MemoryPidStore(),
+                    clock: ScriptedClock(),
+                    pollInterval: 0
+                )
+            }
+        )
+        XCTAssertEqual(calls.chat, 1)
+        XCTAssertEqual(calls.embed, 0)
+        XCTAssertNil(plan.servers.embed)
+        XCTAssertEqual(
+            plan.embedSkip,
+            "embed model missing /Users/john/cookie-runtime/models/nomic-embed-text-v1.5.Q8_0.gguf; skipping llama-embed"
+        )
+        await plan.servers.start()
+        let chatStatus = await plan.servers.chat.status
+        XCTAssertEqual(chatStatus.state, .up)
+        XCTAssertEqual(chatStatus.modelId, "Qwen3.6-35B-A3B")
+        XCTAssertTrue(embedLauncher.started.isEmpty)
+        await plan.servers.stop()
+    }
+
+    func testInvalidEmbedPortSkips() {
+        let calls = FactoryCalls()
+        let plan = RuntimeServers.make(
+            environment: ["COOKIE_EMBED_PORT": "nope"],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: false,
+            modelExists: { _ in true },
+            chatFactory: { launch in
+                calls.noteChat()
+                return RuntimeSupervisor(
+                    launch: launch,
+                    launcher: ScriptedLauncher(),
+                    health: ScriptedHealth(results: [.up]),
+                    pidStore: MemoryPidStore(),
+                    clock: ScriptedClock(),
+                    pollInterval: 0
+                )
+            },
+            embedFactory: { launch in
+                calls.noteEmbed()
+                return RuntimeSupervisor(
+                    launch: launch,
+                    launcher: ScriptedLauncher(),
+                    health: ScriptedHealth(results: [.down]),
+                    pidStore: MemoryPidStore(),
+                    clock: ScriptedClock(),
+                    pollInterval: 0
+                )
+            }
+        )
+        XCTAssertEqual(calls.chat, 1)
+        XCTAssertEqual(calls.embed, 0)
+        XCTAssertNil(plan.servers.embed)
+        XCTAssertEqual(plan.embedSkip, "embed port invalid nope; skipping llama-embed")
+        XCTAssertEqual(plan.chatLaunch.port, 8080)
+    }
+
+    func testStopWaitsForBothServers() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-both-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let chatLaunch = RuntimeLaunch.resolve(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: root.path,
+            recordsStablePid: false
+        )
+        let embedLaunch = RuntimeLaunch.resolveEmbed(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: root.path,
+            recordsStablePid: false
+        )
+        let chatStore = FileRuntimePidStore(path: chatLaunch.pidFile)
+        let embedStore = FileRuntimePidStore(path: embedLaunch.pidFile)
+        let chatLauncher = ScriptedLauncher()
+        chatLauncher.termKills = true
+        let embedLauncher = ScriptedLauncher()
+        embedLauncher.termKills = false
+        embedLauncher.pidPath = embedLaunch.pidFile
+        let embedClock = ScriptedClock()
+        let chat = RuntimeSupervisor(
+            launch: chatLaunch,
+            launcher: chatLauncher,
+            health: ScriptedHealth(results: [.down, .down, .up]),
+            pidStore: chatStore,
+            clock: ScriptedClock(),
+            pollInterval: 0
+        )
+        let embed = RuntimeSupervisor(
+            launch: embedLaunch,
+            launcher: embedLauncher,
+            health: ScriptedHealth(results: [.down, .down, .up]),
+            pidStore: embedStore,
+            clock: embedClock,
+            pollInterval: 0
+        )
+        let servers = RuntimeServers(chat: chat, embed: embed)
+        await servers.start()
+        XCTAssertNotNil(chatStore.load())
+        XCTAssertNotNil(embedStore.load())
+        await servers.stop()
+        XCTAssertEqual(chatLauncher.terminated.count, 1)
+        XCTAssertTrue(chatLauncher.killed.isEmpty)
+        XCTAssertEqual(embedLauncher.terminated.count, 1)
+        XCTAssertEqual(embedLauncher.killed.count, 1)
+        XCTAssertGreaterThan(embedClock.recorded().reduce(0, +), 4.9)
+        XCTAssertTrue(embedLauncher.fileExistedAtKill)
+        XCTAssertNil(chatStore.load())
+        XCTAssertNil(embedStore.load())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chatLaunch.pidFile))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: embedLaunch.pidFile))
+    }
+}
+
+private final class FactoryCalls: @unchecked Sendable {
+    private let lock = NSLock()
+    private var chatCalls = 0
+    private var embedCalls = 0
+
+    func noteChat() {
+        lock.lock()
+        chatCalls += 1
+        lock.unlock()
+    }
+
+    func noteEmbed() {
+        lock.lock()
+        embedCalls += 1
+        lock.unlock()
+    }
+
+    var chat: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return chatCalls
+    }
+
+    var embed: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return embedCalls
+    }
+}
+
+private func makePlan(
+    environment: [String: String],
+    modelExists: Bool,
+    chatLauncher: ScriptedLauncher,
+    embedLauncher: ScriptedLauncher,
+    chatHealth: [RuntimeProbe],
+    embedHealth: [RuntimeProbe]
+) -> RuntimeServerPlan {
+    RuntimeServers.make(
+        environment: environment,
+        homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+        dataDirectory: "/tmp/cookie-data",
+        recordsStablePid: false,
+        modelExists: { _ in modelExists },
+        chatFactory: { launch in
+            RuntimeSupervisor(
+                launch: launch,
+                launcher: chatLauncher,
+                health: ScriptedHealth(results: chatHealth),
+                pidStore: MemoryPidStore(),
+                clock: ScriptedClock(),
+                pollInterval: 0
+            )
+        },
+        embedFactory: { launch in
+            RuntimeSupervisor(
+                launch: launch,
+                launcher: embedLauncher,
+                health: ScriptedHealth(results: embedHealth),
+                pidStore: MemoryPidStore(),
+                clock: ScriptedClock(),
+                pollInterval: 0
+            )
+        }
+    )
 }
 
 private func sampleLaunch() -> RuntimeLaunch {

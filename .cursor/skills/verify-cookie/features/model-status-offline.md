@@ -11,6 +11,7 @@ The menu bar tells John whether the on-device model is up, loading, or down. Wit
 - `status-local-only` keeps `Local-only mode` checked in every one of those states. `status: planned`
 - `status-core` makes the core report `up`, accept a push to `loading` and `down`, refuse `chat.send` with `Runtime unavailable` in those states, and answer again after `up`. `status: verified (verify-evidence/m0-real-model-status/transcript.jsonl)`
 - `status-restart` reports `up`, then `down` when llama-server dies during a chat, then `loading`, then `up`. The in-flight chat ends with `chat.done` `finishReason` `error`. `status: verified (verify-evidence/m0-runtime-restart/transcript.jsonl)`
+- `runtime-embeddings` starts, health-checks, and reaps the embedding llama-server the same way as the chat server, including crash, Quit, and SIGTERM. The menu status, Send, and the loading line stay on the chat model. A missing or failed embedder does not block a reply. `status: planned`
 
 ## How to get to it (user POV)
 
@@ -18,6 +19,7 @@ The menu bar tells John whether the on-device model is up, loading, or down. Wit
 - Open the menu and read `Local-only mode`.
 - Press ⌥Space and send a message while the model is up, including with the network off.
 - Send a message while the glyph is the dotted outline, or the head with a slash, and see that no reply starts.
+- The embedding server has no menu line. A reply still sends when that server is missing.
 
 ## Driving it with verify-cookie
 
@@ -27,6 +29,8 @@ Preconditions:
 - For the fake-core regression, doctor has printed `ok`, `runtime up fake-local`, and `llamaPort 18080`.
 - The drive uses a fresh `COOKIE_DATA_DIR` and port `18080`.
 - Do not open a connection to `127.0.0.1:8080`.
+
+- **Embedding server.** `.cursor/skills/verify-cookie/bin/drive-mac chat --runtime real` requires `GET /health` ok on the chat port and on the embed port (`COOKIE_EMBED_PORT`, default `8081`), plus `<COOKIE_DATA_DIR>/logs/llama-server.pid` and `llama-embed.pid`. `kill -9` orphan reap leaves at most two `llama-server` processes, then both health checks pass again. Quit and the targeted SIGTERM reap both pids, clear both ports, and remove both pid files. The fake runtime exports `COOKIE_EMBED_PORT=18081` and does not launch either server. The menu status stays the chat model. Leave `runtime-embeddings` `planned` until that Mac run is kept under `verify-evidence/`.
 
 - **Real core states.** Run `.cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-real-model-status --core real`. Exit code is 0. Stdout contains `loading refused`, `down refused`, `recovered stop`, and on Linux `verified-unreachable on Linux: requires macOS`. The transcript shows server `cookie-core`, then `runtime.status` `up` / `Qwen3.6-35B-A3B` after `initialize`, a query that echoes that state, a push to `loading` with `modelId` `Qwen3.6-35B-A3B`, a `chat.send` error code `-32002` and message `Runtime unavailable` with reason `runtime is loading`, a push to `down` with `modelId` null, the same error with reason `runtime is down`, a push back to `up` / `Qwen3.6-35B-A3B`, and a `chat.done` `stop` with usage `inputTokens` 20 / `outputTokens` 11. This command's core half can pass without the menu bar being visible. It does not verify the glyph sub-features.
 - **Fake core states.** Run `.cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-model-status`. Exit code is 0. Stdout contains `loading refused`, `down refused`, and `recovered stop`. The transcript shows `runtime.status` `up` / `fake-local` after `initialize`, then a push to `loading` with `modelId` `Qwen3.6-35B-A3B`, a `chat.send` error code `-32002` and message `Runtime unavailable`, a push to `down` with `modelId` null, the same error, a push back to `up` / `fake-local`, and a `chat.done` `stop`. On Linux the stdout also contains `verified-unreachable on Linux: requires macOS`. This recipe does not replace the real-core transcript cited on `status-core`.
@@ -42,4 +46,5 @@ Preconditions:
 - A `runtime.status` line inside the chat-streaming transcript does not verify this feature. The chat drive never enters `loading` or `down`.
 - A shell `runtime.status` push is left alone for 5 seconds. The watch does not correct it during that window, so the loading and down pushes above stay in effect while the stub process is still up. The restart drive does not push. It kills the process, and the watch reports what `/health` says: connection refused is `down`, HTTP 503 is `loading`, HTTP 200 is `up`.
 - `finishReason` `error` is the reply that failed after `chat.send` was acked, including when no `chat.delta` arrived. An empty successful completion stays `stop`. The restart drive's stderr may contain the stream error. That file is still evidence. A non-empty stderr fails the other drives. Node 22.13's type-stripping `ExperimentalWarning` is not that stream error. The launch flags remove it. The empty-stderr check stays.
+- Two `llama-server` processes on a real-runtime drive are the chat server and the embedding server. A third is a duplicate. The menu does not show the embedder. Fake mode still has no `llama-server` and uses port `18081` for `COOKIE_EMBED_PORT`.
 - Do not curl or open port `8080` to see if John's model is up during a stub drive. The fake-core doctor checks that process's own file descriptors (`sockets none`). The real-core stub doctor allows a socket only when its peer is `127.0.0.1:18080` (`sockets loopback`). `--llama external` allows the peer `127.0.0.1:$COOKIE_LLAMA_PORT` instead. That port may be `8080` only when the drive is aimed at the real server on purpose.

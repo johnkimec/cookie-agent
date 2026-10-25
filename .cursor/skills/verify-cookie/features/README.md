@@ -55,5 +55,5 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Menu bar icon](./menu-bar-icon.md) covers the Cookie menu-bar item, the status line, Ask Cookie, local-only, and Quit.
 - [Hotkey popup](./hotkey-popup.md) covers ⌥Space, the `Ask Cookie…` field, and closing the panel.
 - [Chat streaming](./chat-streaming.md) covers sending a message, seeing the reply arrive in chunks, and cancelling it.
-- [Model status and offline](./model-status-offline.md) covers up, loading, and down, and chatting with no network while the model is up.
+- [Model status and offline](./model-status-offline.md) covers up, loading, and down, chatting with no network while the model is up, and `runtime-embeddings` (still `planned`).
 - [Memory](./memory.md) covers persistence, recall, remember, forget, reflect, the profile cap, rebuild, embeddings down, and zero egress. Every sub-feature is `planned`.

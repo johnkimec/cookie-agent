@@ -7,6 +7,12 @@ public struct RuntimeLaunch: Equatable, Sendable {
     public static let defaultBinary = "/opt/homebrew/bin/llama-server"
     public static let defaultPort = 8080
     public static let defaultModelFile = "Qwen3.6-35B-A3B-Q4_K_M.gguf"
+    /// nomic-embed-text-v1.5 Q8_0, 146146432 bytes,
+    /// sha256 3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7,
+    /// Apache-2.0. `COOKIE_EMBED_MODEL_PATH` overrides the path.
+    public static let defaultEmbedModelFile = "nomic-embed-text-v1.5.Q8_0.gguf"
+    public static let defaultEmbedPort = 8081
+    public static let embedModelID = "nomic-embed-text-v1.5"
     public static let maxStartAttempts = 3
 
     public var executable: String
@@ -92,6 +98,59 @@ public struct RuntimeLaunch: Equatable, Sendable {
             dataDirectory: dataDirectory
         )
     }
+
+    /// Embedding server. Same binary override as chat (`COOKIE_LLAMA_SERVER`).
+    /// Port is `COOKIE_EMBED_PORT` or `8081`. The argument order is the
+    /// product command, including `--embeddings` and `--pooling mean`.
+    public static func resolveEmbed(
+        environment: [String: String],
+        homeDirectory: URL,
+        dataDirectory: String,
+        recordsStablePid: Bool
+    ) -> RuntimeLaunch {
+        let home = homeDirectory.path
+        let modelRaw = nonEmpty(environment["COOKIE_EMBED_MODEL_PATH"])
+            ?? home + "/cookie-runtime/models/" + defaultEmbedModelFile
+        let modelPath = expandTilde(modelRaw, home: home)
+        let executable = expandTilde(
+            nonEmpty(environment["COOKIE_LLAMA_SERVER"]) ?? defaultBinary,
+            home: home
+        )
+        let port = parseEmbedPort(environment["COOKIE_EMBED_PORT"])
+        let logs = (dataDirectory as NSString).appendingPathComponent("logs")
+        let logFile = (logs as NSString).appendingPathComponent("llama-embed.log")
+        let pidFile = (logs as NSString).appendingPathComponent("llama-embed.pid")
+        let stable: String?
+        if recordsStablePid, let port {
+            stable = home + "/cookie-runtime/run/llama-server-\(port).pid"
+        } else {
+            stable = nil
+        }
+        let portText = port.map(String.init) ?? ""
+        let arguments = [
+            "--embeddings",
+            "--pooling", "mean",
+            "-m", modelPath,
+            "--host", "127.0.0.1",
+            "--port", portText,
+            "-ngl", "99",
+            "-c", "8192",
+            "-np", "4",
+            "-b", "2048",
+            "-ub", "2048",
+        ]
+        return RuntimeLaunch(
+            executable: executable,
+            arguments: arguments,
+            port: port,
+            modelPath: modelPath,
+            modelId: embedModelID,
+            logFile: logFile,
+            pidFile: pidFile,
+            stablePidFile: stable,
+            dataDirectory: dataDirectory
+        )
+    }
 }
 
 /// Delay before a restart. Step 1 is the first retry.
@@ -107,7 +166,17 @@ public func runtimeRestartBackoff(step: Int) -> Double {
 }
 
 public func parseLlamaPort(_ raw: String?) -> Int? {
-    guard let raw, !raw.isEmpty else { return RuntimeLaunch.defaultPort }
+    parsePort(raw, defaultPort: RuntimeLaunch.defaultPort)
+}
+
+/// `COOKIE_EMBED_PORT`. Empty and unset are `8081`. A non-integer is nil
+/// so the embedder is skipped instead of crashing chat.
+public func parseEmbedPort(_ raw: String?) -> Int? {
+    parsePort(raw, defaultPort: RuntimeLaunch.defaultEmbedPort)
+}
+
+private func parsePort(_ raw: String?, defaultPort: Int) -> Int? {
+    guard let raw, !raw.isEmpty else { return defaultPort }
     guard let value = Int(raw), (1...65535).contains(value), String(value) == raw else {
         return nil
     }
