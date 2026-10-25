@@ -2,7 +2,7 @@
 
 This directory is the maintained source for verifying Cookie's user-facing M0 behavior. Read the index before driving, then use the matching feature file as the recipe.
 
-M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the local core, and an honest model status. Later milestones (memory, calendar, screen, tools, check-ins, widgets) are not features here yet.
+M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the local core, and an honest model status. Memory is a feature file, and every memory sub-feature is still `planned`. Calendar, screen, tools, check-ins, and widgets are not features here yet.
 
 ## Baseline preconditions
 
@@ -56,3 +56,4 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Hotkey popup](./hotkey-popup.md) covers ⌥Space, the `Ask Cookie…` field, and closing the panel.
 - [Chat streaming](./chat-streaming.md) covers sending a message, seeing the reply arrive in chunks, and cancelling it.
 - [Model status and offline](./model-status-offline.md) covers up, loading, and down, and chatting with no network while the model is up.
+- [Memory](./memory.md) covers persistence, recall, remember, forget, reflect, the profile cap, rebuild, embeddings down, and zero egress. Every sub-feature is `planned`.

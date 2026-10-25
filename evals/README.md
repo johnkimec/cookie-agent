@@ -1,6 +1,6 @@
 # evals
 
-Evaluation tasks for Cookie will live here. Nothing is seeded yet.
+Evaluation tasks for Cookie will live here. `evals/memory-recall/` has the recall task format and two sample tasks. The runner is not here yet. The other categories are still empty.
 
 The plan is in [docs/cookie-agent.md](../docs/cookie-agent.md), Evaluation plan. Short version: 50 tasks from John's own use, each with a programmatic end-state check, run against a fixture world (a Cookie Eval calendar, an eval Reminders list, a `~/CookieEval` folder, and recorded screen fixtures).
 
