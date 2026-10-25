@@ -20,6 +20,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - Treat every command as literal. Keep quoted names and flags unchanged.
 - Drive the core with `.cursor/skills/verify-cookie/bin/drive-core`.
 - On macOS, drive the menu and popup with `.cursor/skills/verify-cookie/bin/drive-mac` and the accessibility identifiers in the feature files (`cookie.menu.ask`, `cookie.popup.input`, and the labels `Ask Cookie…`, `Local-only mode`, `Quit Cookie`, `Cookie, thinking`). `drive-core` does not launch the GUI. The default `drive-mac` mode uses the fake core. `drive-mac chat --runtime real` drives the real core and `llama-server`. Sergey verified that drive on the Mac on 2026-10-25 at commit c89adc6. Evidence is `verify-evidence/m0-mac-real/`. Sub-features that drive does not assert stay `planned`. Do not click by coordinate.
+- Drives must never target the user's app by process name. `drive-mac` launches a per-run copy whose executable name and bundle id the installed app cannot share, and every System Events call checks that identity and the pid it launched. A mismatch fails closed before any input. `drive-mac self-check` is the two-instance probe.
 - One short-lived core per drive. It exits on `shutdown`. `--core real` also stops its stub.
 - Restore nothing in the user's home directory. The fake core does not read or write `COOKIE_DATA_DIR`. The real core stores turns in `<COOKIE_DATA_DIR>/cookie.db`. Verification sets that variable to a fresh temp directory.
 - Do not remove proof artifacts during cleanup.

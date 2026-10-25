@@ -1,0 +1,204 @@
+#!/bin/bash
+# Linux-side checks for drive-mac pid verification. No app, no osascript.
+set -euo pipefail
+
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=drive-mac-pid.sh
+source "$BIN_DIR/drive-mac-pid.sh"
+
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-pid.XXXXXX")"
+trap 'rm -rf "$FIXTURE"' EXIT
+mkdir -p "$FIXTURE/bin"
+export FIXTURE
+
+cat >"$FIXTURE/bin/ps" <<'EOF'
+#!/bin/bash
+if [[ "$*" == "-ax -o pid=,comm=" ]]; then
+  awk -F '|' '{ print $1, $2 }' "$FIXTURE/procs"
+  exit 0
+fi
+if [[ "$1" == "-p" && "$3" == "-o" && "$4" == "comm=" ]]; then
+  awk -F '|' -v pid="$2" '$1 == pid { print $2; exit }' "$FIXTURE/procs"
+  exit 0
+fi
+printf 'unexpected ps %s\n' "$*" >&2
+exit 1
+EOF
+
+cat >"$FIXTURE/bin/lsof" <<'EOF'
+#!/bin/bash
+pid=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-p" ]]; then
+    pid="$arg"
+  fi
+  prev="$arg"
+done
+awk -F '|' -v pid="$pid" '$1 == pid { n = split($3, paths, ";"); for (i = 1; i <= n; i++) print "n" paths[i] }' "$FIXTURE/procs"
+EOF
+chmod +x "$FIXTURE/bin/ps" "$FIXTURE/bin/lsof"
+
+export PATH="$FIXTURE/bin:$PATH"
+
+kill() {
+  if [[ "${1:-}" == "-0" ]]; then
+    awk -F '|' -v pid="$2" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }' "$FIXTURE/procs"
+    return
+  fi
+  builtin kill "$@"
+}
+
+write_procs() {
+  printf '%s\n' "$@" >"$FIXTURE/procs"
+}
+
+JOHN="/Applications/Cookie Agent.app/Contents/MacOS/CookieAgent"
+OURS="/tmp/dist/Cookie Agent.app/Contents/MacOS/CookieAgent"
+DECOY="/tmp/cookie-drive-decoy/Cookie Agent.app/Contents/MacOS/CookieAgent"
+
+expect_ok() {
+  local pid="$1" bin="$2"
+  local reason
+  reason="$(verify_drive_pid_reason "$pid" "$bin" || true)"
+  if [[ -n "$reason" ]]; then
+    printf 'expected ok for %s %s: %s\n' "$pid" "$bin" "$reason" >&2
+    exit 1
+  fi
+}
+
+expect_fail() {
+  local pid="$1" bin="$2" needle="$3"
+  local reason
+  reason="$(verify_drive_pid_reason "$pid" "$bin" || true)"
+  if [[ -z "$reason" ]]; then
+    printf 'expected failure for %s %s\n' "$pid" "$bin" >&2
+    exit 1
+  fi
+  case "$reason" in
+    *"$needle"*) ;;
+    *)
+      printf 'expected failure containing %s, got %s\n' "$needle" "$reason" >&2
+      exit 1
+      ;;
+  esac
+}
+
+write_procs \
+  "111|CookieAgent|$JOHN" \
+  "222|CookieAgent|$OURS" \
+  "333|CookieAgent|$DECOY"
+
+expect_ok 222 "$OURS"
+expect_ok 111 "$JOHN"
+expect_ok 333 "$DECOY"
+expect_fail 222 "$JOHN" "executable is not"
+expect_fail 111 "$OURS" "executable is not"
+expect_fail 999 "$OURS" "is not running"
+expect_fail abc "$OURS" "not one integer"
+expect_fail 1 "$OURS" "not a drive pid"
+expect_fail "" "$OURS" "not one integer"
+
+# A dylib listed before the executable still matches the bundle we launched.
+write_procs \
+  "222|CookieAgent|/usr/lib/dyld;$OURS"
+expect_ok 222 "$OURS"
+
+# Two processes at the same path are ambiguous.
+write_procs \
+  "222|CookieAgent|$OURS" \
+  "444|CookieAgent|$OURS"
+expect_fail 222 "$OURS" "also pid 444"
+expect_fail 444 "$OURS" "also pid 222"
+
+# John's process does not make our path ambiguous.
+write_procs \
+  "111|CookieAgent|$JOHN" \
+  "222|CookieAgent|$OURS"
+expect_ok 222 "$OURS"
+
+expect_identity_ok() {
+  local pid="$1" bin="$2" name="$3" bundle="$4"
+  local reason
+  reason="$(verify_drive_pid_reason "$pid" "$bin" "$name" "$bundle" || true)"
+  if [[ -n "$reason" ]]; then
+    printf 'expected identity ok for %s %s: %s\n' "$pid" "$name" "$reason" >&2
+    exit 1
+  fi
+}
+
+expect_identity_fail() {
+  local pid="$1" bin="$2" name="$3" bundle="$4" needle="$5"
+  local reason
+  reason="$(verify_drive_pid_reason "$pid" "$bin" "$name" "$bundle" || true)"
+  if [[ -z "$reason" || "$reason" != *"$needle"* ]]; then
+    printf 'expected identity failure containing %s, got %s\n' "$needle" "${reason:-ok}" >&2
+    exit 1
+  fi
+}
+
+expect_name_fail() {
+  local pid="$1" bin="$2" name="$3" bundle="$4" needle="$5"
+  local reason
+  reason="$(verify_drive_identity_reason "$pid" "$bin" "$name" "$bundle" || true)"
+  if [[ -z "$reason" || "$reason" != *"$needle"* ]]; then
+    printf 'expected name failure containing %s, got %s\n' "$needle" "${reason:-ok}" >&2
+    exit 1
+  fi
+}
+
+write_bundle() {
+  local root="$1" name="$2" bundle="$3"
+  local exe_name="${4:-$name}"
+  local bundle_value="${5:-$bundle}"
+  mkdir -p "$root/Contents/MacOS"
+  : >"$root/Contents/MacOS/$name"
+  python3 - "$root/Contents/Info.plist" "$exe_name" "$bundle_value" <<'PY'
+import plistlib
+import sys
+
+path, exe_name, bundle_value = sys.argv[1:]
+with open(path, "wb") as handle:
+    plistlib.dump(
+        {
+            "CFBundleExecutable": exe_name,
+            "CFBundleIdentifier": bundle_value,
+            "CFBundleName": "Cookie",
+        },
+        handle,
+    )
+PY
+  printf '%s\n' "$root/Contents/MacOS/$name"
+}
+
+DRIVE_NAME="CDrvabcd1234"
+DRIVE_BUNDLE="com.johnkimec.cookie-agent.drive.abcd1234"
+DECOY_NAME="CDrv9999aaaa"
+DECOY_BUNDLE="com.johnkimec.cookie-agent.drive.9999aaaa"
+DRIVE_BIN="$(write_bundle "$FIXTURE/drive.app" "$DRIVE_NAME" "$DRIVE_BUNDLE")"
+DECOY_BIN="$(write_bundle "$FIXTURE/decoy.app" "$DECOY_NAME" "$DECOY_BUNDLE")"
+
+write_procs \
+  "111|CookieAgent|$JOHN" \
+  "222|$DRIVE_NAME|$DRIVE_BIN" \
+  "333|$DECOY_NAME|$DECOY_BIN"
+expect_identity_ok 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE"
+expect_identity_ok 333 "$DECOY_BIN" "$DECOY_NAME" "$DECOY_BUNDLE"
+expect_identity_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "com.johnkimec.cookie-agent" "installed app"
+expect_identity_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "com.johnkimec.cookie-agent.drive" "not a per-run drive bundle id"
+expect_identity_fail 111 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "executable is not"
+
+write_procs "222|CookieAgent|$DRIVE_BIN"
+expect_name_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "process name is CookieAgent"
+expect_identity_fail 222 "$DRIVE_BIN" "CookieAgent" "$DRIVE_BUNDLE" "product executable"
+expect_identity_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "expected exactly one"
+
+MISMATCH="$(write_bundle "$FIXTURE/mismatch.app" "$DRIVE_NAME" "$DRIVE_BUNDLE" "CookieAgent" "$DRIVE_BUNDLE")"
+write_procs "222|$DRIVE_NAME|$MISMATCH"
+expect_identity_fail 222 "$MISMATCH" "$DRIVE_NAME" "$DRIVE_BUNDLE" "CFBundleExecutable"
+
+BUNDLE_MISMATCH="$(write_bundle "$FIXTURE/bundle-mismatch.app" "$DRIVE_NAME" "$DRIVE_BUNDLE" "$DRIVE_NAME" "com.johnkimec.cookie-agent")"
+write_procs "222|$DRIVE_NAME|$BUNDLE_MISMATCH"
+expect_identity_fail 222 "$BUNDLE_MISMATCH" "$DRIVE_NAME" "$DRIVE_BUNDLE" "bundle id is"
+
+printf '%s\n' "drive-mac pid test ok"

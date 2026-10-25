@@ -1,0 +1,214 @@
+#!/bin/bash
+# Fail if a drive script targets Cookie by process name.
+# Linux CI runs this. It does not launch the app.
+set -euo pipefail
+
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+DRIVE="$BIN_DIR/drive-mac"
+LIB="$BIN_DIR/cookie-drive-process.applescript"
+PID_SH="$BIN_DIR/drive-mac-pid.sh"
+PREPEND="$BIN_DIR/prepend-drive-library.py"
+
+fail() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+# Used inside lint_tree so a self-test can catch the failure.
+lint_fail() {
+  printf '%s\n' "$*" >&2
+  return 1
+}
+
+# Print matching lines. Return 1 when pattern is absent.
+scan() {
+  local pattern="$1"
+  local file="$2"
+  python3 - "$pattern" "$file" <<'PY'
+import re, sys
+pattern, path = sys.argv[1], sys.argv[2]
+rx = re.compile(pattern)
+hits = []
+for number, line in enumerate(open(path, encoding="utf-8"), 1):
+    if rx.search(line):
+        hits.append(f"{path}:{number}:{line.rstrip()}")
+if hits:
+    print("\n".join(hits))
+    sys.exit(1)
+PY
+}
+
+require_clean() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+  local file hit
+  for file in "$@"; do
+    if hit="$(scan "$pattern" "$file")"; then
+      continue
+    fi
+    printf '%s\n' "$hit" >&2
+    lint_fail "$label"
+    return 1
+  done
+}
+
+lint_tree() {
+  local drive="$1"
+  local lib="$2"
+  [[ -f "$drive" ]] || { lint_fail "missing $drive"; return 1; }
+  [[ -f "$lib" ]] || { lint_fail "missing $lib"; return 1; }
+  local files=("$drive" "$lib")
+  local extra
+  shopt -s nullglob
+  for extra in "$BIN_DIR"/scripts/*.applescript; do
+    files+=("$extra")
+  done
+  shopt -u nullglob
+
+  require_clean "name-based tell process" 'tell process "' "${files[@]}" || return 1
+  require_clean "tell application Cookie by name" 'tell application "Cookie' "${files[@]}" || return 1
+  require_clean "quit app by name" 'quit app' "${files[@]}" || return 1
+  require_clean "pkill" '\bpkill\b' "${files[@]}" || return 1
+  require_clean "killall" '\bkillall\b' "${files[@]}" || return 1
+  require_clean "pgrep by process name" 'pgrep -x' "${files[@]}" || return 1
+  require_clean "osascript outside osascript_run" '/usr/bin/osascript' "$lib" || return 1
+
+  local osa_lines
+  osa_lines="$(grep -n '/usr/bin/osascript' "$drive" || true)"
+  local osa_count=0
+  if [[ -n "$osa_lines" ]]; then
+    osa_count="$(printf '%s\n' "$osa_lines" | wc -l | tr -d ' ')"
+  fi
+  if [[ "$osa_count" -ne 1 ]]; then
+    printf '%s\n' "$osa_lines" >&2
+    lint_fail "drive-mac must call /usr/bin/osascript from exactly one helper (found $osa_count)" || return 1
+  fi
+  case "$osa_lines" in
+    *'COOKIE_DRIVE_PID='*'COOKIE_DRIVE_PROCESS_NAME='*'COOKIE_DRIVE_BUNDLE_ID='*) ;;
+    *) lint_fail "the osascript helper must set COOKIE_DRIVE_PID, COOKIE_DRIVE_PROCESS_NAME, and COOKIE_DRIVE_BUNDLE_ID" || return 1 ;;
+  esac
+
+  if grep -n -E '\bkeystroke\b' "$drive" "$lib" | grep -v 'refusing keystroke:' >/dev/null; then
+    grep -n -E '\bkeystroke\b' "$drive" "$lib" | grep -v 'refusing keystroke:' >&2 || true
+    lint_fail "keystroke is not pid-targeted; drive the field with AX" || return 1
+  fi
+  local key_lines key_count
+  key_lines="$(grep -n 'key code' "$drive" || true)"
+  key_count=0
+  if [[ -n "$key_lines" ]]; then
+    key_count="$(printf '%s\n' "$key_lines" | wc -l | tr -d ' ')"
+  fi
+  if [[ "$key_count" -ne 1 ]]; then
+    printf '%s\n' "$key_lines" >&2
+    lint_fail "key code must appear once, inside send_key_code (found $key_count)" || return 1
+  fi
+  if ! grep -q 'refusing keystroke: frontmost unix id' "$drive"; then
+    lint_fail "send_key_code must refuse a key when frontmost unix id is not the drive pid" || return 1
+  fi
+  if ! grep -q 'cookieDriveProcess' "$drive"; then
+    lint_fail "drive-mac must resolve the process through cookieDriveProcess" || return 1
+  fi
+  return 0
+}
+
+self_test() {
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-lint.XXXXXX")"
+  cat >"$tmp/good-drive" <<'EOF'
+osascript_run() {
+  COOKIE_DRIVE_PID="$target_pid" COOKIE_DRIVE_PROCESS_NAME="$target_name" COOKIE_DRIVE_BUNDLE_ID="$target_bundle" /usr/bin/osascript "$tmp"
+}
+send_key_code() {
+  # refusing keystroke: frontmost unix id
+  key code keyCode
+}
+set cookieProc to my cookieDriveProcess()
+EOF
+  printf '%s\n' 'on cookieDriveProcess()' >"$tmp/good-lib"
+  lint_tree "$tmp/good-drive" "$tmp/good-lib"
+
+  assert_rejects() {
+    local name="$1"
+    local body="$2"
+    printf '%s\n' "$body" >"$tmp/bad-drive"
+    cp "$tmp/good-lib" "$tmp/bad-lib"
+    # Keep the helper shape so only the planted pattern fails.
+    cat >>"$tmp/bad-drive" <<'EOF'
+osascript_run() {
+  COOKIE_DRIVE_PID="$target_pid" COOKIE_DRIVE_PROCESS_NAME="$target_name" COOKIE_DRIVE_BUNDLE_ID="$target_bundle" /usr/bin/osascript "$tmp"
+}
+send_key_code() {
+  # refusing keystroke: frontmost unix id
+  key code keyCode
+}
+cookieDriveProcess
+EOF
+    if lint_tree "$tmp/bad-drive" "$tmp/bad-lib" >/dev/null 2>"$tmp/err"; then
+      fail "self-test: $name was accepted"
+    fi
+    if ! grep -q "$name" "$tmp/err"; then
+      cat "$tmp/err" >&2
+      fail "self-test: $name did not report the expected reason"
+    fi
+  }
+
+  assert_rejects "name-based tell process" 'tell process "CookieAgent"'
+  assert_rejects "tell application Cookie by name" 'tell application "Cookie Agent" to activate'
+  assert_rejects "quit app by name" "osascript -e 'quit app \"Cookie Agent\"'"
+  assert_rejects "pkill" 'pkill -TERM CookieAgent'
+  assert_rejects "killall" 'killall CookieAgent'
+  assert_rejects "pgrep by process name" 'pgrep -x CookieAgent'
+  assert_rejects "keystroke is not pid-targeted" 'keystroke "hello"'
+
+  python3 - "$PREPEND" "$LIB" "$tmp/use-src.applescript" "$tmp/use-out.applescript" <<'PY'
+import pathlib, subprocess, sys
+prepend, lib, src, dest = sys.argv[1:]
+pathlib.Path(src).write_text(
+    'use framework "AppKit"\n'
+    "use scripting additions\n"
+    "on run\n"
+    "  set cookieProc to my cookieDriveProcess()\n"
+    "end run\n"
+)
+subprocess.check_call([sys.executable, prepend, lib, src, dest])
+text = pathlib.Path(dest).read_text()
+use_at = text.index("use framework")
+handler_at = text.index("on cookieDriveProcess()")
+call_at = text.index("set cookieProc to my cookieDriveProcess()")
+if not (use_at < handler_at < call_at):
+    sys.exit("handler was not inserted after use lines")
+if 'tell process "' in text:
+    sys.exit("prepend introduced a named process tell")
+PY
+  rm -rf "$tmp"
+  printf '%s\n' "lint self-test ok"
+}
+
+self_test
+lint_tree "$DRIVE" "$LIB"
+
+for needle in \
+  'whose unix id is drivePid' \
+  'process name does not match' \
+  'bundle id does not match' \
+  'refusing the product process name' \
+  'refusing the installed bundle id'
+do
+  if ! grep -q "$needle" "$LIB"; then
+    fail "cookieDriveProcess missing: $needle"
+  fi
+done
+if ! grep -q 'frontmost process is not the launched executable' "$DRIVE"; then
+  fail "send_key_code must refuse a key when the frontmost process name is not the drive identity"
+fi
+if ! grep -q 'frontmost bundle id is not the launched app' "$DRIVE"; then
+  fail "send_key_code must refuse a key when the frontmost bundle id is not the drive identity"
+fi
+
+if [[ ! -f "$PID_SH" ]]; then
+  fail "missing $PID_SH"
+fi
+"$BIN_DIR/drive-mac-pid-test"
+
+printf '%s\n' "drive-mac targeting lint ok"

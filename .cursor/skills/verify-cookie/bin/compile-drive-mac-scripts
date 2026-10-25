@@ -12,6 +12,8 @@ fi
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SOURCE="$ROOT/drive-mac"
+LIB="$ROOT/cookie-drive-process.applescript"
+PREPEND="$ROOT/prepend-drive-library.py"
 if [[ ! -f "$SOURCE" ]]; then
   echo "missing $SOURCE" >&2
   exit 1
@@ -57,27 +59,47 @@ PY
 
 fail=0
 count=0
-for script in "$tmpdir"/script-*.applescript; do
-  count=$((count + 1))
+compile_one() {
+  local script="$1"
+  local ready="$tmpdir/ready-$count.applescript"
+  python3 "$PREPEND" "$LIB" "$script" "$ready"
   err="$tmpdir/compile.err"
   : >"$err"
-  if osacompile -o /dev/null "$script" 2>"$err"; then
+  if osacompile -o /dev/null "$ready" 2>"$err"; then
     echo "compiled $script"
-    continue
+    return 0
   fi
   # Some macOS versions will not write a compiled script to /dev/null.
   # A syntax error fails this second compile too.
-  if osacompile -o "$tmpdir/compiled.scpt" "$script" 2>>"$err"; then
+  if osacompile -o "$tmpdir/compiled.scpt" "$ready" 2>>"$err"; then
     rm -f "$tmpdir/compiled.scpt"
     echo "compiled $script"
-    continue
+    return 0
   fi
   echo "compile failed: $script" >&2
   cat "$err" >&2
   echo "-----" >&2
-  cat "$script" >&2
+  cat "$ready" >&2
+  return 1
+}
+
+for script in "$tmpdir"/script-*.applescript; do
+  count=$((count + 1))
+  if compile_one "$script"; then
+    continue
+  fi
   fail=1
 done
+
+shopt -s nullglob
+for script in "$ROOT"/scripts/*.applescript; do
+  count=$((count + 1))
+  if compile_one "$script"; then
+    continue
+  fi
+  fail=1
+done
+shopt -u nullglob
 
 if [[ "$count" -lt 1 ]]; then
   echo "no scripts extracted" >&2
