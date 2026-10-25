@@ -19,10 +19,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { mkdir, readdir, readlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { mkdir, readdir, readlink, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { CORE_SERVER_NAME } from "./identity.ts";
 import { dumpMemory } from "./memory/dump.ts";
 import { MEMORY_DB_FILENAME } from "./memory/path.ts";
@@ -1631,7 +1631,99 @@ function llamaMode(args: string[]): LlamaMode | null {
   return null;
 }
 
-async function main(argv: string[]): Promise<number> {
+export type DriveInvocation = {
+  code: number;
+  /**
+   * Absolute directory for a drive that must write evidence.
+   * Doctor, cleanup, usage, and the unreachable Mac drives leave this null.
+   */
+  evidenceDir: string | null;
+  /**
+   * Epoch ms taken immediately before that drive. Null when no evidence
+   * is required. A file older than this was not written by the drive.
+   */
+  startedAt: number | null;
+  /** Names that must exist under evidenceDir and be at least as new as startedAt. */
+  evidenceFiles: readonly string[];
+};
+
+const baseEvidenceFiles = [
+  "command.txt",
+  "transcript.jsonl",
+  "stderr.txt",
+  "summary.txt",
+] as const;
+
+/**
+ * Whole-second mtimes (some filesystems) can sit up to a second behind
+ * Date.now() for a write that just happened. A reused directory's files
+ * are older than that.
+ */
+const evidenceMtimeSlackMs = 1000;
+
+function evidenceFilesFor(feature: DriveFeature): readonly string[] {
+  const files: string[] = [...baseEvidenceFiles];
+  if (feature === "chat-history") {
+    files.push("timings.txt");
+  }
+  if (feature === "memory-persist") {
+    files.push("db.txt");
+  }
+  return files;
+}
+
+function invocation(code: number): DriveInvocation {
+  return {
+    code,
+    evidenceDir: null,
+    startedAt: null,
+    evidenceFiles: [],
+  };
+}
+
+async function evidenceWasWritten(
+  evidenceDir: string,
+  files: readonly string[],
+  startedAt: number,
+): Promise<boolean> {
+  try {
+    for (const name of files) {
+      const info = await stat(join(evidenceDir, name));
+      if (info.mtimeMs + evidenceMtimeSlackMs < startedAt) {
+        return false;
+      }
+    }
+    return files.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exit status for one drive-core invocation.
+ *
+ * A drive that should write evidence exits 1 when it reports success and
+ * any required file is missing or older than the start of that drive.
+ * Doctor and cleanup pass a successful code through with a null directory.
+ */
+export async function resolveDriveExit(run: DriveInvocation): Promise<number> {
+  if (
+    run.evidenceDir !== null &&
+    run.startedAt !== null &&
+    run.code === 0 &&
+    !(await evidenceWasWritten(
+      run.evidenceDir,
+      run.evidenceFiles,
+      run.startedAt,
+    ))
+  ) {
+    process.stderr.write("drive-core: no evidence written\n");
+    return 1;
+  }
+  return run.code;
+}
+
+export async function main(argv: string[]): Promise<DriveInvocation> {
   const [command, feature, ...rest] = argv;
   if (command === "doctor") {
     const kind = coreKind(argv.slice(1));
@@ -1641,18 +1733,18 @@ async function main(argv: string[]): Promise<number> {
       llama === null ||
       (llama === "external" && kind !== "real")
     ) {
-      return usage();
+      return invocation(usage());
     }
-    return doctor(kind, llama);
+    return invocation(await doctor(kind, llama));
   }
   if (command === "cleanup") {
-    return cleanupAsync();
+    return invocation(await cleanupAsync());
   }
   if (command !== "drive") {
-    return usage();
+    return invocation(usage());
   }
   if (feature === "menu-bar-icon" || feature === "hotkey-popup") {
-    return unreachable();
+    return invocation(unreachable());
   }
   if (
     feature !== "chat-streaming" &&
@@ -1661,11 +1753,11 @@ async function main(argv: string[]): Promise<number> {
     feature !== "memory-persist" &&
     feature !== "runtime-restart"
   ) {
-    return usage();
+    return invocation(usage());
   }
   const evidence = evidenceArg(rest);
   if (evidence === null) {
-    return usage();
+    return invocation(usage());
   }
   const kind = coreKind(rest);
   const llama = llamaMode(rest);
@@ -1674,46 +1766,37 @@ async function main(argv: string[]): Promise<number> {
     llama === null ||
     (llama === "external" && kind !== "real")
   ) {
-    return usage();
+    return invocation(usage());
   }
   if (feature === "chat-history" && llama !== "external") {
     process.stderr.write(
       "chat-history requires --core real --llama external\n",
     );
-    return usage();
+    return invocation(usage());
   }
   if (feature === "memory-persist" && (kind !== "real" || llama !== "stub")) {
     process.stderr.write(
       "memory-persist requires --core real and the built-in stub\n",
     );
-    return usage();
+    return invocation(usage());
   }
   if (feature === "runtime-restart" && (kind !== "real" || llama !== "stub")) {
     process.stderr.write(
       "runtime-restart requires --core real and the built-in stub\n",
     );
-    return usage();
+    return invocation(usage());
   }
-  return driveFeature(feature, evidence, kind, llama);
+  const startedAt = Date.now();
+  return {
+    code: await driveFeature(feature, evidence, kind, llama),
+    evidenceDir: resolve(repoRoot, evidence),
+    startedAt,
+    evidenceFiles: evidenceFilesFor(feature),
+  };
 }
 
-function isDirectRun(): boolean {
-  const entry = process.argv[1];
-  if (entry === undefined) {
-    return false;
-  }
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (isDirectRun()) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      process.exit(code);
-    })
-    .catch((error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : "verify-drive failed";
-      process.stderr.write(`${message}\n`);
-      process.exit(1);
-    });
+const directEntry = process.argv[1];
+if (directEntry !== undefined && basename(directEntry) === "verify-drive.ts") {
+  process.stderr.write("run bin/drive-core (or verify-drive-entry.ts)\n");
+  process.exit(1);
 }

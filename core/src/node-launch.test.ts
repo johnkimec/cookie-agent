@@ -49,6 +49,14 @@ describe("node launch", () => {
       "utf8",
     );
     expect(drive).toContain(`exec node ${flags} `);
+    expect(drive).toContain("core/src/verify-drive-entry.ts");
+    expect(drive).not.toContain('core/src/verify-drive.ts"');
+    const entry = readFileSync(
+      join(repoRoot, "core/src/verify-drive-entry.ts"),
+      "utf8",
+    );
+    expect(entry).toContain("main(process.argv.slice(2))");
+    expect(entry).toContain("resolveDriveExit");
     const ci = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
     expect(ci).toContain("node-version-file: .nvmrc");
     expect(ci).toContain("node-version: 22.13.0");
