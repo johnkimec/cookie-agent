@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { mkdir, readdir, readlink, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { CORE_SERVER_NAME } from "./identity.ts";
@@ -1632,36 +1632,68 @@ function llamaMode(args: string[]): LlamaMode | null {
 }
 
 export type DriveInvocation = {
-  /** False when this process did not execute a command. */
-  ran: boolean;
   code: number;
   /**
    * Absolute directory for a drive that must write evidence.
    * Doctor, cleanup, usage, and the unreachable Mac drives leave this null.
    */
   evidenceDir: string | null;
+  /**
+   * Epoch ms taken immediately before that drive. Null when no evidence
+   * is required. A file older than this was not written by the drive.
+   */
+  startedAt: number | null;
+  /** Names that must exist under evidenceDir and be at least as new as startedAt. */
+  evidenceFiles: readonly string[];
 };
 
-const evidenceFileNames = [
+const baseEvidenceFiles = [
   "command.txt",
   "transcript.jsonl",
   "stderr.txt",
   "summary.txt",
 ] as const;
 
-function invocation(
-  code: number,
-  evidenceDir: string | null = null,
-): DriveInvocation {
-  return { ran: true, code, evidenceDir };
+/**
+ * Whole-second mtimes (some filesystems) can sit up to a second behind
+ * Date.now() for a write that just happened. A reused directory's files
+ * are older than that.
+ */
+const evidenceMtimeSlackMs = 1000;
+
+function evidenceFilesFor(feature: DriveFeature): readonly string[] {
+  const files: string[] = [...baseEvidenceFiles];
+  if (feature === "chat-history") {
+    files.push("timings.txt");
+  }
+  if (feature === "memory-persist") {
+    files.push("db.txt");
+  }
+  return files;
 }
 
-async function evidenceWasWritten(evidenceDir: string): Promise<boolean> {
+function invocation(code: number): DriveInvocation {
+  return {
+    code,
+    evidenceDir: null,
+    startedAt: null,
+    evidenceFiles: [],
+  };
+}
+
+async function evidenceWasWritten(
+  evidenceDir: string,
+  files: readonly string[],
+  startedAt: number,
+): Promise<boolean> {
   try {
-    await Promise.all(
-      evidenceFileNames.map((name) => stat(join(evidenceDir, name))),
-    );
-    return true;
+    for (const name of files) {
+      const info = await stat(join(evidenceDir, name));
+      if (info.mtimeMs + evidenceMtimeSlackMs < startedAt) {
+        return false;
+      }
+    }
+    return files.length > 0;
   } catch {
     return false;
   }
@@ -1670,19 +1702,20 @@ async function evidenceWasWritten(evidenceDir: string): Promise<boolean> {
 /**
  * Exit status for one drive-core invocation.
  *
- * Exit 1 when no command ran, or when a drive that should write evidence
- * reported success and the evidence files are missing. Doctor and cleanup
- * pass a successful code through with a null evidence directory.
+ * A drive that should write evidence exits 1 when it reports success and
+ * any required file is missing or older than the start of that drive.
+ * Doctor and cleanup pass a successful code through with a null directory.
  */
 export async function resolveDriveExit(run: DriveInvocation): Promise<number> {
-  if (!run.ran) {
-    process.stderr.write("drive-core: no drive ran\n");
-    return 1;
-  }
   if (
     run.evidenceDir !== null &&
+    run.startedAt !== null &&
     run.code === 0 &&
-    !(await evidenceWasWritten(run.evidenceDir))
+    !(await evidenceWasWritten(
+      run.evidenceDir,
+      run.evidenceFiles,
+      run.startedAt,
+    ))
   ) {
     process.stderr.write("drive-core: no evidence written\n");
     return 1;
@@ -1753,8 +1786,17 @@ export async function main(argv: string[]): Promise<DriveInvocation> {
     );
     return invocation(usage());
   }
-  return invocation(
-    await driveFeature(feature, evidence, kind, llama),
-    resolve(repoRoot, evidence),
-  );
+  const startedAt = Date.now();
+  return {
+    code: await driveFeature(feature, evidence, kind, llama),
+    evidenceDir: resolve(repoRoot, evidence),
+    startedAt,
+    evidenceFiles: evidenceFilesFor(feature),
+  };
+}
+
+const directEntry = process.argv[1];
+if (directEntry !== undefined && basename(directEntry) === "verify-drive.ts") {
+  process.stderr.write("run bin/drive-core (or verify-drive-entry.ts)\n");
+  process.exit(1);
 }

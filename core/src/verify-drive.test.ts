@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { TYPE_STRIP_NODE_ARGS } from "./node-launch.ts";
 import { isCookieMessage, messageErrors } from "./protocol/validate.ts";
 import {
+  type DriveInvocation,
   decodeProcAddress,
   HISTORY_CODE_WORD,
   resolveDriveExit,
@@ -59,6 +68,26 @@ function capturedFailure(error: unknown): {
   stderr?: string;
 } {
   return error as { code?: number; stdout?: string; stderr?: string };
+}
+
+function exitForEvidence(
+  evidenceDir: string,
+  startedAt: number,
+  evidenceFiles: readonly string[],
+) {
+  const run: DriveInvocation = {
+    code: 0,
+    evidenceDir,
+    startedAt,
+    evidenceFiles,
+  };
+  return nodeEval(
+    `import { resolveDriveExit } from "./core/src/verify-drive.ts";
+     process.exit(await resolveDriveExit(${JSON.stringify(run)}));`,
+  ).then(
+    (result) => ({ code: 0, stderr: result.stderr }),
+    (error: unknown) => capturedFailure(error),
+  );
 }
 
 describe("verify-cookie drive-core", () => {
@@ -443,36 +472,99 @@ describe("verify-cookie drive-core", () => {
     }
   }, 20000);
 
-  it("exits non-zero when no drive ran or evidence was not written", async () => {
-    expect(
-      await resolveDriveExit({ ran: true, code: 0, evidenceDir: null }),
-    ).toBe(0);
-
-    const noDrive = await nodeEval(
-      `import { resolveDriveExit } from "./core/src/verify-drive.ts";
-       process.exit(await resolveDriveExit({ ran: false, code: 0, evidenceDir: null }));`,
-    ).then(
-      () => ({ code: 0, stdout: "", stderr: "" }),
-      (error: unknown) => capturedFailure(error),
-    );
-    expect(noDrive.code).toBe(1);
-    expect(noDrive.stdout ?? "").toBe("");
-    expect(noDrive.stderr).toContain("drive-core: no drive ran\n");
-
+  it("exits 1 when verify-drive.ts is executed directly", async () => {
     const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
     try {
-      const missing = await nodeEval(
-        `import { resolveDriveExit } from "./core/src/verify-drive.ts";
-         process.exit(await resolveDriveExit({ ran: true, code: 0, evidenceDir: ${JSON.stringify(evidence)} }));`,
+      const failed = await exec(
+        process.execPath,
+        [
+          ...TYPE_STRIP_NODE_ARGS,
+          join(repoRoot, "core/src/verify-drive.ts"),
+          "drive",
+          "chat-streaming",
+          "--evidence",
+          evidence,
+        ],
+        { cwd: repoRoot, encoding: "utf8", timeout: 20000 },
       ).then(
-        () => ({ code: 0, stderr: "" }),
+        () => ({ code: 0, stdout: "", stderr: "" }),
         (error: unknown) => capturedFailure(error),
       );
-      expect(missing.code).toBe(1);
-      expect(missing.stderr).toContain("drive-core: no evidence written\n");
+      expect(failed.code).toBe(1);
+      expect(failed.stdout ?? "").toBe("");
+      expect(failed.stderr).toContain(
+        "run bin/drive-core (or verify-drive-entry.ts)\n",
+      );
       await expect(stat(join(evidence, "summary.txt"))).rejects.toThrow();
     } finally {
       await rm(evidence, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects stale evidence and a missing db.txt or timings.txt", async () => {
+    const baseFiles = [
+      "command.txt",
+      "transcript.jsonl",
+      "stderr.txt",
+      "summary.txt",
+    ];
+    expect(
+      await resolveDriveExit({
+        code: 0,
+        evidenceDir: null,
+        startedAt: null,
+        evidenceFiles: [],
+      }),
+    ).toBe(0);
+
+    const staleDir = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    const missingDir = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    const freshDir = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const staleAt = new Date(Date.now() - 60_000);
+      for (const name of baseFiles) {
+        const path = join(staleDir, name);
+        await writeFile(path, "stale\n");
+        await utimes(path, staleAt, staleAt);
+      }
+      const stale = await exitForEvidence(staleDir, Date.now(), baseFiles);
+      expect(stale.code).toBe(1);
+      expect(stale.stderr).toContain("drive-core: no evidence written\n");
+
+      const startedAt = Date.now();
+      for (const name of baseFiles) {
+        await writeFile(join(missingDir, name), "fresh\n");
+      }
+      const missingDb = await exitForEvidence(missingDir, startedAt, [
+        ...baseFiles,
+        "db.txt",
+      ]);
+      expect(missingDb.code).toBe(1);
+      expect(missingDb.stderr).toContain("drive-core: no evidence written\n");
+      const missingTimings = await exitForEvidence(missingDir, startedAt, [
+        ...baseFiles,
+        "timings.txt",
+      ]);
+      expect(missingTimings.code).toBe(1);
+      expect(missingTimings.stderr).toContain(
+        "drive-core: no evidence written\n",
+      );
+
+      const freshStart = Date.now();
+      for (const name of [...baseFiles, "db.txt", "timings.txt"]) {
+        await writeFile(join(freshDir, name), "fresh\n");
+      }
+      const fresh = await exitForEvidence(freshDir, freshStart, [
+        ...baseFiles,
+        "db.txt",
+        "timings.txt",
+      ]);
+      expect(fresh.code).toBe(0);
+      expect(fresh.stderr).toBe("");
+    } finally {
+      await rm(staleDir, { recursive: true, force: true });
+      await rm(missingDir, { recursive: true, force: true });
+      await rm(freshDir, { recursive: true, force: true });
     }
   });
 
