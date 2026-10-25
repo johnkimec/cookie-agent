@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import CookieCore
@@ -39,6 +40,17 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(statusLine(runtime: .loading, modelID: nil), "🐾 Cookie · starting model…")
         XCTAssertEqual(statusLine(runtime: .down, modelID: nil), "🐾 Cookie · model offline")
         XCTAssertEqual(statusLine(runtime: .down, modelID: "fake-local"), "🐾 Cookie · model offline")
+        XCTAssertEqual(popupLoadingLine(runtime: .loading), "Loading the model…")
+        XCTAssertNil(popupLoadingLine(runtime: .up))
+        XCTAssertNil(popupLoadingLine(runtime: .down))
+        XCTAssertFalse(sendEnabled(runtime: .loading))
+        XCTAssertTrue(sendEnabled(runtime: .up))
+        XCTAssertTrue(sendEnabled(runtime: .down))
+        XCTAssertEqual(presentChatSendFailure(code: -32002, runtime: .loading), .stillLoading)
+        XCTAssertEqual(presentChatSendFailure(code: -32002, runtime: .up), .stillLoading)
+        XCTAssertEqual(presentChatSendFailure(code: -32002, runtime: .down), .notReady)
+        XCTAssertEqual(presentChatSendFailure(code: -32003, runtime: .up), .failed)
+        XCTAssertEqual(presentChatSendFailure(code: nil, runtime: .loading), .failed)
     }
 
     func testAccessibilityIdentifiersAndLayout() {
@@ -52,6 +64,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieAX.popupMascot, "cookie.popup.mascot")
         XCTAssertEqual(CookieAX.popupSend, "cookie.popup.send")
         XCTAssertEqual(CookieAX.popupRefusal, "cookie.popup.refusal")
+        XCTAssertEqual(CookieAX.popupLoading, "cookie.popup.loading")
         XCTAssertEqual(CookieAX.turnYou(0), "cookie.turn.you.0")
         XCTAssertEqual(CookieAX.turnCookie(1), "cookie.turn.cookie.1")
         XCTAssertEqual(CookieAX.badge(0), "cookie.badge.on-device.0")
@@ -73,7 +86,8 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(chat.prepareSend(runtime: .down), .refused(.notReady))
         XCTAssertEqual(chat.refusalLine(runtime: .down), "Cookie's model isn't ready yet.")
         XCTAssertEqual(chat.prepareSend(runtime: .loading), .refused(.notReady))
-        XCTAssertEqual(chat.refusalLine(runtime: .loading), "Cookie's model isn't ready yet.")
+        XCTAssertNil(chat.refusalLine(runtime: .loading))
+        XCTAssertEqual(popupLoadingLine(runtime: .loading), "Loading the model…")
         XCTAssertEqual(chat.draft, "hello")
         XCTAssertTrue(chat.turns.isEmpty)
         chat.noteRuntime(.up)
@@ -160,7 +174,8 @@ final class LaunchTests: XCTestCase {
         XCTAssertEqual(dataDir, temp.appendingPathComponent("cookie-agent-42", isDirectory: true).path)
         XCTAssertFalse(dataDir.contains("Application Support"))
         XCTAssertNil(launch.environment["COOKIE_LLAMA_PORT"])
-        XCTAssertEqual(launch.arguments, ["pnpm", "--filter", "@cookie-agent/core", "fake-core"])
+        XCTAssertEqual(launch.arguments, ["pnpm", "--filter", "@cookie-agent/core", "start"])
+        XCTAssertTrue(launch.supervisesRuntime)
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/not-a-repo")
     }
 
@@ -183,6 +198,7 @@ final class LaunchTests: XCTestCase {
             ["node", "--experimental-strip-types", "src/fake-core.ts"]
         )
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/cookie-repo")
+        XCTAssertFalse(launch.supervisesRuntime)
     }
 
     func testUnsetAndEmptyPortStayUnset() {
@@ -216,6 +232,23 @@ final class LaunchTests: XCTestCase {
         XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "8080")
     }
 
+    func testFakeCoreDoesNotSuperviseAndRealCoreDoes() {
+        let fake = CoreLaunch.resolve(
+            environment: ["COOKIE_CORE_COMMAND": "pnpm --filter @cookie-agent/core fake-core"],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
+            pid: 9
+        )
+        XCTAssertFalse(fake.supervisesRuntime)
+        let real = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
+            pid: 10
+        )
+        XCTAssertTrue(real.supervisesRuntime)
+    }
+
     func testFindRepoWalksToWorkspace() {
         let here = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let repo = CoreLaunch.findRepo(from: here)
@@ -223,6 +256,466 @@ final class LaunchTests: XCTestCase {
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: repo!.appendingPathComponent("protocol/README.md").path)
         )
+    }
+}
+
+final class RuntimeLaunchTests: XCTestCase {
+    func testDefaultArgumentsAndStablePid() {
+        let launch = RuntimeLaunch.resolve(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: true
+        )
+        XCTAssertEqual(
+            [launch.executable] + launch.arguments,
+            [
+                "/opt/homebrew/bin/llama-server",
+                "-m", "/Users/john/cookie-runtime/models/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8080",
+                "-c", "32768",
+                "-np", "1",
+                "-ngl", "99",
+                "-fa", "on",
+                "--jinja",
+                "--metrics",
+            ]
+        )
+        XCTAssertEqual(launch.port, 8080)
+        XCTAssertEqual(launch.modelId, "Qwen3.6-35B-A3B")
+        XCTAssertEqual(launch.logFile, "/tmp/cookie-data/logs/llama-server.log")
+        XCTAssertEqual(launch.pidFile, "/tmp/cookie-data/logs/llama-server.pid")
+        XCTAssertEqual(launch.stablePidFile, "/Users/john/cookie-runtime/run/llama-server-8080.pid")
+    }
+
+    func testEnvironmentOverrides() {
+        let launch = RuntimeLaunch.resolve(
+            environment: [
+                "COOKIE_MODEL_PATH": "~/models/custom.gguf",
+                "COOKIE_LLAMA_SERVER": "~/bin/llama-server",
+                "COOKIE_LLAMA_PORT": "18080",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: "/tmp/cookie-isolated",
+            recordsStablePid: false
+        )
+        XCTAssertEqual(launch.executable, "/Users/john/bin/llama-server")
+        XCTAssertEqual(launch.modelPath, "/Users/john/models/custom.gguf")
+        XCTAssertEqual(launch.arguments[1], "/Users/john/models/custom.gguf")
+        XCTAssertEqual(launch.port, 18080)
+        XCTAssertEqual(launch.arguments[5], "18080")
+        XCTAssertEqual(launch.logFile, "/tmp/cookie-isolated/logs/llama-server.log")
+        XCTAssertNil(launch.stablePidFile)
+    }
+
+    func testEmptyOverridesUseDefaultsAndInvalidPortDoesNotLaunch() {
+        let launch = RuntimeLaunch.resolve(
+            environment: [
+                "COOKIE_MODEL_PATH": "",
+                "COOKIE_LLAMA_SERVER": "",
+                "COOKIE_LLAMA_PORT": "nope",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/ada", isDirectory: true),
+            dataDirectory: "/tmp/cookie-data",
+            recordsStablePid: true
+        )
+        XCTAssertEqual(launch.executable, RuntimeLaunch.defaultBinary)
+        XCTAssertTrue(launch.modelPath.hasSuffix("Qwen3.6-35B-A3B-Q4_K_M.gguf"))
+        XCTAssertNil(launch.port)
+        XCTAssertNil(launch.stablePidFile)
+        XCTAssertEqual(runtimeRestartBackoff(step: 1), 1)
+        XCTAssertEqual(runtimeRestartBackoff(step: 2), 2)
+        XCTAssertEqual(runtimeRestartBackoff(step: 3), 4)
+    }
+
+    func testHealthBody() {
+        XCTAssertEqual(interpretHealth(status: 200, body: Data("{\"status\":\"ok\"}".utf8)), .up)
+        XCTAssertEqual(interpretHealth(status: 200, body: Data()), .up)
+        XCTAssertEqual(interpretHealth(status: 200, body: Data("{\"status\":\"loading\"}".utf8)), .loading)
+        XCTAssertEqual(interpretHealth(status: 503, body: Data()), .loading)
+        XCTAssertEqual(interpretHealth(status: 200, body: Data("{\"status\":\"error\"}".utf8)), .down)
+        XCTAssertEqual(interpretHealth(status: 500, body: Data()), .down)
+    }
+
+    func testPidFileRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-pid-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = FileRuntimePidStore(path: dir.appendingPathComponent("llama-server.pid").path)
+        XCTAssertNil(store.load())
+        store.save(RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true))
+        XCTAssertEqual(store.load(), RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true))
+        store.remove()
+        XCTAssertNil(store.load())
+    }
+}
+
+final class RuntimeSupervisorTests: XCTestCase {
+    func testReuseHealthyServerDoesNotSpawn() async {
+        let launcher = ScriptedLauncher()
+        let health = ScriptedHealth(results: [.up])
+        let pids = MemoryPidStore()
+        let clock = ScriptedClock()
+        let supervisor = makeSupervisor(launcher: launcher, health: health, pids: pids, clock: clock)
+        await supervisor.start()
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .up)
+        XCTAssertEqual(status.modelId, "Qwen3.6-35B-A3B")
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertFalse(await supervisor.isOwningProcess)
+        await supervisor.stop()
+        XCTAssertTrue(launcher.terminated.isEmpty)
+    }
+
+    func testExternalLoadingBecomesUpWithoutSpawn() async {
+        let launcher = ScriptedLauncher()
+        let health = ScriptedHealth(results: [.loading, .up])
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: health,
+            pids: MemoryPidStore(),
+            clock: ScriptedClock()
+        )
+        await supervisor.start()
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .up)
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertFalse(await supervisor.isOwningProcess)
+    }
+
+    func testBackoffThenHealthy() async {
+        let launcher = ScriptedLauncher(deathsRemaining: 1)
+        let health = LivingHealth(launcher: launcher)
+        let clock = ScriptedClock()
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: health,
+            pids: MemoryPidStore(),
+            clock: clock
+        )
+        await supervisor.start()
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .up)
+        XCTAssertEqual(launcher.started.count, 2)
+        XCTAssertEqual(clock.recorded(), [1])
+        XCTAssertTrue(await supervisor.isOwningProcess)
+        await supervisor.stop()
+        XCTAssertEqual(launcher.terminated.count, 1)
+    }
+
+    func testGiveUpAfterThreeCrashes() async {
+        let launcher = ScriptedLauncher(deathsRemaining: 9)
+        let health = ScriptedHealth(results: [.down])
+        let clock = ScriptedClock()
+        let pids = MemoryPidStore()
+        let supervisor = makeSupervisor(launcher: launcher, health: health, pids: pids, clock: clock)
+        await supervisor.start()
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .down)
+        XCTAssertNil(status.modelId)
+        XCTAssertEqual(launcher.started.count, 3)
+        XCTAssertEqual(launcher.started[0].executable, RuntimeLaunch.defaultBinary)
+        XCTAssertEqual(launcher.started[0].arguments, sampleLaunch().arguments)
+        XCTAssertEqual(launcher.started[0].logFile, "/tmp/cookie-data/logs/llama-server.log")
+        XCTAssertEqual(clock.recorded(), [1, 2])
+        XCTAssertNil(pids.record)
+        XCTAssertFalse(await supervisor.isOwningProcess)
+    }
+
+    func testSpawnFailureGivesUp() async {
+        let launcher = ScriptedLauncher(failStarts: 3)
+        let health = ScriptedHealth(results: [.down])
+        let clock = ScriptedClock()
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: health,
+            pids: MemoryPidStore(),
+            clock: clock
+        )
+        await supervisor.start()
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .down)
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertEqual(clock.recorded(), [1, 2])
+    }
+
+    func testInvalidPortDoesNotSpawn() async {
+        var launch = sampleLaunch()
+        launch.port = nil
+        let launcher = ScriptedLauncher()
+        let supervisor = RuntimeSupervisor(
+            launch: launch,
+            launcher: launcher,
+            health: ScriptedHealth(results: [.down]),
+            pidStore: MemoryPidStore(),
+            clock: ScriptedClock(),
+            pollInterval: 0
+        )
+        await supervisor.start()
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .down)
+        XCTAssertTrue(launcher.started.isEmpty)
+    }
+
+    func testStalePidIsKilledBeforeReuseDecision() async {
+        let launcher = ScriptedLauncher()
+        launcher.alive.insert(42)
+        launcher.ourPids.insert(42)
+        let pids = MemoryPidStore()
+        pids.record = RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true)
+        let health = ScriptedHealth(results: [.down, .down, .up])
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: health,
+            pids: pids,
+            clock: ScriptedClock()
+        )
+        await supervisor.start()
+        XCTAssertEqual(launcher.terminated, [42])
+        XCTAssertNotEqual(pids.record?.pid, 42)
+        XCTAssertEqual(launcher.started.count, 1)
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .up)
+        await supervisor.stop()
+    }
+
+    func testForeignPidIsLeftAlone() async {
+        let launcher = ScriptedLauncher()
+        launcher.alive.insert(42)
+        let pids = MemoryPidStore()
+        pids.record = RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true)
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: ScriptedHealth(results: [.up]),
+            pids: pids,
+            clock: ScriptedClock()
+        )
+        await supervisor.start()
+        XCTAssertTrue(launcher.terminated.isEmpty)
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertNil(pids.record)
+        XCTAssertFalse(await supervisor.isOwningProcess)
+        await supervisor.stop()
+        XCTAssertTrue(launcher.terminated.isEmpty)
+    }
+
+    func testDeadPidFileIsClearedAndHealthyPortIsReused() async {
+        let launcher = ScriptedLauncher()
+        let pids = MemoryPidStore()
+        pids.record = RuntimePidRecord(pid: 77, processGroup: 77, leadsGroup: true)
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: ScriptedHealth(results: [.up]),
+            pids: pids,
+            clock: ScriptedClock()
+        )
+        await supervisor.start()
+        XCTAssertTrue(launcher.terminated.isEmpty)
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertNil(pids.record)
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .up)
+        XCTAssertFalse(await supervisor.isOwningProcess)
+    }
+
+    func testLauncherWritesLogAndStopsSleep() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-launch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let launcher = DarwinRuntimeLauncher()
+        let log = dir.appendingPathComponent("llama-server.log").path
+        let echoed = try launcher.start(RuntimeProcessSpec(
+            executable: "/bin/echo",
+            arguments: ["runtime-supervisor"],
+            logFile: log
+        ))
+        let echoDeadline = Date().addingTimeInterval(3)
+        while launcher.isAlive(echoed.pid), Date() < echoDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertFalse(launcher.isAlive(echoed.pid))
+        var text = ""
+        let logDeadline = Date().addingTimeInterval(2)
+        repeat {
+            text = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+            if text.contains("runtime-supervisor") { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while Date() < logDeadline
+        XCTAssertTrue(text.contains("/bin/echo"))
+        XCTAssertTrue(text.contains("runtime-supervisor"))
+
+        let slept = try launcher.start(RuntimeProcessSpec(
+            executable: "/bin/sleep",
+            arguments: ["30"],
+            logFile: log
+        ))
+        XCTAssertTrue(launcher.isAlive(slept.pid))
+        XCTAssertTrue(launcher.isOurServer(pid: slept.pid, executable: "/bin/sleep"))
+        XCTAssertEqual(slept.processGroup, slept.pid)
+        XCTAssertTrue(slept.leadsGroup)
+        XCTAssertEqual(getpgid(slept.pid), slept.pid)
+        launcher.terminate(pid: slept.pid, processGroup: slept.processGroup, leadsGroup: slept.leadsGroup)
+        let sleepDeadline = Date().addingTimeInterval(3)
+        while launcher.isAlive(slept.pid), Date() < sleepDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertFalse(launcher.isAlive(slept.pid))
+    }
+}
+
+private func sampleLaunch() -> RuntimeLaunch {
+    RuntimeLaunch.resolve(
+        environment: [:],
+        homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+        dataDirectory: "/tmp/cookie-data",
+        recordsStablePid: false
+    )
+}
+
+private func makeSupervisor(
+    launcher: ScriptedLauncher,
+    health: any RuntimeHealthChecking,
+    pids: MemoryPidStore,
+    clock: ScriptedClock
+) -> RuntimeSupervisor {
+    RuntimeSupervisor(
+        launch: sampleLaunch(),
+        launcher: launcher,
+        health: health,
+        pidStore: pids,
+        clock: clock,
+        pollInterval: 0
+    )
+}
+
+private final class ScriptedClock: RuntimeClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sleeps: [Double] = []
+
+    func sleep(seconds: Double) async {
+        if seconds > 0 {
+            lock.lock()
+            sleeps.append(seconds)
+            lock.unlock()
+        }
+        await Task.yield()
+    }
+
+    func recorded() -> [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return sleeps
+    }
+}
+
+private final class ScriptedHealth: RuntimeHealthChecking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [RuntimeProbe]
+
+    init(results: [RuntimeProbe]) {
+        self.results = results
+    }
+
+    func probe(port: Int) async -> RuntimeProbe {
+        lock.lock()
+        defer { lock.unlock() }
+        if results.isEmpty { return .down }
+        if results.count == 1 { return results[0] }
+        return results.removeFirst()
+    }
+}
+
+private final class LivingHealth: RuntimeHealthChecking, @unchecked Sendable {
+    let launcher: ScriptedLauncher
+
+    init(launcher: ScriptedLauncher) {
+        self.launcher = launcher
+    }
+
+    func probe(port: Int) async -> RuntimeProbe {
+        launcher.hasLivingProcess ? .up : .down
+    }
+}
+
+private final class MemoryPidStore: RuntimePidStoring, @unchecked Sendable {
+    var record: RuntimePidRecord?
+
+    func load() -> RuntimePidRecord? { record }
+
+    func save(_ record: RuntimePidRecord) {
+        self.record = record
+    }
+
+    func remove() {
+        record = nil
+    }
+}
+
+private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var started: [RuntimeProcessSpec] = []
+    private(set) var terminated: [Int32] = []
+    var alive: Set<Int32> = []
+    var ourPids: Set<Int32> = []
+    var deathsRemaining: Int
+    var failStarts: Int
+    private var nextPid: Int32 = 100
+
+    init(deathsRemaining: Int = 0, failStarts: Int = 0) {
+        self.deathsRemaining = deathsRemaining
+        self.failStarts = failStarts
+    }
+
+    var hasLivingProcess: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !alive.isEmpty
+    }
+
+    func start(_ spec: RuntimeProcessSpec) throws -> OwnedProcess {
+        lock.lock()
+        defer { lock.unlock() }
+        if failStarts > 0 {
+            failStarts -= 1
+            throw RuntimeSpawnError.failed("spawn")
+        }
+        let pid = nextPid
+        nextPid += 1
+        started.append(spec)
+        ourPids.insert(pid)
+        if deathsRemaining > 0 {
+            deathsRemaining -= 1
+        } else {
+            alive.insert(pid)
+        }
+        return OwnedProcess(pid: pid, processGroup: pid, leadsGroup: true)
+    }
+
+    func isAlive(_ pid: Int32) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return alive.contains(pid)
+    }
+
+    func terminate(pid: Int32, processGroup: Int32, leadsGroup: Bool) {
+        lock.lock()
+        terminated.append(pid)
+        alive.remove(pid)
+        alive.remove(processGroup)
+        lock.unlock()
+    }
+
+    func reap(_ pid: Int32) -> Int32? {
+        isAlive(pid) ? nil : 1
+    }
+
+    func isOurServer(pid: Int32, executable: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ourPids.contains(pid) && executable == RuntimeLaunch.defaultBinary
     }
 }
 

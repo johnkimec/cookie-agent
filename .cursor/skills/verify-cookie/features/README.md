@@ -18,7 +18,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - Start every recipe from the baseline unless its preconditions say otherwise.
 - Treat every command as literal. Keep quoted names and flags unchanged.
 - Drive the core with `.cursor/skills/verify-cookie/bin/drive-core`.
-- On macOS, drive the menu and popup with `.cursor/skills/verify-cookie/bin/drive-mac` and the accessibility identifiers in the feature files (`cookie.menu.ask`, `cookie.popup.input`, and the labels `Ask Cookie…`, `Local-only mode`, `Quit Cookie`, `Cookie, thinking`). `drive-core` does not launch the GUI. Mac proof is pending until that recipe's evidence is captured. Do not click by coordinate.
+- On macOS, drive the menu and popup with `.cursor/skills/verify-cookie/bin/drive-mac` and the accessibility identifiers in the feature files (`cookie.menu.ask`, `cookie.popup.input`, and the labels `Ask Cookie…`, `Local-only mode`, `Quit Cookie`, `Cookie, thinking`). `drive-core` does not launch the GUI. The default `drive-mac` mode uses the fake core. `drive-mac chat --runtime real` drives the real core and `llama-server`. Mac proof is pending until that recipe's evidence is captured. Do not click by coordinate.
 - One short-lived core per drive. It exits on `shutdown`. `--core real` also stops its stub.
 - Restore nothing in the user's home directory. Neither core writes files there in M0. The real core keeps history in memory.
 - Do not remove proof artifacts during cleanup.

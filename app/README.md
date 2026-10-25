@@ -2,7 +2,7 @@
 
 Swift shell for Cookie. macOS 14 or later. Swift 6.
 
-The shell is a non-sandboxed menu-bar app. It owns the popup and spawns the core. It does not supervise `llama-server`. The core today is the fake core.
+The shell is a non-sandboxed menu-bar app. It owns the popup, spawns the core, and supervises `llama-server` when the core is the real one. The default core command is `pnpm --filter @cookie-agent/core start`. `COOKIE_CORE_COMMAND` can still select the fake core, and that path does not launch `llama-server`.
 
 | Target | What it is |
 | --- | --- |
@@ -26,9 +26,11 @@ export COOKIE_CORE_COMMAND="pnpm --filter @cookie-agent/core fake-core"
 "dist/Cookie Agent.app/Contents/MacOS/CookieAgent"
 ```
 
-`COOKIE_CORE_COMMAND` is optional. The default is that same `pnpm` invocation, split on whitespace, run via `/usr/bin/env`. `COOKIE_CORE_CWD` defaults to the repo root when `pnpm-workspace.yaml` can be found by walking up from the working directory.
+`COOKIE_CORE_COMMAND` is optional. When it is unset, the shell runs `pnpm --filter @cookie-agent/core start` (the `start` script in `core/package.json`, `src/index.ts`) via `/usr/bin/env`. Set it to `pnpm --filter @cookie-agent/core fake-core` for the canned core. `COOKIE_CORE_CWD` defaults to the repo root when `pnpm-workspace.yaml` can be found by walking up from the working directory.
 
-If `COOKIE_DATA_DIR` is unset, the shell creates a directory under the temporary directory and passes that to the child. It does not create `~/Library/Application Support/Cookie`. That temporary default moves to Application Support when memory lands. If `COOKIE_LLAMA_PORT` is unset or empty, the shell leaves it unset. The core then uses the product default `8080`. Verification must export `18080` itself. An explicit port, including `8080`, is passed through.
+If `COOKIE_DATA_DIR` is unset, the shell creates a directory under the temporary directory and passes that to the child. It does not create `~/Library/Application Support/Cookie`. That temporary default moves to Application Support when memory lands. If `COOKIE_LLAMA_PORT` is unset or empty, the shell leaves it unset for the core, and the runtime supervisor uses `8080`. Verification that uses the fake core must export `18080` itself. An explicit port, including `8080`, is passed through.
+
+With the real core, the shell launches `llama-server` unless `GET http://127.0.0.1:$port/health` is already healthy. The command is `llama-server -m <model> --host 127.0.0.1 --port <port> -c 32768 -np 1 -ngl 99 -fa on --jinja --metrics`. The binary defaults to `/opt/homebrew/bin/llama-server` (`COOKIE_LLAMA_SERVER` overrides it). The model defaults to `~/cookie-runtime/models/Qwen3.6-35B-A3B-Q4_K_M.gguf` (`COOKIE_MODEL_PATH` overrides it). Stdout and stderr append to `<dataDir>/logs/llama-server.log`. The pid and process group are recorded in `<dataDir>/logs/llama-server.pid`. When `COOKIE_DATA_DIR` was unset, the same record is also written to `~/cookie-runtime/run/llama-server-<port>.pid` so the next launch can stop an orphan. A crash restarts with backoff (1s, then 2s). The third failure in a row sets runtime status to `down`. Quit terminates a server this app started. A healthy server it did not start is left running.
 
 `swift test --package-path app` builds the tests. `swift run --package-path app CookieAgent` runs the same executable without the bundle. The bundle's display name is Cookie. The file name is `Cookie Agent.app`.
 
@@ -48,6 +50,7 @@ Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another ap
 | Mascot | `cookie.popup.mascot` | `Cookie, listening`, `Cookie, thinking`, `Cookie, talking`, or `Cookie, offline` |
 | Send mark | `cookie.popup.send` | `⏎` |
 | Refusal line | `cookie.popup.refusal` | `Cookie's model isn't ready yet.` or `Cookie's still answering.` |
+| Loading line | `cookie.popup.loading` | `Loading the model…` |
 | You turn | `cookie.turn.you.<n>` | `you` |
 | Cookie turn | `cookie.turn.cookie.<n>` | `cookie` |
 | Badge | `cookie.badge.on-device.<n>` | `on-device` |
@@ -58,4 +61,4 @@ The Mac recipe is `.cursor/skills/verify-cookie/bin/drive-mac`. It does not run 
 
 ## M0 scope
 
-The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no cancel control, no screen chip, and no llama-server supervisor. Escape closes the popup and does not cancel a stream.
+The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no cancel control and no screen chip. While `runtime.status` is `loading`, Send is disabled and the popup shows `Loading the model…` (`cookie.popup.loading`) instead of the refusal line. A `chat.send` error `-32002` while the runtime is not `down` is that loading state. Once the runtime is `up`, the menu status line includes the model name (`Qwen3.6` for `Qwen3.6-35B-A3B`). Escape closes the popup and does not cancel a stream. `Loading the model…` is placeholder copy pending John's review.

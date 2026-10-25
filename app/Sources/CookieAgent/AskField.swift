@@ -206,6 +206,7 @@ struct IdentifiedText: NSViewRepresentable {
 struct IdentifiedButton: NSViewRepresentable {
     var title: String
     var identifier: String
+    var enabled: Bool = true
     var action: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -218,6 +219,7 @@ struct IdentifiedButton: NSViewRepresentable {
         button.bezelStyle = .inline
         button.isBordered = false
         button.font = .systemFont(ofSize: NSFont.systemFontSize)
+        button.isEnabled = enabled
         button.setAccessibilityElement(true)
         button.setAccessibilityIdentifier(identifier)
         button.setAccessibilityLabel(title)
@@ -227,6 +229,7 @@ struct IdentifiedButton: NSViewRepresentable {
     func updateNSView(_ button: NSButton, context: Context) {
         context.coordinator.action = action
         button.title = title
+        button.isEnabled = enabled
         button.setAccessibilityIdentifier(identifier)
         button.setAccessibilityLabel(title)
     }

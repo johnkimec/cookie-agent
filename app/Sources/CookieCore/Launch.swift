@@ -6,7 +6,9 @@ public struct CoreLaunch: Equatable, Sendable {
     public var workingDirectory: URL
     public var environment: [String: String]
 
-    public static let defaultCommand = "pnpm --filter @cookie-agent/core fake-core"
+    /// `core/package.json` script `start` (`src/index.ts`). `fake-core` is
+    /// selected only by `COOKIE_CORE_COMMAND`.
+    public static let defaultCommand = "pnpm --filter @cookie-agent/core start"
     /// Product default is 8080, applied by the core when this variable is
     /// absent (contract decision 8). The shell must not substitute the
     /// verification port 18080. Verification exports 18080 itself.
@@ -67,6 +69,12 @@ public struct CoreLaunch: Equatable, Sendable {
             dir = parent
         }
         return nil
+    }
+
+    /// The fake core does not dial llama-server. The shell starts the
+    /// runtime only for the real core.
+    public var supervisesRuntime: Bool {
+        !arguments.contains { $0.contains("fake-core") }
     }
 
     public func prepareDataDirectory() throws {

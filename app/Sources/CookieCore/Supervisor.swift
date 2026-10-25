@@ -91,6 +91,17 @@ public actor CoreSupervisor {
         return result.result
     }
 
+    /// Shell → core notification. The core does not echo it. `loading` and
+    /// `up` include `modelId`. `down` omits it.
+    public func pushRuntime(_ status: RuntimeStatus) throws {
+        let message = WireMessage.runtimeStatus(RpcNotification(
+            method: "runtime.status",
+            params: status
+        ))
+        let line = try encodeLine(message)
+        try transport.writeLine(line)
+    }
+
     public func shutdown(timeout seconds: Double = 5) async throws {
         let id = nextRequestID()
         let message = WireMessage.shutdownRequest(RpcRequest(

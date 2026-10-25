@@ -20,7 +20,11 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     private var supervisor: CoreSupervisor?
     private var transport: ProcessTransport?
+    private var runtimeSupervisor: RuntimeSupervisor?
     private var eventsTask: Task<Void, Never>?
+    private var runtimeEventsTask: Task<Void, Never>?
+    private var coreReady = false
+    private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
 
     var menuGlyphState: MenuGlyph {
@@ -72,10 +76,35 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self?.handle(event)
             }
         }
+        if launch.supervisesRuntime {
+            let providedData = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
+            let runtimeLaunch = RuntimeLaunch.resolve(
+                environment: launch.environment,
+                homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+                dataDirectory: launch.environment["COOKIE_DATA_DIR"] ?? "",
+                recordsStablePid: !providedData
+            )
+            let runtime = RuntimeSupervisor.live(launch: runtimeLaunch)
+            self.runtimeSupervisor = runtime
+            self.runtime = RuntimeStatus(state: .loading, modelId: runtimeLaunch.modelId)
+            log(
+                "llama=\(runtimeLaunch.executable) \(runtimeLaunch.arguments.joined(separator: " ")) log=\(runtimeLaunch.logFile)"
+            )
+            let runtimeEvents = runtime.events
+            runtimeEventsTask = Task { [weak self] in
+                for await status in runtimeEvents {
+                    self?.applySupervisorStatus(status)
+                }
+            }
+            Task {
+                await runtime.start()
+            }
+        }
         Task { [weak self] in
             do {
                 try await supervisor.start()
                 _ = try await supervisor.initialize()
+                self?.markCoreReady()
             } catch {
                 self?.log("core: \(error)")
             }
@@ -85,6 +114,14 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func stopCore() {
         transport?.stop()
         eventsTask?.cancel()
+        runtimeEventsTask?.cancel()
+        let runtime = runtimeSupervisor
+        let gate = ExitGate()
+        Task {
+            await runtime?.stop()
+            gate.signal()
+        }
+        gate.wait()
     }
 
     func togglePopup() {
@@ -138,8 +175,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 let ack = try await supervisor.sendChat(conversationId: conversationID, text: body)
                 self?.noteAck(ack.messageId)
             } catch {
-                self?.log("send: \(error)")
-                self?.rollback(body)
+                self?.handleSendFailure(error, restoring: body)
             }
         }
     }
@@ -155,6 +191,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         Task { [weak self] in
             try? await self?.supervisor?.shutdown()
             self?.transport?.stop()
+            await self?.runtimeSupervisor?.stop()
             DispatchQueue.main.async {
                 NSApp.terminate(nil)
             }
@@ -186,9 +223,11 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             var next = self.conversation
             switch event {
             case .runtime(let status):
-                next.noteRuntime(status.state)
-                self.conversation = next
-                self.runtime = status
+                if self.runtimeSupervisor == nil {
+                    next.noteRuntime(status.state)
+                    self.conversation = next
+                    self.runtime = status
+                }
             case .delta(let delta):
                 next.applyDelta(delta)
                 self.conversation = next
@@ -202,8 +241,100 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
+    private func markCoreReady() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.coreReady = true
+            self.flushPush()
+        }
+    }
+
+    private func applySupervisorStatus(_ status: RuntimeStatus) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            var next = self.conversation
+            next.noteRuntime(status.state)
+            self.conversation = next
+            self.runtime = status
+            self.pendingPush = status
+            self.onLayout?()
+            self.flushPush()
+        }
+    }
+
+    private func flushPush() {
+        guard coreReady, let status = pendingPush, let supervisor else { return }
+        pendingPush = nil
+        Task {
+            do {
+                try await supervisor.pushRuntime(status)
+            } catch {
+                self.log("runtime push: \(error)")
+            }
+        }
+    }
+
+    private func handleSendFailure(_ error: Error, restoring text: String) {
+        let code: Int?
+        if let core = error as? CoreError, case .rpc(let body) = core {
+            code = body.code
+        } else {
+            code = nil
+        }
+        let description = String(describing: error)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch presentChatSendFailure(code: code, runtime: self.runtime.state) {
+            case .stillLoading:
+                var next = self.conversation
+                next.rollbackSend(restoredText: text)
+                next.refusal = nil
+                self.conversation = next
+                if self.runtime.state != .loading {
+                    self.runtime = RuntimeStatus(
+                        state: .loading,
+                        modelId: self.runtime.modelId ?? defaultModelID
+                    )
+                }
+                self.onLayout?()
+                self.confirmRuntime()
+            case .notReady:
+                var next = self.conversation
+                next.rollbackSend(restoredText: text)
+                next.refusal = .notReady
+                self.conversation = next
+                self.onLayout?()
+            case .failed:
+                self.log("send: \(description)")
+                self.rollback(text)
+            }
+        }
+    }
+
+    private func confirmRuntime() {
+        guard let runtimeSupervisor else { return }
+        Task { [weak self] in
+            let status = await runtimeSupervisor.confirm()
+            self?.applySupervisorStatus(status)
+        }
+    }
+
     private func log(_ message: String) {
         let line = "cookie-shell: \(message)\n"
         FileHandle.standardError.write(Data(line.utf8))
+    }
+}
+
+/// `DispatchSemaphore` is not `Sendable`. Quit waits on the main thread
+/// while the runtime actor stops the server.
+private final class ExitGate: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    func signal() {
+        semaphore.signal()
+    }
+
+    func wait() {
+        _ = semaphore.wait(timeout: .now() + 2)
     }
 }

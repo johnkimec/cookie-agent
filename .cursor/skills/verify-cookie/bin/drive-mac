@@ -9,20 +9,42 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
-feature="${1:-all}"
-if [[ "$feature" == "--evidence" ]]; then
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--evidence dir]" >&2
+usage() {
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
-fi
+}
 
+feature="all"
+runtime="fake"
 evidence=""
-if [[ "${2:-}" == "--evidence" ]]; then
-  evidence="${3:-}"
-fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    menu-bar-icon|hotkey-popup|chat|all)
+      feature="$1"
+      ;;
+    --runtime)
+      [[ $# -ge 2 ]] || usage
+      runtime="$2"
+      shift
+      if [[ "$runtime" != "fake" && "$runtime" != "real" ]]; then
+        usage
+      fi
+      ;;
+    --evidence)
+      [[ $# -ge 2 ]] || usage
+      evidence="$2"
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+  shift
+done
 
 port="${COOKIE_LLAMA_PORT:-}"
 data="${COOKIE_DATA_DIR:-}"
-if [[ "$port" != "18080" ]]; then
+if [[ "$runtime" == "fake" && "$port" != "18080" ]]; then
   printf '%s\n' "not-ok" "COOKIE_LLAMA_PORT must be 18080"
   exit 1
 fi
@@ -40,9 +62,13 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 export COOKIE_DATA_DIR="$data"
-export COOKIE_LLAMA_PORT=18080
 export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
-export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+if [[ "$runtime" == "real" ]]; then
+  unset COOKIE_CORE_COMMAND
+else
+  export COOKIE_LLAMA_PORT=18080
+  export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+fi
 
 log() { printf '%s\n' "$*"; }
 
@@ -490,7 +516,40 @@ fi
 log "menu"
 cat /tmp/cookie-drive-mac-menu.txt
 
-python3 - <<'PY' || fail "menu strings"
+if [[ "$runtime" == "real" ]]; then
+  log "wait for runtime up"
+  ready_up=""
+  for _ in $(seq 1 120); do
+    if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+      if python3 - <<'PY'
+import pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-menu.txt").read_text()
+if "fake-local" in text or "starting model" in text or "model offline" in text:
+    sys.exit(1)
+required = ["Ask Cookie…", "Local-only mode", "Quit Cookie", "🐾 Cookie · on-device · "]
+missing = [item for item in required if item not in text]
+if missing:
+    sys.exit(1)
+sys.exit(0)
+PY
+      then
+        ready_up=1
+        break
+      fi
+    fi
+    sleep 1
+  done
+  if [[ -z "$ready_up" ]]; then
+    log "not-ok"
+    log "runtime did not reach up within 120s"
+    cat /tmp/cookie-drive-mac-menu.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-menu.err 2>/dev/null || true
+    exit 1
+  fi
+  log "runtime up"
+  cat /tmp/cookie-drive-mac-menu.txt
+else
+  python3 - <<'PY' || fail "menu strings"
 import pathlib, sys
 text = pathlib.Path("/tmp/cookie-drive-mac-menu.txt").read_text()
 required = ["Ask Cookie…", "Local-only mode", "Quit Cookie", "🐾 Cookie · on-device · fake-local"]
@@ -500,13 +559,14 @@ if missing:
     sys.exit(1)
 print("menu strings ok")
 PY
+fi
 
 drive_popup=0
 drive_chat=0
-if [[ "$feature" == "hotkey-popup" || "$feature" == "chat" || "$feature" == "all" ]]; then
+if [[ "$feature" == "hotkey-popup" || "$feature" == "chat" || "$feature" == "all" || "$runtime" == "real" ]]; then
   drive_popup=1
 fi
-if [[ "$feature" == "chat" || "$feature" == "all" ]]; then
+if [[ "$feature" == "chat" || "$feature" == "all" || "$runtime" == "real" ]]; then
   drive_chat=1
 fi
 
@@ -533,14 +593,20 @@ if [[ "$drive_chat" == "1" ]]; then
   log "send chat"
   send_chat
   turn_line=""
-  for _ in $(seq 1 40); do
+  chat_tries=40
+  chat_sleep=0.25
+  if [[ "$runtime" == "real" ]]; then
+    chat_tries=120
+    chat_sleep=1
+  fi
+  for _ in $(seq 1 "$chat_tries"); do
     turn_line="$(cookie_turn_value || true)"
     case "$turn_line" in
       cookie.turn.cookie.*)
         break
         ;;
     esac
-    sleep 0.25
+    sleep "$chat_sleep"
   done
   if [[ "$turn_line" != cookie.turn.cookie.* ]]; then
     dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
@@ -550,6 +616,20 @@ if [[ "$drive_chat" == "1" ]]; then
   fi
   log "chat $turn_line"
   printf '%s\n' "$turn_line" > /tmp/cookie-drive-mac-chat.txt
+  python3 - "$turn_line" "$runtime" <<'PY' || fail "reply text"
+import sys
+line, runtime = sys.argv[1], sys.argv[2]
+fake = "I'm here. This reply is from the fake core, with no model loaded."
+stub = "Hello. This reply is from the local stub, on device."
+text = line.split("\t", 1)[1].strip() if "\t" in line else ""
+if not text or text == "cookie":
+    print("empty reply")
+    sys.exit(1)
+if runtime == "real" and (text == fake or text == stub or fake in text or stub in text):
+    print("canned reply")
+    sys.exit(1)
+print("reply ok")
+PY
   shot="/tmp/cookie-drive-mac-popup.png"
   screencapture -x "$shot"
   if [[ ! -s "$shot" ]]; then
@@ -561,9 +641,10 @@ fi
 if [[ -n "$evidence" ]]; then
   mkdir -p "$evidence"
   {
-    printf '%s\n' "drive-mac $feature"
+    printf '%s\n' "drive-mac $feature --runtime $runtime"
     printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
-    printf '%s\n' "COOKIE_LLAMA_PORT=$COOKIE_LLAMA_PORT"
+    printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+    printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND:-}"
   } > "$evidence/command.txt"
   cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
   if [[ -f /tmp/cookie-drive-mac-ax.txt ]]; then

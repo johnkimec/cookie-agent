@@ -13,6 +13,7 @@ public enum CookieAX {
     public static let popupMascot = "cookie.popup.mascot"
     public static let popupSend = "cookie.popup.send"
     public static let popupRefusal = "cookie.popup.refusal"
+    public static let popupLoading = "cookie.popup.loading"
     public static func turnYou(_ index: Int) -> String { "cookie.turn.you.\(index)" }
     public static func turnCookie(_ index: Int) -> String { "cookie.turn.cookie.\(index)" }
     public static func badge(_ index: Int) -> String { "cookie.badge.on-device.\(index)" }
@@ -36,6 +37,8 @@ public enum CookieCopy {
     public static let modelNotReady = "Cookie's model isn't ready yet."
     /// Placeholder refusal copy, pending John's review.
     public static let stillAnswering = "Cookie's still answering."
+    /// Placeholder loading copy, pending John's review.
+    public static let modelLoading = "Loading the model…"
 }
 
 public enum PopupLayout {
@@ -126,6 +129,32 @@ public func popupPoseVoiceOver(_ pose: PopupPose) -> String {
     case .offline:
         return "Cookie, offline"
     }
+}
+
+public let runtimeUnavailableCode = -32002
+
+public enum ChatSendFailurePresentation: Equatable, Sendable {
+    /// `-32002` while the runtime is not `down`. Cold load, not a failed send.
+    case stillLoading
+    case notReady
+    case failed
+}
+
+public func presentChatSendFailure(code: Int?, runtime: RuntimeState) -> ChatSendFailurePresentation {
+    if code == runtimeUnavailableCode {
+        if runtime == .down { return .notReady }
+        return .stillLoading
+    }
+    return .failed
+}
+
+public func sendEnabled(runtime: RuntimeState) -> Bool {
+    runtime != .loading
+}
+
+public func popupLoadingLine(runtime: RuntimeState) -> String? {
+    guard runtime == .loading else { return nil }
+    return CookieCopy.modelLoading
 }
 
 public func displayModelID(_ modelID: String?) -> String? {

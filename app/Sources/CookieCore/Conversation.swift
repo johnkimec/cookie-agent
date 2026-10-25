@@ -89,7 +89,7 @@ public struct PopupConversation: Equatable, Sendable {
             return .refused(.tooLong)
         }
         if runtime != .up {
-            refusal = .notReady
+            refusal = runtime == .loading ? nil : .notReady
             return .refused(.notReady)
         }
         if replyInFlight {
