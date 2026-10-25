@@ -2,16 +2,28 @@ import { readFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 
-const MIGRATION_SQL = readFileSync(
-  new URL("./migrations/001_initial.sql", import.meta.url),
-  "utf8",
-);
+const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
+  {
+    version: 1,
+    sql: readFileSync(
+      new URL("./migrations/001_initial.sql", import.meta.url),
+      "utf8",
+    ),
+  },
+  {
+    version: 2,
+    sql: readFileSync(
+      new URL("./migrations/002_meta.sql", import.meta.url),
+      "utf8",
+    ),
+  },
+];
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /**
  * Open a file database, turn on WAL and foreign keys, load sqlite-vec, and
- * apply migration 001 when PRAGMA user_version is 0.
+ * apply any migration newer than PRAGMA user_version.
  * A second open of the same file does not run the SQL again.
  */
 export function openMemoryDatabase(path: string): Database.Database {
@@ -25,15 +37,19 @@ export function openMemoryDatabase(path: string): Database.Database {
   db.loadExtension(sqliteVec.getLoadablePath());
 
   const version = Number(db.pragma("user_version", { simple: true }));
-  if (version === 0) {
-    const apply = db.transaction(() => {
-      db.exec(MIGRATION_SQL);
-      db.pragma(`user_version = ${SCHEMA_VERSION}`);
-    });
-    apply();
-  } else if (version !== SCHEMA_VERSION) {
+  if (version > SCHEMA_VERSION) {
     db.close();
     throw new Error(`unsupported schema user_version ${version}`);
+  }
+  const pending = MIGRATIONS.filter((migration) => migration.version > version);
+  if (pending.length > 0) {
+    const apply = db.transaction(() => {
+      for (const migration of pending) {
+        db.exec(migration.sql);
+        db.pragma(`user_version = ${migration.version}`);
+      }
+    });
+    apply();
   }
   return db;
 }

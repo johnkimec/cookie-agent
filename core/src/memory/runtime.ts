@@ -74,6 +74,7 @@ export function createMemoryRuntime(
   const vectors = options.vectors ?? new InMemoryVectorIndex();
   const slot = new ModelSlot();
   const sessions = new Set<string>();
+  const writtenUserTurns = new Map<string, string>();
   const state: MemoryToolState = { sourceTurnId: null };
   const factIds = sequentialIds("fact");
   const journalIds = sequentialIds("journal");
@@ -102,7 +103,7 @@ export function createMemoryRuntime(
     derived,
     embedder,
     vectors,
-    sessionIds: () => [...sessions],
+    sessionIds: () => store.listSessions().map((session) => session.id),
     readTurns: (sessionId) => store.recentTurns(sessionId, 10_000),
     now,
     timeZone,
@@ -119,9 +120,16 @@ export function createMemoryRuntime(
     localDay,
     timers: options.timers ?? systemTimers(),
     power: options.power,
+    sessionsToReflect: () =>
+      store.listSessions({ needsReflect: true }).map((session) => {
+        const latest = store.recentTurns(session.id, 1).at(-1);
+        return {
+          sessionId: session.id,
+          lastTurnAt: latest?.createdAt ?? null,
+        };
+      }),
     reflect: async (sessionId, signal) => {
-      reflector.bindSignal(signal);
-      await reflector.reflect(sessionId);
+      await reflector.reflect(sessionId, { signal });
     },
     consolidate: async (signal) => {
       consolidator.bindSignal(signal);
@@ -142,8 +150,7 @@ export function createMemoryRuntime(
     slot,
     onChatStarted(event) {
       scheduler.onChatStarted(event.conversationId);
-      state.sourceTurnId = userTurnId(event.messageId);
-      rememberTurn(store, sessions, {
+      const storedId = rememberTurn(store, sessions, {
         id: userTurnId(event.messageId),
         sessionId: event.conversationId,
         role: "user",
@@ -151,10 +158,23 @@ export function createMemoryRuntime(
         createdAt: now(),
         modelId,
       });
+      writtenUserTurns.set(event.messageId, storedId);
+      state.sourceTurnId = storedId;
+    },
+    storedUserTurnId(messageId) {
+      return writtenUserTurns.get(messageId);
     },
     onChatSettled(event) {
       state.sourceTurnId = null;
-      if (event.assistantText.length > 0) {
+      if (
+        event.assistantText.length > 0 &&
+        !latestTurnIs(
+          store,
+          event.conversationId,
+          "assistant",
+          event.assistantText,
+        )
+      ) {
         rememberTurn(store, sessions, {
           id: assistantTurnId(event.messageId),
           sessionId: event.conversationId,
@@ -232,7 +252,7 @@ function rememberTurn(
     createdAt: number;
     modelId: string | null;
   },
-): void {
+): string {
   if (!sessions.has(turn.sessionId)) {
     try {
       store.appendSession({
@@ -267,13 +287,34 @@ function rememberTurn(
   };
   try {
     store.appendTurn(record);
+    return record.id;
   } catch (error) {
     if (!alreadyExists(error)) {
       throw error;
     }
   }
+  const uniqueId = `${record.id}#${store.recentTurns(record.sessionId, 10_000).length + 1}`;
+  try {
+    store.appendTurn({ ...record, id: uniqueId });
+    return uniqueId;
+  } catch (error) {
+    if (!alreadyExists(error)) {
+      throw error;
+    }
+  }
+  return record.id;
 }
 
 function alreadyExists(error: unknown): boolean {
   return error instanceof Error && /already exists/.test(error.message);
+}
+
+function latestTurnIs(
+  store: MemoryStore,
+  sessionId: string,
+  role: "user" | "assistant",
+  content: string,
+): boolean {
+  const latest = store.recentTurns(sessionId, 1).at(-1);
+  return latest?.role === role && latest.content === content;
 }

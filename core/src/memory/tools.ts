@@ -180,6 +180,7 @@ async function forgetFact(
     const marker = tombstone(deps.ids(), fact, now);
     deps.derived.insertFact(marker);
     deps.derived.updateFact({ ...fact, supersededBy: marker.id });
+    await deps.vectors.delete([fact.id]);
     dropProfileFor(deps.derived, fact);
     forgotten.push(fact.id);
   }
@@ -270,7 +271,16 @@ export function tombstone(
 }
 
 function dropProfileFor(derived: DerivedMemoryStore, fact: FactRecord): void {
-  const next = derived.listProfile().filter((row) => row.value !== fact.text);
+  const next = derived.listProfile().filter((row) => {
+    if (row.value === fact.text) {
+      return false;
+    }
+    return !(
+      row.pinned &&
+      fact.sourceTurn !== null &&
+      row.sourceTurn === fact.sourceTurn
+    );
+  });
   derived.replaceProfile(next);
 }
 

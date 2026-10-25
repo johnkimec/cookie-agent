@@ -13,6 +13,12 @@ export interface VectorIndex {
     embedding: Float32Array,
   ): Promise<void>;
   knn(table: VectorTable, query: Float32Array, k: number): Promise<VectorHit[]>;
+  /**
+   * Drop these ids from every table. sqlite-vec's implementation is a
+   * later PR. The in-memory fake removes them so forget and rebuild
+   * do not leave stale hits.
+   */
+  delete(ids: string[]): Promise<void>;
 }
 
 function cosineDistance(left: Float32Array, right: Float32Array): number {
@@ -78,5 +84,17 @@ export class InMemoryVectorIndex implements VectorIndex {
         left.distance - right.distance || left.id.localeCompare(right.id),
     );
     return hits.slice(0, k);
+  }
+
+  async delete(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const drop = new Set(ids);
+    for (const rows of this.tables.values()) {
+      for (const id of drop) {
+        rows.delete(id);
+      }
+    }
   }
 }

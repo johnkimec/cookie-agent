@@ -26,6 +26,11 @@ export const m1AcPower: AcPower = {
   },
 };
 
+export interface ReflectCandidate {
+  sessionId: string;
+  lastTurnAt: number | null;
+}
+
 export interface IdleSchedulerOptions {
   slot: ModelSlot;
   derived: DerivedMemoryStore;
@@ -38,10 +43,16 @@ export interface IdleSchedulerOptions {
   timers?: TimerQueue;
   power?: AcPower;
   onError?: (error: unknown) => void;
+  /**
+   * Sessions from earlier runs that still need reflect.
+   * The timer does not end those sessions.
+   */
+  sessionsToReflect?: () => readonly ReflectCandidate[];
 }
 
 /**
  * Reflect waits `idleMs` after the last turn of a session.
+ * That wait does not end the session. A new `conversationId` does.
  * Consolidation runs on demand and on the first idle of each local day.
  * Neither runs while a chat holds the slot. A chat aborts the idle job.
  */
@@ -57,7 +68,9 @@ export class IdleScheduler {
   private readonly timers: TimerQueue;
   private readonly power: AcPower;
   private readonly onError: (error: unknown) => void;
+  private readonly sessionsToReflect: () => readonly ReflectCandidate[];
   private readonly pendingTimers = new Map<string, { clear: () => void }>();
+  private readonly dueSessions = new Set<string>();
   private chain: Promise<void> = Promise.resolve();
   private demand = false;
   private stopped = false;
@@ -74,23 +87,33 @@ export class IdleScheduler {
     this.timers = options.timers ?? systemTimers();
     this.power = options.power ?? m1AcPower;
     this.onError = options.onError ?? (() => undefined);
+    this.sessionsToReflect = options.sessionsToReflect ?? (() => []);
   }
 
   /** First idle of this process. Runs the daily job when it is due. */
   start(): void {
+    this.catchUpReflect();
     this.enqueue(() => this.runConsolidation());
   }
 
   onChatStarted(sessionId: string): void {
     this.pendingTimers.get(sessionId)?.clear();
     this.pendingTimers.delete(sessionId);
+    this.dueSessions.delete(sessionId);
   }
 
   onChatSettled(sessionId: string): void {
     if (this.stopped) {
       return;
     }
+    const due = [...this.dueSessions];
+    this.dueSessions.clear();
     this.arm(sessionId);
+    for (const id of due) {
+      if (id !== sessionId) {
+        this.arm(id);
+      }
+    }
     this.enqueue(() => this.runConsolidation());
   }
 
@@ -108,6 +131,7 @@ export class IdleScheduler {
       timer.clear();
     }
     this.pendingTimers.clear();
+    this.dueSessions.clear();
     this.slot.close();
   }
 
@@ -115,11 +139,29 @@ export class IdleScheduler {
     return this.chain;
   }
 
-  private arm(sessionId: string): void {
+  private catchUpReflect(): void {
+    for (const session of this.sessionsToReflect()) {
+      if (session.lastTurnAt === null) {
+        continue;
+      }
+      const wait = this.idleMs - (this.now() - session.lastTurnAt);
+      if (wait <= 0) {
+        this.enqueue(() => this.runReflect(session.sessionId));
+      } else {
+        this.arm(session.sessionId, wait);
+      }
+    }
+  }
+
+  private arm(sessionId: string, delay = this.idleMs): void {
     this.pendingTimers.get(sessionId)?.clear();
-    const handle = this.timers.set(this.idleMs, () => {
+    const handle = this.timers.set(delay, () => {
       this.pendingTimers.delete(sessionId);
-      if (this.stopped || this.slot.chatActive) {
+      if (this.stopped) {
+        return;
+      }
+      if (this.slot.chatActive) {
+        this.dueSessions.add(sessionId);
         return;
       }
       this.enqueue(() => this.runReflect(sessionId));
@@ -139,7 +181,11 @@ export class IdleScheduler {
   }
 
   private async runReflect(sessionId: string): Promise<void> {
-    if (this.stopped || this.slot.chatActive) {
+    if (this.stopped) {
+      return;
+    }
+    if (this.slot.chatActive) {
+      this.dueSessions.add(sessionId);
       return;
     }
     const held = await this.slot.acquireIdle("reflect");

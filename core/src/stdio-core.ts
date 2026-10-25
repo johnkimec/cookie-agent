@@ -6,8 +6,11 @@
 
 import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
+import { ChatLog } from "./memory/chat-log.ts";
+import { memoryDatabasePath } from "./memory/path.ts";
 import { createMemoryRuntime } from "./memory/runtime.ts";
 import { readReflectIdleMs, readTimeZone } from "./memory/schedule.ts";
+import { SqliteMemoryStore } from "./memory/sqlite-store.ts";
 import {
   createLlamaServerProvider,
   readLlamaPort,
@@ -21,22 +24,31 @@ export function startStdioCore(
   let thinking: boolean;
   let idleMs: number;
   let timeZone: string;
+  let store: SqliteMemoryStore;
   try {
     port = readLlamaPort(env);
     thinking = readThinking(env);
     idleMs = readReflectIdleMs(env);
     timeZone = readTimeZone(env);
+    store = SqliteMemoryStore.open(memoryDatabasePath(env));
   } catch (error) {
     const detail = error instanceof Error ? error.message : "bad config";
     process.stderr.write(`cookie-core: ${detail}\n`);
     process.exit(1);
   }
   const provider = createLlamaServerProvider({ port, thinking });
-  const memory = createMemoryRuntime({ provider, idleMs, timeZone });
+  const memory = createMemoryRuntime({
+    provider,
+    idleMs,
+    timeZone,
+    store,
+    derived: store,
+  });
   const core = new AgentCore({
     provider,
     watchIntervalMs: RUNTIME_WATCH_MS,
     memoryHost: memory.host,
+    history: new ChatLog(store),
   });
   memory.start();
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });

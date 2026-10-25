@@ -11,7 +11,8 @@ import {
   SYSTEM_PROMPT,
 } from "./identity.ts";
 import type { MemoryHost } from "./memory/host.ts";
-import { ConversationMemory } from "./memory.ts";
+import { userTurnId } from "./memory/runtime.ts";
+import { type ConversationHistory, ConversationMemory } from "./memory.ts";
 import { isAbortError } from "./model/ai-sdk-provider.ts";
 import type {
   ModelCompletion,
@@ -55,6 +56,7 @@ interface Flight {
   messageId: string;
   userText: string;
   sent: string[];
+  startedAt: number;
   cancelled: boolean;
   settled: boolean;
   abort: AbortController;
@@ -80,6 +82,11 @@ export interface AgentCoreOptions {
   emit?: (message: unknown) => void;
   log?: (line: string) => void;
   exit?: (code: number) => void;
+  /**
+   * Turn history. The stdio entry passes a SQLite `ChatLog`.
+   * Tests that omit it keep an in-memory stand-in.
+   */
+  history?: ConversationHistory;
   serverName?: string;
   serverVersion?: string;
 }
@@ -95,7 +102,7 @@ export class AgentCore {
   readonly probeTimeoutMs: number;
   private readonly now: () => number;
   private readonly provider: ModelProvider;
-  private readonly memory = new ConversationMemory();
+  private readonly history: ConversationHistory;
   private readonly memoryHost: MemoryHost | undefined;
   private readonly emitMessage: (message: unknown) => void;
   private readonly logLine: (line: string) => void;
@@ -120,6 +127,7 @@ export class AgentCore {
   constructor(options: AgentCoreOptions) {
     this.provider = options.provider;
     this.memoryHost = options.memoryHost;
+    this.history = options.history ?? new ConversationMemory();
     this.probeTimeoutMs = options.probeTimeoutMs ?? 1000;
     this.now = options.now ?? (() => Date.now());
     this.serverName = options.serverName ?? CORE_SERVER_NAME;
@@ -398,6 +406,7 @@ export class AgentCore {
       messageId,
       userText: body.text,
       sent: [],
+      startedAt: this.now(),
       cancelled: false,
       settled: false,
       abort: new AbortController(),
@@ -561,7 +570,7 @@ export class AgentCore {
     try {
       stream = this.provider.streamChat({
         system: this.memoryHost?.systemPrompt ?? SYSTEM_PROMPT,
-        messages: this.memory.messagesFor(
+        messages: this.history.messagesFor(
           flight.conversationId,
           flight.userText,
         ),
@@ -655,11 +664,7 @@ export class AgentCore {
       return;
     }
     this.inflight = null;
-    this.memory.commit(
-      flight.conversationId,
-      flight.userText,
-      flight.sent.join(""),
-    );
+    this.commitFlight(flight, usage);
     this.settleChat(flight, finishReason);
     this.emit(this.doneMessage(flight, finishReason, usage));
   }
@@ -671,11 +676,7 @@ export class AgentCore {
     flight.cancelled = true;
     this.inflight = null;
     flight.abort.abort();
-    this.memory.commit(
-      flight.conversationId,
-      flight.userText,
-      flight.sent.join(""),
-    );
+    this.commitFlight(flight, ZERO_USAGE);
     this.settleChat(flight, "cancelled");
     // The aborted request does not return a usage payload. See lessons.
     this.emit(this.doneMessage(flight, "cancelled", ZERO_USAGE));
@@ -757,7 +758,27 @@ export class AgentCore {
     this.emitMessage(message);
   }
 
+  private commitFlight(flight: Flight, usage: ModelUsage): void {
+    try {
+      this.history.commit({
+        conversationId: flight.conversationId,
+        userText: flight.userText,
+        assistantText: flight.sent.join(""),
+        modelId: this.provider.modelId,
+        usage,
+        latencyMs: Math.max(0, this.now() - flight.startedAt),
+        userTurnId:
+          this.memoryHost?.storedUserTurnId?.(flight.messageId) ??
+          userTurnId(flight.messageId),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "memory failed";
+      this.logLine(`memory: ${detail}`);
+    }
+  }
+
   private flushAndExit(code: number): void {
+    this.history.close();
     if (!this.ownsStdio) {
       this.finish(code);
       return;

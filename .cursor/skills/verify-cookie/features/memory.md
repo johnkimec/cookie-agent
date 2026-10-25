@@ -4,7 +4,7 @@ John quits and comes back, and Cookie still knows what he said. He can ask about
 
 ## Sub-features
 
-- `memory-persist` keeps the conversation after quit and relaunch. `status: planned`
+- `memory-persist` keeps the conversation after quit and relaunch. `status: verified (verify-evidence/m1-memory-persist/transcript.jsonl)`
 - `memory-recall` answers story #2 from a past session. `status: planned`
 - `memory-remember` stores "Remember my ECE midterm is Friday" and recalls it in a new session. `status: planned`
 - `memory-forget` drops "Forget the midterm" from later answers. `status: planned`
@@ -36,7 +36,7 @@ Preconditions:
 - Evidence for a sub-feature goes in `verify-evidence/m1-<sub-feature>/`: `command.txt`, `transcript.jsonl`, and `db.txt` (a read-only dump of the relevant tables).
 - Every drive below asserts `sockets loopback` and `egress = 0` on every stored turn. That assertion is `memory-no-egress`. The real-Qwen eval run checks the same.
 
-- **Persist.** Run `.cursor/skills/verify-cookie/bin/drive-core drive memory-persist --evidence verify-evidence/m1-memory-persist --core real`. The drive chats, sends `shutdown`, starts a new core on the same data dir, and asks again. Exit code is 0. `db.txt` shows the `turns` rows. Leave `memory-persist` `planned` until that evidence exists.
+- **Persist.** Run `.cursor/skills/verify-cookie/bin/drive-core drive memory-persist --evidence verify-evidence/m1-memory-persist --core real`. The drive uses the built-in stub on port `18080`. It sends a code word, shuts the core down, starts a new core on the same data dir, and asks for the word. The second prompt does not contain the word. Exit code is 0. Stdout contains `persist true` and `egress 0`. `db.txt` shows the `turns` rows, every `egress` is 0, and `ended_at` is null. `transcript.jsonl` has two `initialize` requests. Verified on Linux against the stub. The Mac relaunch of the app is still a later drive.
 - **Recall.** Run `.cursor/skills/verify-cookie/bin/drive-core drive memory-recall --evidence verify-evidence/m1-memory-recall --core real` against a seeded fixture database. The stub records the request body, and the drive asserts the seeded turn is in the prompt. On the Mac the same drive runs against real Qwen and the answer contains the fact. Leave `memory-recall` `planned` until that evidence exists.
 - **Remember.** Run `.cursor/skills/verify-cookie/bin/drive-core drive memory-remember --evidence verify-evidence/m1-memory-remember --core real`. The drive says to remember, starts a new conversation, and asks. Exit code is 0. `db.txt` shows a pinned fact with `source_turn`. Leave `memory-remember` `planned` until that evidence exists.
 - **Forget.** Run `.cursor/skills/verify-cookie/bin/drive-core drive memory-forget --evidence verify-evidence/m1-memory-forget --core real`. The drive forgets, then asks. The fact is superseded and absent from the retrieved block. Leave `memory-forget` `planned` until that evidence exists.
@@ -47,10 +47,13 @@ Preconditions:
 
 ## Gotchas
 
-- None of these drives exist yet. `.cursor/skills/verify-cookie/bin/drive-core drive memory-persist --evidence /tmp/cookie-memory-evidence --core real` prints usage and exits 2. A vitest run is not feature evidence. Do not mark any sub-feature `verified` from this file alone.
+- `memory-persist` is the drive above. The other memory drives are not in `drive-core` yet. `.cursor/skills/verify-cookie/bin/drive-core drive memory-recall --evidence /tmp/cookie-memory-evidence --core real` prints usage and exits 2. A vitest run is not feature evidence. Do not mark a sub-feature `verified` from this file alone, or from the `chat-history` transcript.
+- `memory-persist` does not accept `--llama external`. It needs the built-in stub so the second reply contains the code word only when the new process loaded the stored turns.
 - Core tests cover idle reflect, `memory.remember`, `memory.forget`, consolidation, and the profile cap against a fake model. They do not write `verify-evidence/`. `memory-remember`, `memory-forget`, `memory-reflect`, `memory-profile-cap`, and `memory-rebuild` stay `planned`.
+- `COOKIE_REFLECT_IDLE_MS` arms the reflect job. It does not end a session and it is not the popup's 10-minute close window. Session end is a later `chat.send` whose `conversationId` differs.
 - `drive-core` does not launch the Mac app. The Mac half of recall, against real Qwen, is a later `drive-mac` or real-core run from a fresh temp data dir.
 - Do not use port `8080`. Verification uses `COOKIE_LLAMA_PORT=18080`.
 - Do not point `COOKIE_DATA_DIR` at `~/Library/Application Support/com.johnkimec.cookie-agent`.
 - `memory-no-egress` is not a separate drive. It is the loopback and `egress = 0` assertion on every drive above, plus the real-Qwen eval run.
-- Protocol stays `0.1`. There is no memory viewer in M1. Forgetting is something John says. A read-only `pnpm memory dump` is a later command, not a drive in this file.
+- Protocol stays `0.1`. There is no memory viewer in M1. Forgetting is something John says. `pnpm memory dump` is the read-only look at `cookie.db`. It is not a drive. `db.txt` in the persist evidence is that dump.
+- A new chat is a different `conversationId` on `chat.send`. The app also mints a new id after the popup has been closed for 10 minutes. The core does not time that window and protocol 0.1 has no message for it. `shutdown` does not end the session.

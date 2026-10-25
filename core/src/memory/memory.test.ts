@@ -64,6 +64,17 @@ describe("memory contracts", () => {
     expect(() => store.appendTurn(turn("missing", "ses-missing", 1))).toThrow(
       /unknown session/,
     );
+    expect(store.listSessions().map((row) => row.id)).toEqual([
+      "ses-1",
+      "ses-2",
+    ]);
+    expect(
+      store.listSessions({ needsReflect: true }).map((row) => row.id),
+    ).toEqual(["ses-1", "ses-2"]);
+    store.appendSession({ ...session("ses-3"), summary: "done" });
+    expect(
+      store.listSessions({ needsReflect: false }).map((row) => row.id),
+    ).toEqual(["ses-3"]);
   });
 
   it("embeds offline to a stable 768-d vector", async () => {
@@ -95,6 +106,11 @@ describe("memory contracts", () => {
       { id: "chunk", distance: expect.any(Number) },
     ]);
     expect(await index.knn("vec_facts", near, 0)).toEqual([]);
+    await index.delete(["near", "chunk"]);
+    expect(
+      (await index.knn("vec_facts", near, 2)).map((hit) => hit.id),
+    ).toEqual(["far"]);
+    expect(await index.knn("vec_chunks", near, 1)).toEqual([]);
     const wrong = new Float32Array(3);
     await expect(index.upsert("vec_facts", "bad", wrong)).rejects.toThrow(
       /768/,

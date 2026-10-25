@@ -196,10 +196,11 @@ describe("memory.remember and memory.forget", () => {
   it("stores a pinned fact with its source turn and forget supersedes it", async () => {
     const derived = new InMemoryDerivedMemory();
     const vectors = new InMemoryVectorIndex();
+    const embedder = new FakeEmbedder();
     const state: MemoryToolState = { sourceTurnId: "t1" };
     const tools = createMemoryTools({
       derived,
-      embedder: new FakeEmbedder(),
+      embedder,
       vectors,
       state,
       now: () => DAY,
@@ -244,8 +245,32 @@ describe("memory.remember and memory.forget", () => {
       { id: "fact-1", text: "ECE midterm is Friday", source: "fact" },
     ]);
 
+    const embedding = await embedder.embed("ECE midterm is Friday");
+    expect(
+      (await vectors.knn("vec_facts", embedding, 4)).map((hit) => hit.id),
+    ).toContain("fact-1");
+    derived.upsertProfile({
+      key: "linked",
+      value: "something else",
+      pinned: true,
+      shareable: true,
+      sourceTurn: "t1",
+      updatedAt: DAY,
+    });
+    derived.upsertProfile({
+      key: "kept",
+      value: "leave this",
+      pinned: false,
+      shareable: true,
+      sourceTurn: null,
+      updatedAt: DAY,
+    });
+
     const dropped = await forget?.execute?.({ text: "midterm" }, toolOptions);
     expect(dropped).toEqual({ forgotten: true, factIds: ["fact-1"] });
+    expect(
+      (await vectors.knn("vec_facts", embedding, 4)).map((hit) => hit.id),
+    ).not.toContain("fact-1");
     const rows = derived.listFacts();
     const original = rows.find((row) => row.id === "fact-1");
     expect(original?.supersededBy).toMatch(/^fact-/);
@@ -253,7 +278,9 @@ describe("memory.remember and memory.forget", () => {
     expect(activeFacts(derived, DAY).map((row) => row.id)).not.toContain(
       "fact-1",
     );
-    expect(derived.listProfile()).toEqual([]);
+    expect(derived.listProfile()).toEqual([
+      expect.objectContaining({ key: "kept", pinned: false }),
+    ]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
   });
 
@@ -454,14 +481,23 @@ describe("reflect job", () => {
   });
 
   it("rebuilds derived rows from turns", async () => {
-    const { derived, reflector } = harness();
+    const { derived, reflector, vectors, embedder } = harness();
     await reflector.reflect("ses-1");
     expect(activeFacts(derived, DAY)).toHaveLength(1);
+    const firstId = activeFacts(derived, DAY)[0]?.id ?? "";
+    const embedding = await embedder.embed("ECE midterm is Friday");
+    expect(
+      (await vectors.knn("vec_facts", embedding, 4)).map((hit) => hit.id),
+    ).toContain(firstId);
     await rebuildDerivedMemory({
       sessionIds: ["ses-1"],
       derived,
+      vectors,
       reflect: (sessionId) => reflector.reflect(sessionId),
     });
+    expect(
+      (await vectors.knn("vec_facts", embedding, 4)).map((hit) => hit.id),
+    ).not.toContain(firstId);
     expect(derived.listJournal("ses-1")).toHaveLength(1);
     expect(activeFacts(derived, DAY)).toHaveLength(1);
     expect(activeFacts(derived, DAY)[0]?.sourceTurn).toBe("t1");
@@ -574,6 +610,30 @@ describe("consolidation", () => {
     );
     expect(hits[0]?.id).toBe(first?.chunkId);
     expect(compacted).toBe(1);
+  });
+
+  it("rechunks a session recorded before this process", async () => {
+    const store = new InMemoryMemoryStore();
+    const derived = new InMemoryDerivedMemory();
+    store.appendSession(session("ses-1"));
+    store.appendTurn(turn("old-turn", "packed the bag"));
+    const runtime = createMemoryRuntime({
+      store,
+      derived,
+      now: () => DAY,
+      idleMs: 1_000,
+      timeZone: "UTC",
+      complete: async () => extraction({ facts: [] }),
+    });
+    runtime.scheduler.requestConsolidation();
+    await runtime.scheduler.drained();
+    expect(
+      derived
+        .listChunks("ses-1")
+        .map((chunk) => chunk.text)
+        .join("\n"),
+    ).toContain("packed the bag");
+    runtime.scheduler.stop();
   });
 });
 
@@ -752,7 +812,7 @@ describe("reflect idle defaults", () => {
 });
 
 describe("memory tools on the chat core", () => {
-  it("lets the fake model remember, and reflect waits until the chat is idle", async () => {
+  it("finishes memory.remember with chat.done stop, and reflect waits until idle", async () => {
     const clock = new ManualClock();
     let reflects = 0;
     let releaseChat: (() => void) | undefined;
@@ -895,7 +955,11 @@ describe("memory tools on the chat core", () => {
       (message) => isRecord(message) && message.method === "chat.done",
     );
     expect(done).toMatchObject({
-      params: { finishReason: "stop" },
+      method: "chat.done",
+      params: { finishReason: "stop", conversationId: "conv-1" },
+    });
+    expect(done).not.toMatchObject({
+      params: { finishReason: "error" },
     });
     expect(runtime.slot.chatActive).toBe(false);
     const remembered = runtime.derived

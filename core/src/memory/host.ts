@@ -28,4 +28,9 @@ export interface MemoryHost {
   onChatStarted(event: MemoryChatStart): void;
   onChatSettled(event: MemoryChatSettled): void;
   onStop(): void;
+  /**
+   * Turn id stored for this message. A relaunch reuses `msg-1`, so the
+   * id can differ from `turn-${messageId}-user` when that row exists.
+   */
+  storedUserTurnId?(messageId: string): string | undefined;
 }

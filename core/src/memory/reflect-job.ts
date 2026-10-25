@@ -7,6 +7,7 @@ import type {
 import type { Embedder } from "./embedder.ts";
 import { DUPLICATE_DISTANCE, isSecret, isVerbatimScreen } from "./policy.ts";
 import { capProfile } from "./profile-cap.ts";
+import type { ReflectOptions, Reflector } from "./reflect.ts";
 import { abortError, isAbortError } from "./slot.ts";
 import type { MemoryStore } from "./store.ts";
 import { embedFact, isFactKind, nearestActive } from "./tools.ts";
@@ -76,20 +77,15 @@ export interface LocalReflectorOptions {
  * `signal` when a chat starts. Writes happen only after the model
  * returns and the signal is still clear.
  */
-export class LocalReflector {
-  private signal: AbortSignal = new AbortController().signal;
+export class LocalReflector implements Reflector {
   private readonly options: LocalReflectorOptions;
 
   constructor(options: LocalReflectorOptions) {
     this.options = options;
   }
 
-  bindSignal(signal: AbortSignal): void {
-    this.signal = signal;
-  }
-
-  async reflect(sessionId: string): Promise<void> {
-    const signal = this.signal;
+  async reflect(sessionId: string, opts?: ReflectOptions): Promise<void> {
+    const signal = opts?.signal ?? new AbortController().signal;
     const turns = this.options.store.recentTurns(sessionId, 10_000);
     if (turns.length === 0) {
       return;
@@ -410,8 +406,14 @@ function throwIfAborted(signal: AbortSignal): void {
 export async function rebuildDerivedMemory(args: {
   sessionIds: readonly string[];
   derived: DerivedMemoryStore;
-  reflect: (sessionId: string) => Promise<void>;
+  vectors: VectorIndex;
+  reflect: (sessionId: string, opts?: ReflectOptions) => Promise<void>;
 }): Promise<void> {
+  const ids = [
+    ...args.derived.listFacts().map((fact) => fact.id),
+    ...args.derived.listChunks().map((chunk) => chunk.chunkId),
+  ];
+  await args.vectors.delete(ids);
   args.derived.clearDerived();
   for (const sessionId of args.sessionIds) {
     await args.reflect(sessionId);
