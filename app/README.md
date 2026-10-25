@@ -52,7 +52,7 @@ Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another ap
 | Cookie turn | `cookie.turn.cookie.<n>` | `cookie` |
 | Badge | `cookie.badge.on-device.<n>` | `on-device` |
 
-Turn indexes start at 0 for each role, so the first reply is `cookie.turn.cookie.0`. Those identifiers are set on the AppKit text view, reply field, send button, and mascot box. The hosting view publishes those views in `accessibilityChildren`. A SwiftUI modifier on `Text` is not what System Events reads.
+Turn indexes start at 0 for each role, so the first reply is `cookie.turn.cookie.0`. Each identifier is on exactly one AppKit element: the text view, a reply field, the send button, or the mascot box. The hosting view does not publish those views again. A SwiftUI modifier on `Text` is not what System Events reads.
 
 The Mac recipe is `.cursor/skills/verify-cookie/bin/drive-mac`. It does not run in CI. Feature statuses stay `planned` until that recipe's evidence is captured on a Mac.
 

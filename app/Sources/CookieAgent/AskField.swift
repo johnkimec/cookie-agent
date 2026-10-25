@@ -16,6 +16,7 @@ struct AskField: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.setAccessibilityElement(false)
+        scroll.setAccessibilityIdentifier("")
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false
@@ -53,6 +54,8 @@ struct AskField: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
+        scroll.setAccessibilityElement(false)
+        scroll.setAccessibilityIdentifier("")
         guard let textView = scroll.documentView as? AskTextView else { return }
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
