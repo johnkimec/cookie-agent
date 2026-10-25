@@ -211,9 +211,15 @@ public final class PopupChatSession: @unchecked Sendable {
                         conversationId: conversationID,
                         messageId: messageID
                     )
-                    self.mutate { $0.noteCancelResult(messageID: messageID) }
+                    self.mutate { state in
+                        state.noteCancelResult(messageID: messageID)
+                        return .none
+                    }
                 } catch {
-                    self.mutate { $0.noteCancelFailed(messageID: messageID) }
+                    self.mutate { state in
+                        state.noteCancelFailed(messageID: messageID)
+                        return .none
+                    }
                     self.onCancelFailure(String(describing: error))
                 }
             }
