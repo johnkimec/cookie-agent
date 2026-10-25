@@ -14,7 +14,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var launchFailure: ShellLaunchFailure?
 
     let localOnly = true
-    let conversationID: String
 
     var onPopup: ((Bool) -> Void)?
     var onLayout: (() -> Void)?
@@ -55,6 +54,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         )
     }
 
+    var conversationID: String { turns.conversationID }
+
     var statusText: String {
         if let launchFailure {
             return launchFailure.statusLine
@@ -64,8 +65,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     init() {
         let id = "conv-\(UUID().uuidString)"
-        conversationID = id
-        let session = PopupChatSession(conversationID: id)
+        let ttl = resolvedDraftTTL(environment: ProcessInfo.processInfo.environment)
+        let session = PopupChatSession(conversationID: id, draftTTL: ttl)
         turns = session
         session.onChange = { [weak self] in
             self?.publishTurns()
@@ -208,7 +209,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func openPopup() {
         lastToggle = Date()
         let wasOpen = popupOpen
-        turns.open(at: Date())
+        turns.open()
         if wasOpen {
             onPopup?(true)
         }
@@ -216,7 +217,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func closePopup() {
         guard popupOpen else { return }
-        turns.close(at: Date())
+        turns.close()
     }
 
     func setDraft(_ text: String) {
@@ -236,6 +237,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func recallLast() {
         turns.recallLast()
+    }
+
+    /// ⌘K. The field clears itself. This starts a new conversation, same as a
+    /// send after the popup has been closed for the draft TTL.
+    func pressCommandK() {
+        turns.pressCommandK()
     }
 
     func quit() {

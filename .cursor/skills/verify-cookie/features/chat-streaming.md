@@ -14,6 +14,7 @@ John sends a message from the popup and sees Cookie's reply arrive in more than 
 - `chat-popup-markdown` renders emphasis, inline code, fenced code, lists, and links in a cookie reply while chunks are still arriving. `\( ... \)` stays inline math and `\[ ... \]` is shown as display math. `status: planned`
 - `chat-real-runtime` runs the Mac app against the real core and `llama-server`, waits until the runtime is up, and shows a non-empty reply that is not the fake-core sentence. Verified by Sergey on the Mac, 2026-10-25, commit c89adc6. `status: verified (verify-evidence/m0-mac-real/)`
 - `chat-talking-pose` shows Cookie in the Talking pose while chunks arrive, or the static mouth-open pose when Reduce Motion is on. `status: planned`
+- `chat-session-expiry` starts a new conversation on the next send after the popup has been closed for the draft window (10 minutes). ⌘K starts a new conversation too. Opening the popup again does not drop a reply that is still arriving. `status: planned`
 
 ## How to get to it (user POV)
 
@@ -22,6 +23,8 @@ John sends a message from the popup and sees Cookie's reply arrive in more than 
 - Watch the reply grow before it finishes.
 - While the reply is still arriving, the ⏎ control reads Stop (`cookie.popup.stop`). Press Return or Stop. The partial reply stays, and the control returns to ⏎.
 - Press Escape while the reply is arriving. The reply stops and the panel stays open. Press Escape again after it has stopped. The panel closes.
+- Press ⌘K. The field clears and the next message is a new conversation.
+- Close the popup and leave it closed for 10 minutes. The next message is a new conversation. Opening it sooner keeps the same conversation. Opening it while a reply is still arriving leaves that reply on screen.
 
 ## Driving it with verify-cookie
 
@@ -40,6 +43,7 @@ Preconditions:
 - **Long popup reply. Mac proof is pending.** On a Mac, from a shell with no leftover `COOKIE_*` variables and a repo path that contains no spaces: `app/Scripts/package-app.sh`, then `export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"`, `export COOKIE_LLAMA_PORT=18080`, `export COOKIE_CORE_CWD="$(pwd)"`, `export COOKIE_APP="$PWD/dist/Cookie Agent.app"`, and `.cursor/skills/verify-cookie/bin/drive-mac popup-reply --evidence verify-evidence/m1-popup-reply`. Do not pass `--runtime real`. The script sets `COOKIE_CORE_COMMAND` to the long-reply fixture (the argument contains `fake-core`, so the shell does not start llama-server). It opens the popup, sends one chat, and waits until `cookie.turn.cookie.0` contains `Einstein is best known for` and `END-OF-REPLY-m1-popup`, the reply frame is taller than one line, the window is taller than 400 pt, `cookie.popup.transcript-bottom` is inside the window, `cookie.badge.on-device` is a dot narrower than 40 pt, `cookie.popup.input` is shorter than 48 pt, and `cookie.badge.on-device.0` is absent. `<COOKIE_DATA_DIR>/logs/cookie-shell.log` must contain one `chat.done` line whose `accumulated=` value includes both the opening sentence and `END-OF-REPLY-m1-popup`. Evidence is `command.txt`, `menu.txt`, `ax.txt`, `chat.txt`, `metrics.txt`, `popup.png`, and `cookie-shell.log`. Leave `chat-popup-reply`, `chat-popup-wrap`, `chat-popup-follow`, and `chat-popup-markdown` `planned` until that Mac evidence exists.
 - **Second send while a reply is in flight.** Return and the send control do not send again. They stop the reply (`chat-stop`). The draft that was already in the field stays, and no second `you` turn is added. The quiet line `Cookie's still answering.` (`cookie.popup.refusal`) is still the copy for a send that is refused while a reply is in flight. That sentence is placeholder copy pending John's review. Leave this `planned` until the Principal Engineer captures it on a Mac.
 - **Stop.** Not scripted in `drive-mac` (a later change adds Mac recipes). The shell check is `swift test --package-path app --filter PopupStopTests` with `pnpm` and Node on `PATH`. It spawns the fake core. Return during a stream writes one `chat.cancel`. Escape during a stream writes one `chat.cancel` and leaves the panel open. A later Escape, once nothing is streaming, closes it. Return while idle writes `chat.send` and does not write `chat.cancel`. On a Mac, open the popup, send a line, and while chunks are arriving read one element `cookie.popup.stop` labelled `Stop`. Press Return or that control. The partial `cookie.turn.cookie.0` text stays. The control returns to `cookie.popup.send` labelled `⏎`. Escape during the reply does not close the panel. The next Escape, once the control is `cookie.popup.send` again, closes it. `Stop` is placeholder copy pending John's review. Leave `chat-stop` `planned` until that Mac evidence exists.
+- **Session expiry.** Not scripted in `drive-mac`. The shell check is `swift test --package-path app --filter SessionExpiryTests`. A close shorter than the draft window keeps the conversation id on the next send. A close of at least that window (10 minutes, or `COOKIE_DRAFT_TTL_SECONDS` when that value is shorter) uses a new conversation id on the next send, the same as ⌘K. Opening the popup without sending leaves an in-flight reply in place. Leave `chat-session-expiry` `planned` until a Mac run keeps the evidence.
 
 ## Gotchas
 
@@ -54,6 +58,7 @@ Preconditions:
 - The wireframe labels the turns `you` and `cookie` in lowercase.
 - One in-flight reply. A second `chat.send` before `chat.done` is an error, not a second stream. The popup's Return during that reply sends `chat.cancel`, not a second `chat.send`.
 - While a reply is arriving, Escape stops it and leaves the panel open. Escape closes the panel only when nothing is streaming. A second stop does not send a second `chat.cancel`. Clicking outside still closes without cancelling.
+- A new conversation is a new `conversationId` on `chat.send`. The core treats that id as the session. Closing the popup does not by itself start one. The next send does, once the popup has been closed for the draft window. ⌘K starts one immediately. `COOKIE_DRAFT_TTL_SECONDS` can only shorten that window.
 - Do not mark the popup sub-features verified from this transcript. The transcript never opened a window.
 - `drive-core drive` without `--evidence <dir>` prints its usage and exits 2.
 - `drive-mac chat --runtime real` needs a new `mktemp -d /tmp/cookie-m0.XXXXXX` and a shell with no leftover `COOKIE_*` variables on every run. A reused data directory carries the last run's pid files.

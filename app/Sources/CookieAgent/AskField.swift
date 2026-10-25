@@ -13,6 +13,7 @@ struct AskField: NSViewRepresentable {
     var onSubmit: () -> Void
     var onEscape: () -> Void
     var onEditLast: () -> Void
+    var onCommandK: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -80,6 +81,7 @@ struct AskField: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
         textView.onEditLast = onEditLast
+        textView.onCommandK = onCommandK
         textView.onChange = { context.coordinator.parent.text = $0 }
 
         scroll.documentView = textView
@@ -94,6 +96,7 @@ struct AskField: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
         textView.onEditLast = onEditLast
+        textView.onCommandK = onCommandK
         if textView.string != text {
             textView.string = text
             textView.needsDisplay = true
@@ -120,6 +123,7 @@ final class AskTextView: NSTextView {
     var onSubmit: () -> Void = {}
     var onEscape: () -> Void = {}
     var onEditLast: () -> Void = {}
+    var onCommandK: () -> Void = {}
     var onChange: (String) -> Void = { _ in }
 
     override func setAccessibilityValue(_ accessibilityValue: Any?) {
@@ -164,6 +168,7 @@ final class AskTextView: NSTextView {
            !flags.contains(.control) {
             string = ""
             onChange("")
+            onCommandK()
             needsDisplay = true
             return
         }

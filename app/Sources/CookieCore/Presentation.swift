@@ -79,6 +79,19 @@ public enum PopupLayout {
     public static let draftTTL: TimeInterval = 600
 }
 
+/// Product default is 10 minutes. `COOKIE_DRAFT_TTL_SECONDS` shortens that
+/// window for a drive-mac recipe. Unset, empty, and out-of-range values
+/// stay on the product default, and a value cannot lengthen it.
+public func resolvedDraftTTL(environment: [String: String]) -> TimeInterval {
+    guard let raw = environment["COOKIE_DRAFT_TTL_SECONDS"], !raw.isEmpty else {
+        return PopupLayout.draftTTL
+    }
+    guard let value = Double(raw), value > 0, value <= PopupLayout.draftTTL else {
+        return PopupLayout.draftTTL
+    }
+    return value
+}
+
 public enum MenuGlyph: String, Equatable, Sendable {
     case idle
     case listening

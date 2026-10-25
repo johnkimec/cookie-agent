@@ -374,7 +374,8 @@ struct PopupRoot: View {
                     ),
                     onSubmit: { model.submit() },
                     onEscape: { model.pressEscape() },
-                    onEditLast: { model.recallLast() }
+                    onEditLast: { model.recallLast() },
+                    onCommandK: { model.pressCommandK() }
                 )
                 .accessibilityLabel(CookieCopy.ask)
                 .frame(maxWidth: .infinity)
