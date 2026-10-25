@@ -128,10 +128,89 @@ stop_pid() {
 DECOY_DATA=""
 DRIVE_DATA=""
 DRIVE_SUPPORT_DIRS=""
+# Stop llama-server only when this directory's llama-embed.pid names a live
+# process whose argv is llama-server --port <the port in the log, else EMBED_PORT>.
+stop_owned_embed_dir() {
+  local dir="$1" port="" file pid cmd
+  [[ -n "$dir" ]] || return 0
+  if [[ -f "$dir/logs/llama-embed.log" ]]; then
+    port="$(awk 'match($0, /--port [0-9]+/) { print substr($0, RSTART+7, RLENGTH-7); exit }' "$dir/logs/llama-embed.log" || true)"
+  fi
+  if [[ -z "$port" ]]; then
+    port="${EMBED_PORT:-}"
+  fi
+  [[ -n "$port" ]] || return 0
+  file="$dir/logs/llama-embed.pid"
+  pid="$(pid_in_file "$file" || true)"
+  [[ -n "$pid" ]] || return 0
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  if llama_command_has_port "$cmd" "$port"; then
+    log "cleanup stopping embed pid=$pid port=$port"
+    stop_embed_pid "$pid"
+  else
+    log "cleanup left embed pid ${pid}: argv is not llama-server --port ${port}"
+  fi
+}
+
+stop_embed_pid() {
+  local pid="$1" attempt
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for attempt in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || return 0
+      sleep 0.25
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+}
+
+embed_dir_still_ours() {
+  local dir="$1" port="$2" file pid cmd
+  [[ -n "$dir" && -n "$port" ]] || return 1
+  file="$dir/logs/llama-embed.pid"
+  pid="$(pid_in_file "$file" || true)"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  llama_command_has_port "$cmd" "$port"
+}
+
+# Print listeners on a port. Does not signal them.
+report_listening_port() {
+  local port="$1" listeners=""
+  declare -F port_listening >/dev/null || return 0
+  port_listening "$port" || return 0
+  listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' ')"
+  log "port ${port} still listening: ${listeners}"
+}
+
+each_embed_dir() {
+  local dir
+  if [[ -n "${COOKIE_DATA_DIR:-}" ]]; then
+    printf '%s\n' "$COOKIE_DATA_DIR"
+  fi
+  if [[ -n "${DRIVE_DATA:-}" && "$DRIVE_DATA" != "${COOKIE_DATA_DIR:-}" ]]; then
+    printf '%s\n' "$DRIVE_DATA"
+  fi
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    printf '%s\n' "$dir"
+  done <<< "${DRIVE_SUPPORT_DIRS:-}"
+}
+
 cleanup() {
-  local root dir
+  local status=$?
+  local root dir leaked=0
   stop_pid "$APP_PID" "$BIN" "${DRIVE_PROCESS_NAME:-}" "${DRIVE_BUNDLE_ID:-}"
   stop_pid "$DECOY_PID" "$DECOY_BIN" "$DECOY_PROCESS_NAME" "$DECOY_BUNDLE_ID"
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    stop_owned_embed_dir "$dir"
+    if embed_dir_still_ours "$dir" 18081; then
+      leaked=1
+    fi
+  done < <(each_embed_dir)
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     case "$root" in
@@ -157,6 +236,11 @@ cleanup() {
         ;;
     esac
   done <<< "$DRIVE_SUPPORT_DIRS"
+  report_listening_port 18081
+  if [[ "$leaked" -eq 1 && "$status" -eq 0 ]]; then
+    printf '%s\n' "embed server this drive started is still listening on 18081" >&2
+    exit 1
+  fi
 }
 trap cleanup EXIT
 
@@ -940,6 +1024,28 @@ end tell
 APPLESCRIPT
 }
 
+# Before a click at a screen point. CGWindowList names the front window there.
+# The desktop or this drive's window may be clicked. Any other owner exits 3
+# and the caller must not click.
+guard_click_point() {
+  local x="$1" y="$2" decision=""
+  decision="$(python3 "$DRIVE_BIN_DIR/drive-mac-ax.py" window-at "$APP_PID" "$x" "$y")" || fail "could not read the window at ${x},${y}"
+  decision="${decision//[[:space:]]/}"
+  case "$decision" in
+    desktop|drive)
+      return 0
+      ;;
+    skip)
+      log "click-outside skipped: point ${x},${y} is not the desktop or this drive"
+      printf '%s\n' "skipped"
+      exit 3
+      ;;
+    *)
+      fail "window-at returned ${decision:-empty}"
+      ;;
+  esac
+}
+
 # One click, with Option set on that event, posted only to the drive pid.
 option_click_status() {
   local frame=""
@@ -1491,6 +1597,27 @@ if [[ "$runtime" == "real" ]]; then
   fi
   log "quit reaped embed ${owned_embed_before} port ${embed_port_now} clear"
 fi
+
+# status-offline-chat quits while a real embed server may be on 18081.
+# Fail only when llama-embed.pid still names a live llama-server with --port 18081.
+# Any other listener is reported and left alone.
+assert_embed_port_after_quit() {
+  local port="${1:-18081}" dir pid listeners=""
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    if embed_dir_still_ours "$dir" "$port"; then
+      pid="$(pid_in_file "$dir/logs/llama-embed.pid" || true)"
+      fail "embed server this drive started is still on port ${port} pid ${pid}"
+    fi
+  done < <(each_embed_dir)
+  if port_listening "$port"; then
+    listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' ')"
+    log "port ${port} still listening after quit, not this drive: ${listeners}"
+  else
+    log "port ${port} clear after quit"
+  fi
+}
+assert_embed_port_after_quit 18081
 
 log_cookie_processes() {
   log "ps pid ppid lstart command:"

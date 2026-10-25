@@ -53,6 +53,74 @@ hits = []
 def add(label, path, number, text):
     hits.append(f"{label}: {path}:{number}:{text}")
 
+def unescape_applescript(text):
+    out = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text):
+            out.append(text[index + 1])
+            index += 2
+        else:
+            out.append(text[index])
+            index += 1
+    return "".join(out)
+
+def applescript_shell_commands(line):
+    """Decode `do shell script` literals, including `"a" & "b"` joins."""
+    commands = []
+    string_literal = re.compile(r'\s*(?:&\s*)?"((?:\\.|[^"\\])*)"')
+    for match in re.finditer(r"\bdo\s+shell\s+script\b", line):
+        rest = line[match.end():]
+        pos = 0
+        parts = []
+        while True:
+            if parts and not re.match(r"\s*&\s*", rest[pos:]):
+                break
+            piece = string_literal.match(rest, pos)
+            if not piece:
+                break
+            parts.append(unescape_applescript(piece.group(1)))
+            pos = piece.end()
+            if not re.match(r"\s*&\s*\"", rest[pos:]):
+                break
+        if parts:
+            commands.append("".join(parts))
+    return commands
+
+def inspect(text, path, number):
+    stripped = text.strip()
+    if osascript_word.search(text) and not all(part in text for part in helper):
+        add("osascript outside osascript_run", path, number, stripped)
+    if tell_process.search(text):
+        add("name-based tell process", path, number, stripped)
+    match = tell_app.search(text)
+    if match and not system_events.match(match.group(2).strip()):
+        add("tell other than System Events", path, number, stripped)
+    if whose_name.search(text):
+        add("whose name", path, number, stripped)
+    if key_down.search(text):
+        add("key down", path, number, stripped)
+    if key_code.search(text):
+        add("key code", path, number, stripped)
+    if keystroke.search(text):
+        add("keystroke is not pid-targeted", path, number, stripped)
+    if screencapture.search(text) and not re.search(r"(?:^|[^\w])-l(?:[^\w]|$)", text):
+        add("screencapture", path, number, stripped)
+    if pgrep.search(text):
+        rest = pgrep_parent.sub("", text)
+        if pgrep.search(rest):
+            add("pgrep", path, number, stripped)
+    if pkill.search(text):
+        add("pkill", path, number, stripped)
+    if killall.search(text):
+        add("killall", path, number, stripped)
+    if quit_app.search(text):
+        add("quit app by name", path, number, stripped)
+    if kill_word.search(text) and not re.match(r"kill\s*\(\)\s*\{", stripped):
+        rest = kill_ok.sub("", text)
+        if kill_word.search(rest):
+            add("kill is only allowed", path, number, stripped)
+
 for path in files:
     with open(path, encoding="utf-8") as handle:
         for number, raw in enumerate(handle, 1):
@@ -60,37 +128,10 @@ for path in files:
             stripped = line.strip()
             if stripped.startswith("#") or stripped.startswith("--"):
                 continue
-            if osascript_word.search(line) and not all(part in line for part in helper):
-                add("osascript outside osascript_run", path, number, stripped)
-            if tell_process.search(line):
-                add("name-based tell process", path, number, stripped)
-            match = tell_app.search(line)
-            if match and not system_events.match(match.group(2).strip()):
-                add("tell other than System Events", path, number, stripped)
-            if whose_name.search(line):
-                add("whose name", path, number, stripped)
-            if key_down.search(line):
-                add("key down", path, number, stripped)
-            if key_code.search(line):
-                add("key code", path, number, stripped)
-            if keystroke.search(line):
-                add("keystroke is not pid-targeted", path, number, stripped)
-            if screencapture.search(line) and not re.search(r"(?:^|[^\w])-l(?:[^\w]|$)", line):
-                add("screencapture", path, number, stripped)
-            if pgrep.search(line):
-                rest = pgrep_parent.sub("", line)
-                if pgrep.search(rest):
-                    add("pgrep", path, number, stripped)
-            if pkill.search(line):
-                add("pkill", path, number, stripped)
-            if killall.search(line):
-                add("killall", path, number, stripped)
-            if quit_app.search(line):
-                add("quit app by name", path, number, stripped)
-            if kill_word.search(line) and not re.match(r"kill\s*\(\)\s*\{", stripped):
-                rest = kill_ok.sub("", line)
-                if kill_word.search(rest):
-                    add("kill is only allowed", path, number, stripped)
+            inspect(line, path, number)
+            for command in applescript_shell_commands(line):
+                if command != line:
+                    inspect(command, path, number)
 
 if hits:
     print("\n".join(hits), file=sys.stderr)
@@ -145,6 +186,7 @@ kill -9 "$DECOY_PID"
 children="$(pgrep -P "$current")"
 tell application "System Events"
 screencapture -l 42 -x /tmp/popup.png
+do shell script "screen" & "capture -l 42 -x /tmp/popup.png"
 EOF
   printf '%s\n' 'on cookieDriveProcess()' >"$tmp/good-lib"
   printf '%s\n' 'tell application "System Events"' >>"$tmp/good-lib"
@@ -190,6 +232,10 @@ EOF
   assert_rejects "key down" 'key down command'
   assert_rejects "key down" 'key down option'
   assert_rejects "screencapture" 'screencapture -x /tmp/whole-display.png'
+  assert_rejects "name-based tell process" 'do shell script "tell process \"CookieAgent\" to activate"'
+  assert_rejects "screencapture" 'do shell script "screen" & "capture -x /tmp/whole-display.png"'
+  assert_rejects "keystroke is not pid-targeted" 'do shell script "key" & "stroke \"a\""'
+  assert_rejects "killall" 'do shell script "ki" & "llall CookieAgent"'
 
   python3 - "$PREPEND" "$LIB" "$tmp/use-src.applescript" "$tmp/use-out.applescript" <<'PY'
 import pathlib, subprocess, sys

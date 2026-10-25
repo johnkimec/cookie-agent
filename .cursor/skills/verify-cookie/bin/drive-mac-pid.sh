@@ -306,6 +306,27 @@ drive_support_folder() {
   esac
 }
 
+# True when the command is llama-server and `--port` is followed by this port
+# as its own argument. `--port=18081` and a longer number do not match.
+llama_command_has_port() {
+  python3 - "$1" "$2" <<'PY'
+import shlex
+import sys
+
+command, port = sys.argv[1], sys.argv[2]
+try:
+    args = shlex.split(command)
+except ValueError:
+    sys.exit(1)
+if not args or args[0].rsplit("/", 1)[-1] != "llama-server":
+    sys.exit(1)
+for index, arg in enumerate(args[:-1]):
+    if arg == "--port" and args[index + 1] == port:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # Bash 3.2 does not abort when a command substitution fails, and exit inside
 # it only leaves the subshell. Call this in the current shell, never from $(...).
 # $1 is the caller's variable name. The rest is the command.

@@ -366,6 +366,37 @@ case "$cleanup_body" in
     exit 1
     ;;
 esac
+case "$cleanup_body" in
+  *'stop_owned_embed_dir'*'rm -rf "$DRIVE_DATA"'*'18081'*) ;;
+  *)
+    printf 'cleanup does not stop the owned embed server before deleting its pid file\n' >&2
+    exit 1
+    ;;
+esac
+if llama_command_has_port "llama-server --embeddings --port 18081 -m model.gguf" 18081; then
+  :
+else
+  printf 'llama-server --port 18081 was not recognized\n' >&2
+  exit 1
+fi
+if llama_command_has_port "/opt/homebrew/bin/llama-server --port 8081" 18081; then
+  printf 'a different --port was accepted as 18081\n' >&2
+  exit 1
+fi
+if llama_command_has_port "llama-server --port=18081" 18081; then
+  printf '--port=18081 was accepted as its own argument\n' >&2
+  exit 1
+fi
+if llama_command_has_port "not-llama --port 18081" 18081; then
+  printf 'a non-llama command with --port was accepted\n' >&2
+  exit 1
+fi
+for site in assert_embed_port_after_quit guard_click_point stop_owned_embed_dir; do
+  if ! grep -q "$site" "$BIN_DIR/drive-mac"; then
+    printf 'missing %s\n' "$site" >&2
+    exit 1
+  fi
+done
 
 python3 - "$FIXTURE/skip.plist" <<'PY'
 import plistlib
@@ -464,6 +495,15 @@ assert module.select_window(windows, 19527, "Ask Cookie…") == 7
 assert module.select_window(windows, 18332, "Ask Cookie…") == 8
 assert module.select_window(windows + [{"pid": 19527, "name": "Ask Cookie…", "id": 10}], 19527, "Ask Cookie…") is None
 assert module.select_window(windows, 19527, "missing") is None
+
+desktop = {"pid": 1, "owner": "Window Server", "name": "Desktop", "bounds": (0, 0, 1000, 800)}
+terminal = {"pid": 50, "owner": "Terminal", "name": "bash", "bounds": (0, 0, 100, 100)}
+drive = {"pid": 19527, "owner": "CDrv", "name": "Ask Cookie…", "bounds": (100, 100, 50, 50)}
+assert module.decide_click_point([terminal, desktop], 10, 10, 19527) == "skip"
+assert module.decide_click_point([terminal, desktop], 200, 200, 19527) == "desktop"
+assert module.decide_click_point([drive, desktop], 110, 110, 19527) == "drive"
+assert module.decide_click_point([drive, desktop], 2000, 2000, 19527) == "skip"
+assert module.decide_click_point([], 10, 10, 19527) == "skip"
 PY
 
 printf '%s\n' "drive-mac pid test ok"

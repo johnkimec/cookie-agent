@@ -22,6 +22,38 @@ def cg_point_from_ax(ax_x, ax_y, width, height, screen_height):
     return (x, y)
 
 
+def window_contains(window, x, y):
+    bounds = window.get("bounds")
+    if not bounds or len(bounds) != 4:
+        return False
+    origin_x, origin_y, width, height = bounds
+    if width <= 0 or height <= 0:
+        return False
+    return origin_x <= x < origin_x + width and origin_y <= y < origin_y + height
+
+
+def owner_at_point(windows, x, y):
+    """Front-to-back. The first window whose bounds contain the point."""
+    for window in windows:
+        if window_contains(window, x, y):
+            return window
+    return None
+
+
+def decide_click_point(windows, x, y, drive_pid):
+    """desktop, drive, or skip. skip means click nothing."""
+    window = owner_at_point(windows, x, y)
+    if window is None:
+        return "skip"
+    if int(window.get("pid", -1)) == int(drive_pid):
+        return "drive"
+    owner = window.get("owner") or ""
+    name = window.get("name") or ""
+    if owner == "Window Server" and name in ("", "Desktop", "Desktop Picture", "Wallpaper"):
+        return "desktop"
+    return "skip"
+
+
 def select_window(windows, pid, title):
     """The one on-screen window of this pid that includes the title."""
     matches = []
@@ -104,6 +136,22 @@ def _cfnumber(cf, value):
     return int(raw.value)
 
 
+def _cf_flexible_number(cf, value):
+    if not value:
+        return None
+    cf.CFNumberGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    cf.CFNumberGetValue.restype = ctypes.c_bool
+    raw = ctypes.c_double(0)
+    # kCFNumberDoubleType, kCFNumberFloat64Type, kCFNumberCGFloatType.
+    for kind in (13, 6, 16):
+        if cf.CFNumberGetValue(value, kind, ctypes.byref(raw)):
+            return float(raw.value)
+    whole = _cfnumber(cf, value)
+    if whole is None:
+        return None
+    return float(whole)
+
+
 def copy_windows():
     cg = _framework("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
     cf = _framework("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
@@ -119,6 +167,7 @@ def copy_windows():
     cf.CFGetTypeID.argtypes = [ctypes.c_void_p]
     cf.CFStringGetTypeID.restype = ctypes.c_ulong
     cf.CFNumberGetTypeID.restype = ctypes.c_ulong
+    cf.CFDictionaryGetTypeID.restype = ctypes.c_ulong
     cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
     cf.CFStringGetCString.restype = ctypes.c_bool
     cf.CFRelease.argtypes = [ctypes.c_void_p]
@@ -129,10 +178,14 @@ def copy_windows():
     keys = {
         "pid": _cfstring(cf, "kCGWindowOwnerPID"),
         "name": _cfstring(cf, "kCGWindowName"),
+        "owner": _cfstring(cf, "kCGWindowOwnerName"),
         "id": _cfstring(cf, "kCGWindowNumber"),
+        "bounds": _cfstring(cf, "kCGWindowBounds"),
     }
+    bound_keys = {name: _cfstring(cf, name) for name in ("X", "Y", "Width", "Height")}
     string_type = cf.CFStringGetTypeID()
     number_type = cf.CFNumberGetTypeID()
+    dict_type = cf.CFDictionaryGetTypeID()
     windows = []
     try:
         count = cf.CFArrayGetCount(info)
@@ -152,11 +205,24 @@ def copy_windows():
                     buffer = ctypes.create_string_buffer(1024)
                     if cf.CFStringGetCString(value, buffer, len(buffer), 0x08000100):
                         window[field] = buffer.value.decode("utf-8", "replace")
+                elif kind == dict_type and field == "bounds":
+                    coords = []
+                    for name in ("X", "Y", "Width", "Height"):
+                        part = cf.CFDictionaryGetValue(value, bound_keys[name])
+                        number = _cf_flexible_number(cf, part)
+                        if number is None:
+                            coords = []
+                            break
+                        coords.append(number)
+                    if len(coords) == 4:
+                        window["bounds"] = tuple(coords)
             if "pid" in window and "id" in window:
                 windows.append(window)
     finally:
         cf.CFRelease(info)
         for key in keys.values():
+            cf.CFRelease(key)
+        for key in bound_keys.values():
             cf.CFRelease(key)
     return windows
 
@@ -180,8 +246,13 @@ def option_click(pid, frame_text):
 
 def main(argv):
     if len(argv) < 2:
-        return "usage: drive-mac-ax.py option-click|capture-window ..."
+        return "usage: drive-mac-ax.py option-click|capture-window|window-at ..."
     command = argv[1]
+    if command == "window-at":
+        if len(argv) != 5:
+            return "usage: drive-mac-ax.py window-at PID X Y"
+        print(decide_click_point(copy_windows(), float(argv[3]), float(argv[4]), int(argv[2])))
+        return None
     if command == "option-click":
         if len(argv) != 4:
             return "usage: drive-mac-ax.py option-click PID x,y,w,h"
