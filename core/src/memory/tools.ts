@@ -106,7 +106,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolSet {
     }),
     [MEMORY_FORGET_TOOL]: tool({
       description:
-        "Forget a fact John asked to drop. Deletes that fact, its profile row, and derived rows built from its turn. Raw turns stay. An exact match is forgotten, and any other partial matches are returned as candidates. If several facts match and none is an exact match, returns the candidates and deletes nothing.",
+        "Forget a fact John asked to drop. Deletes that fact, its profile row, and derived rows built from its turn. When no fact matches, an exact or unique turn or chunk match is forgotten the same way. Raw turns stay. An exact match is forgotten, and any other partial matches are returned as candidates. If several matches and none is exact, returns the candidates and deletes nothing.",
       inputSchema: forgetInput,
       execute: (input) => forgetFact(deps, input),
     }),
@@ -203,12 +203,56 @@ async function forgetFact(
     };
   }
   if (match.kind === "none") {
-    return { forgotten: false, reason: "not found" };
+    if (input.text === undefined) {
+      return { forgotten: false, reason: "not found" };
+    }
+    const fallback = locateTurnOrChunk(deps, input.text);
+    if (fallback.kind === "ambiguous") {
+      return {
+        forgotten: false,
+        reason: "ambiguous",
+        candidates: fallback.candidates,
+      };
+    }
+    if (fallback.kind === "none") {
+      return { forgotten: false, reason: "not found" };
+    }
+    return commitForget(
+      deps,
+      [],
+      fallback.keys,
+      fallback.turnIds,
+      now,
+      fallback.candidates,
+    );
   }
   const facts = match.facts;
   const keys = keyStrings(facts, input.text);
-  const turnIds = turnsToForget(deps, facts, keys);
-  const texts = facts.map((fact) => fact.text);
+  return commitForget(
+    deps,
+    facts,
+    keys,
+    turnsToForget(deps, facts, keys),
+    now,
+    match.candidates,
+  );
+}
+
+async function commitForget(
+  deps: MemoryToolDeps,
+  facts: readonly FactRecord[],
+  keys: readonly string[],
+  turnIds: Set<string>,
+  now: number,
+  candidates: ForgetCandidate[],
+): Promise<
+  | { forgotten: true; factIds: string[]; candidates?: ForgetCandidate[] }
+  | { forgotten: false; reason: "not found" }
+> {
+  const texts = [
+    ...facts.map((fact) => fact.text),
+    ...(facts.length === 0 ? keys : []),
+  ];
   const doomed = deps.derived
     .listFacts()
     .filter((fact) => copyOfForgotten(fact, facts, keys, now));
@@ -246,6 +290,7 @@ async function forgetFact(
       deps.store,
       turnIds,
       doomed.map((fact) => fact.id),
+      chunks.map((chunk) => chunk.chunkId),
     );
     for (const sessionId of sessions) {
       deps.derived.deleteJournal(sessionId);
@@ -258,10 +303,10 @@ async function forgetFact(
   deps.log?.(
     `memory.forget facts=${factIds.join(",")} turns=${turnList.join(",")}`,
   );
-  if (match.candidates.length === 0) {
+  if (candidates.length === 0) {
     return { forgotten: true, factIds };
   }
-  return { forgotten: true, factIds, candidates: match.candidates };
+  return { forgotten: true, factIds, candidates };
 }
 
 async function factsToForget(
@@ -312,6 +357,157 @@ async function factsToForget(
     return { kind: "facts", facts: [nearest.fact], candidates: [] };
   }
   return { kind: "none" };
+}
+
+type TurnFallback =
+  | {
+      kind: "forget";
+      keys: string[];
+      turnIds: Set<string>;
+      candidates: ForgetCandidate[];
+    }
+  | { kind: "ambiguous"; candidates: ForgetCandidate[] }
+  | { kind: "none" };
+
+/**
+ * No fact matched. The same exact / unique / ambiguous rule applies to
+ * turns, and then to chunks. The forget-request turn is not a second
+ * candidate. A chosen turn's assistant reply is marked with it.
+ */
+function locateTurnOrChunk(
+  deps: MemoryToolDeps,
+  needleRaw: string,
+): TurnFallback {
+  const needle = needleRaw.trim().toLowerCase();
+  if (needle.length < MIN_FORGET_TEXT) {
+    return { kind: "none" };
+  }
+  const forgotten = new Set(deps.derived.forgottenTurnIds());
+  const requestId = deps.state.sourceTurnId;
+  const others: ForgetCandidate[] = [];
+  let requestHit = false;
+  for (const session of deps.store.listSessions()) {
+    for (const turn of deps.store.recentTurns(session.id, 10_000)) {
+      if (forgotten.has(turn.id)) {
+        continue;
+      }
+      if (!turn.content.toLowerCase().includes(needle)) {
+        continue;
+      }
+      if (turn.id === requestId) {
+        requestHit = true;
+        continue;
+      }
+      others.push({ id: turn.id, text: turn.content });
+    }
+  }
+  const turnClass = classifyTextHits(others, needle);
+  if (turnClass.kind === "ambiguous") {
+    return { kind: "ambiguous", candidates: turnClass.candidates };
+  }
+  if (turnClass.kind === "chosen" || requestHit) {
+    const chosen = turnClass.kind === "chosen" ? turnClass.chosen : [];
+    const keys = keyStrings([], needleRaw);
+    for (const hit of chosen) {
+      pushKey(keys, hit.text);
+    }
+    return {
+      kind: "forget",
+      keys,
+      turnIds: turnIdsForHits(deps, chosen, requestHit),
+      candidates: turnClass.kind === "chosen" ? turnClass.candidates : [],
+    };
+  }
+  const chunks = deps.derived.listChunks().filter((chunk) => {
+    if (chunk.firstTurn === requestId && chunk.lastTurn === requestId) {
+      return false;
+    }
+    return chunk.text.toLowerCase().includes(needle);
+  });
+  const chunkClass = classifyTextHits(
+    chunks.map((chunk) => ({ id: chunk.chunkId, text: chunk.text })),
+    needle,
+  );
+  if (chunkClass.kind === "ambiguous") {
+    return { kind: "ambiguous", candidates: chunkClass.candidates };
+  }
+  if (chunkClass.kind === "none") {
+    return { kind: "none" };
+  }
+  const keys = keyStrings([], needleRaw);
+  for (const hit of chunkClass.chosen) {
+    pushKey(keys, hit.text);
+  }
+  return {
+    kind: "forget",
+    keys,
+    turnIds: turnIdsForHits(deps, [], false),
+    candidates: chunkClass.candidates,
+  };
+}
+
+function pushKey(keys: string[], text: string): void {
+  const lowered = text.trim().toLowerCase();
+  if (lowered.length >= MIN_FORGET_TEXT && !keys.includes(lowered)) {
+    keys.push(lowered);
+  }
+}
+
+function classifyTextHits(
+  hits: ForgetCandidate[],
+  needle: string,
+):
+  | { kind: "chosen"; chosen: ForgetCandidate[]; candidates: ForgetCandidate[] }
+  | { kind: "ambiguous"; candidates: ForgetCandidate[] }
+  | { kind: "none" } {
+  if (hits.length === 0) {
+    return { kind: "none" };
+  }
+  const exact = hits.filter((hit) => hit.text.trim().toLowerCase() === needle);
+  if (exact.length > 0) {
+    const ids = new Set(exact.map((hit) => hit.id));
+    return {
+      kind: "chosen",
+      chosen: exact,
+      candidates: hits.filter((hit) => !ids.has(hit.id)),
+    };
+  }
+  if (hits.length === 1) {
+    const only = hits[0];
+    return only === undefined
+      ? { kind: "none" }
+      : { kind: "chosen", chosen: [only], candidates: [] };
+  }
+  return { kind: "ambiguous", candidates: hits };
+}
+
+/**
+ * Chosen turns and each assistant reply. The forget request is included
+ * when its own text matched, so an older unrelated turn is not marked.
+ */
+function turnIdsForHits(
+  deps: MemoryToolDeps,
+  chosen: readonly ForgetCandidate[],
+  includeRequest: boolean,
+): Set<string> {
+  const turnIds = new Set<string>();
+  for (const hit of chosen) {
+    turnIds.add(hit.id);
+  }
+  if (includeRequest && deps.state.sourceTurnId !== null) {
+    turnIds.add(deps.state.sourceTurnId);
+  }
+  pairReplies(deps.store, turnIds);
+  return turnIds;
+}
+
+function pairReplies(store: MemoryStore, turnIds: Set<string>): void {
+  for (const id of [...turnIds]) {
+    const reply = pairedAssistant(store, id);
+    if (reply !== null) {
+      turnIds.add(reply);
+    }
+  }
 }
 
 /**
@@ -589,43 +785,187 @@ function dropProfileFor(
   keys: readonly string[],
   forgottenTurns: ReadonlySet<string>,
 ): void {
-  const next = derived
-    .listProfile()
-    .filter((row) => !profileHoldsKey(row, facts, keys, forgottenTurns));
-  if (next.length === derived.listProfile().length) {
+  const rows = derived.listProfile();
+  const nameTokens = profileNameTokens(rows);
+  const next = rows.filter(
+    (row) => !profileRowDropped(row, facts, keys, forgottenTurns, nameTokens),
+  );
+  if (next.length === rows.length) {
     return;
   }
   derived.replaceProfile(next);
 }
 
+const NAME_KEYS = new Set([
+  "name",
+  "full_name",
+  "first_name",
+  "last_name",
+  "given_name",
+  "family_name",
+]);
+
+/** Tokens from profile rows that store John's name. */
+export function profileNameTokens(rows: readonly ProfileRecord[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    const key = row.key.trim().toLowerCase();
+    if (!NAME_KEYS.has(key) && !key.endsWith("_name")) {
+      continue;
+    }
+    for (const token of row.value.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+      if (token.length >= 2) {
+        out.add(token);
+      }
+    }
+  }
+  return out;
+}
+
 /**
- * A profile row matches when its value contains a key string, when the
- * value itself (at least 4 characters) is contained in a forgotten
- * fact, when the value shares a distinctive token with a forgotten
- * fact, or when `source_turn` is already forgotten. A row with another
- * source, or no source, stays when its value does not match. An active
+ * A pinned row drops only when its key matches the forget, or a
+ * forgotten fact contains its value. An unpinned row also drops when
+ * its source turn was forgotten, or when its value holds a secret
+ * token from the forget (a digit run of 3 or more that is not a year,
+ * or a rare word). The profile name is not a secret token. An active
  * sibling fact on that turn still stays.
  */
-function profileHoldsKey(
+export function profileRowDropped(
   row: ProfileRecord,
   facts: readonly FactRecord[],
   keys: readonly string[],
   forgottenTurns: ReadonlySet<string>,
+  nameTokens: ReadonlySet<string>,
 ): boolean {
+  if (profileKeyMatches(row.key, keys)) {
+    return true;
+  }
+  if (
+    facts.some((fact) =>
+      factContainsProfileValue(row.value, fact.text, nameTokens),
+    ) ||
+    keys.some((key) => factContainsProfileValue(row.value, key, nameTokens))
+  ) {
+    return true;
+  }
+  if (row.pinned) {
+    return false;
+  }
   if (row.sourceTurn !== null && forgottenTurns.has(row.sourceTurn)) {
     return true;
   }
   const value = row.value.trim().toLowerCase();
-  if (containsKey(value, keys)) {
-    return true;
-  }
   if (
     value.length >= MIN_FORGET_TEXT &&
-    facts.some((fact) => fact.text.toLowerCase().includes(value))
+    !isNameOnlyValue(value, nameTokens) &&
+    containsKey(value, keys)
   ) {
     return true;
   }
-  return facts.some((fact) => sharesDistinctiveToken(value, fact.text));
+  return valueHasSecret(value, keys, nameTokens);
+}
+
+function profileKeyMatches(key: string, keys: readonly string[]): boolean {
+  const normalized = key
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length < MIN_FORGET_TEXT) {
+    return false;
+  }
+  const pattern = new RegExp(
+    `(^|[^a-z0-9])${escapeRegExp(normalized)}([^a-z0-9]|$)`,
+  );
+  return keys.some((item) => pattern.test(item));
+}
+
+function factContainsProfileValue(
+  value: string,
+  factText: string,
+  nameTokens: ReadonlySet<string>,
+): boolean {
+  const needle = value.trim().toLowerCase();
+  if (needle.length < MIN_FORGET_TEXT || isNameOnlyValue(needle, nameTokens)) {
+    return false;
+  }
+  return factText.toLowerCase().includes(needle);
+}
+
+function isNameOnlyValue(
+  value: string,
+  nameTokens: ReadonlySet<string>,
+): boolean {
+  if (nameTokens.size === 0) {
+    return false;
+  }
+  const tokens = value.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  if (tokens.length === 0) {
+    return false;
+  }
+  return tokens.every((token) => nameTokens.has(token));
+}
+
+/** A 4-digit year in 1900–2099 is a date, not a secret. */
+function isYearToken(run: string): boolean {
+  if (run.length !== 4) {
+    return false;
+  }
+  const year = Number(run);
+  return year >= 1900 && year <= 2099;
+}
+
+/**
+ * Digit runs of 3 or more that are not years, and rare words (7 or
+ * more letters) that are not the profile name. Ordinary words in the
+ * fact, such as "locker" or "code", are not secrets.
+ */
+export function secretTokens(
+  text: string,
+  nameTokens: ReadonlySet<string>,
+): string[] {
+  const out: string[] = [];
+  const add = (token: string): void => {
+    if (!out.includes(token)) {
+      out.push(token);
+    }
+  };
+  for (const run of text.match(/\d+/g) ?? []) {
+    if (run.length >= 3 && !isYearToken(run)) {
+      add(run);
+    }
+  }
+  for (const word of text.toLowerCase().match(/[a-z]+/g) ?? []) {
+    if (
+      word.length < 7 ||
+      PROFILE_STOPWORDS.has(word) ||
+      nameTokens.has(word)
+    ) {
+      continue;
+    }
+    add(word);
+  }
+  return out;
+}
+
+function valueHasSecret(
+  value: string,
+  texts: readonly string[],
+  nameTokens: ReadonlySet<string>,
+): boolean {
+  const haystack = value.toLowerCase();
+  const secrets = texts.flatMap((text) => secretTokens(text, nameTokens));
+  return secrets.some((token) => {
+    if (/^\d+$/.test(token)) {
+      return new RegExp(`(^|\\D)${token}(\\D|$)`).test(haystack);
+    }
+    return new RegExp(`\\b${escapeRegExp(token)}\\b`).test(haystack);
+  });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const PROFILE_STOPWORDS = new Set([
@@ -704,49 +1044,18 @@ const PROFILE_STOPWORDS = new Set([
   "here",
 ]);
 
-/**
- * Digits, or a letter-token of 4 or more characters that is not a
- * stopword. Shared tokens drop a paraphrased profile value.
- */
-export function sharesDistinctiveToken(left: string, right: string): boolean {
-  const tokens = distinctiveTokens(left);
-  if (tokens.size === 0) {
-    return false;
-  }
-  for (const token of distinctiveTokens(right)) {
-    if (tokens.has(token)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function distinctiveTokens(text: string): Set<string> {
-  const tokens = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
-  const out = new Set<string>();
-  for (const token of tokens) {
-    if (/^\d+$/.test(token)) {
-      out.add(token);
-      continue;
-    }
-    if (token.length >= MIN_FORGET_TEXT && !PROFILE_STOPWORDS.has(token)) {
-      out.add(token);
-    }
-  }
-  return out;
-}
-
 type SqlStatement = { run: (param: string) => unknown };
 type SqlDatabase = { prepare: (sql: string) => SqlStatement };
 
 /**
- * Drop `embed_index` rows for forgotten turns and deleted facts.
- * In-memory stores have no index table.
+ * Drop `embed_index` rows for forgotten turns, deleted facts, and
+ * purged chunks. In-memory stores have no index table.
  */
 function deleteEmbedIndex(
   store: MemoryStore,
   turnIds: ReadonlySet<string>,
   factIds: readonly string[],
+  chunkIds: readonly string[] = [],
 ): void {
   const open = (store as { database?: () => SqlDatabase }).database;
   if (typeof open !== "function") {
@@ -759,11 +1068,15 @@ function deleteEmbedIndex(
   const dropFact = db.prepare(
     "DELETE FROM embed_index WHERE source = 'fact' AND source_id = ?",
   );
+  const dropId = db.prepare("DELETE FROM embed_index WHERE id = ?");
   for (const id of turnIds) {
     dropTurn.run(id);
   }
   for (const id of factIds) {
     dropFact.run(id);
+  }
+  for (const id of chunkIds) {
+    dropId.run(id);
   }
 }
 

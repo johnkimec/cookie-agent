@@ -18,7 +18,8 @@ import {
   embedFact,
   isFactKind,
   nearestActive,
-  sharesDistinctiveToken,
+  profileNameTokens,
+  profileRowDropped,
 } from "./tools.ts";
 import type { TurnRecord } from "./types.ts";
 import type { VectorIndex } from "./vectors.ts";
@@ -167,14 +168,21 @@ export class LocalReflector implements Reflector {
       const droppedFacts = planned.inserts.filter((fact) =>
         droppedIds.has(fact.id),
       );
-      const liveProfile = profile.filter((row) => {
-        if (row.sourceTurn !== null && forgottenNow.has(row.sourceTurn)) {
-          return false;
-        }
-        return !droppedFacts.some((fact) =>
-          sharesDistinctiveToken(row.value, fact.text),
-        );
-      });
+      const nameTokens = profileNameTokens([
+        ...this.options.derived.listProfile(),
+        ...profile,
+      ]);
+      const droppedKeys = droppedFacts.map((fact) => fact.text.toLowerCase());
+      const liveProfile = profile.filter(
+        (row) =>
+          !profileRowDropped(
+            row,
+            droppedFacts,
+            droppedKeys,
+            forgottenNow,
+            nameTokens,
+          ),
+      );
       const raced = blocked.size > 0;
       if (!raced && journal !== null) {
         this.options.derived.insertJournal(journal);
@@ -348,30 +356,28 @@ function cleanSummary(summary: string): string | null {
   return text;
 }
 
-/** Turn or fact that states this profile value, when one is in the batch. */
+/**
+ * Source turn only when a fact or turn text equals the profile value.
+ * A shared token, or a longer turn that merely mentions the value, does
+ * not assign the secret turn to a name or pronouns row.
+ */
 export function sourceForProfile(
   value: string,
   facts: readonly FactRecord[],
   turns: readonly TurnRecord[],
 ): string | null {
   const needle = value.trim().toLowerCase();
-  if (needle.length < 4) {
+  if (needle.length === 0) {
     return null;
   }
   for (const fact of facts) {
-    const text = fact.text.toLowerCase();
-    if (text.includes(needle) || needle.includes(text)) {
+    if (fact.sourceTurn !== null && fact.text.trim().toLowerCase() === needle) {
       return fact.sourceTurn;
     }
   }
   for (const turn of turns) {
-    if (turn.content.toLowerCase().includes(needle)) {
+    if (turn.content.trim().toLowerCase() === needle) {
       return turn.id;
-    }
-  }
-  for (const fact of facts) {
-    if (fact.sourceTurn !== null && sharesDistinctiveToken(needle, fact.text)) {
-      return fact.sourceTurn;
     }
   }
   return null;

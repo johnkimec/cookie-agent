@@ -10,8 +10,9 @@ import {
   isRecord,
   messageErrors,
 } from "../protocol/validate.ts";
-import { ChatLog } from "./chat-log.ts";
+import { ChatLog, HISTORY_TURN_CAP } from "./chat-log.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
+import type { TurnRecord } from "./types.ts";
 
 const dirs: string[] = [];
 
@@ -197,6 +198,47 @@ describe("chat log wired into the core", () => {
     expect(store.recentTurns("conv-a", 10).map((row) => row.content)).toContain(
       "keep this",
     );
+    store.close();
+  });
+
+  it("applies the 20-turn cap after forgotten turns are removed", async () => {
+    const store = SqliteMemoryStore.open(tempDbPath(), { now: () => 5_000 });
+    store.appendSession({
+      id: "conv",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    const stored = (index: number): TurnRecord => ({
+      id: `t-${index}`,
+      sessionId: "conv",
+      role: "user",
+      content: `live-${index}`,
+      tainted: false,
+      model: null,
+      egress: false,
+      escalatedFrom: null,
+      tokensIn: null,
+      tokensCached: null,
+      tokensOut: null,
+      costUsd: null,
+      latencyMs: null,
+      createdAt: 100 + index,
+    });
+    for (let index = 0; index < 30; index += 1) {
+      store.appendTurn(stored(index));
+    }
+    for (let index = HISTORY_TURN_CAP; index < 30; index += 1) {
+      store.forgetTurn(`t-${index}`, "2026-10-25T00:00:00.000Z", []);
+    }
+    const log = new ChatLog(store);
+    const text = (await log.messagesFor("conv", "next"))
+      .map((message) => message.content)
+      .join("\n");
+    expect(text).toContain("live-0");
+    expect(text).toContain(`live-${HISTORY_TURN_CAP - 1}`);
+    expect(text).not.toContain(`live-${HISTORY_TURN_CAP}`);
     store.close();
   });
 });

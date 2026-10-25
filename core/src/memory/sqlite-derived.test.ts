@@ -418,9 +418,9 @@ describe("sqlite derived memory", () => {
     expect(store.listProfile().some((row) => row.value.includes("4417"))).toBe(
       false,
     );
-    // Both remembers cite t1. That turn is forgotten, so the gym profile
-    // row goes with it. The gym fact stays.
-    expect(store.listProfile().some((row) => row.key === "gym")).toBe(false);
+    // Both remembers cite t1. The gym row is pinned and its value is not
+    // the locker code, so it stays. The gym fact stays too.
+    expect(store.listProfile().some((row) => row.key === "gym")).toBe(true);
     expect(
       store.listChunks().some((chunk) => chunk.text.includes("4417")),
     ).toBe(false);
