@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv } from "ajv";
 import { describe, expect, it } from "vitest";
+import { listedTurnIssue } from "../eval/tasks.ts";
 
 const evalDir = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -62,6 +63,15 @@ describe("memory recall eval tasks", () => {
       expect((task.tests ?? "").length).toBeGreaterThan(0);
       expect(typeof task.setup).toBe("string");
       expect(Array.isArray(task.mustNotContain)).toBe(true);
+      const ids = task as TaskFile & {
+        expectedIds?: unknown;
+        distractorIds?: unknown;
+        realOnly?: unknown;
+      };
+      expect(Array.isArray(ids.expectedIds)).toBe(true);
+      expect(Array.isArray(ids.distractorIds)).toBe(true);
+      expect(listedTurnIssue(task as never)).toBeNull();
+      expect(ids.realOnly === true).toBe(task.id === "04-knee-squat-swap");
       assertHistory(task);
     }
   });

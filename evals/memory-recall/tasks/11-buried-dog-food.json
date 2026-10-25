@@ -2,8 +2,10 @@
   "id": "11-buried-dog-food",
   "question": "What brand of food did I switch my dog to?",
   "expectedFact": "Open Farm",
+  "expectedIds": ["ses-2026-10-10-0305-popup-13-user"],
+  "distractorIds": ["ses-2026-10-10-0305-popup-1-user"],
   "tests": "Buried fact: one off-topic line in a 24-turn debugging session must still be retrieved.",
-  "mustNotContain": [],
+  "mustNotContain": ["keeps getting slow"],
   "setup": "S1 24-turn llama-server cache debugging with the food line at turn 13, S2 short; ask in S3",
   "sessions": [
     {

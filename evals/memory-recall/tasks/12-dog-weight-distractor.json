@@ -3,6 +3,14 @@
   "question": "How much does my dog Cookie weigh?",
   "expectedFact": "4.2 kg",
   "accept": ["4.2kg"],
+  "expectedIds": [
+    "ses-2026-10-02-2145-popup-1-user",
+    "ses-2026-10-02-2145-popup-2-assistant"
+  ],
+  "distractorIds": [
+    "ses-2026-10-10-1630-popup-1-user",
+    "ses-2026-10-10-1630-popup-2-assistant"
+  ],
   "tests": "Distractor: two near-duplicate weight facts about two maltipoos; only Cookie's (4.2 kg) is correct.",
   "mustNotContain": [
     "5.1 kg"

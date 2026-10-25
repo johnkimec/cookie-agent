@@ -3,6 +3,14 @@
   "question": "What's my daily protein target right now?",
   "expectedFact": "170 g",
   "accept": ["170g"],
+  "expectedIds": [
+    "ses-2026-10-16-0140-popup-1-user",
+    "ses-2026-10-16-0140-popup-2-assistant"
+  ],
+  "distractorIds": [
+    "ses-2026-09-29-0000-popup-1-user",
+    "ses-2026-09-29-0000-popup-2-assistant"
+  ],
   "tests": "Update: a later session changes the number; the newer value (170 g) must win over the older 150 g.",
   "mustNotContain": [
     "150 g"
