@@ -1,6 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
+import * as sqliteVec from "sqlite-vec";
 import { afterEach, describe, expect, it } from "vitest";
 import { openMemoryDatabase } from "./migrate.ts";
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
@@ -32,6 +34,8 @@ const EXPECTED_OBJECTS = [
   "vec_facts",
   "vec_chunks",
   "chunks",
+  "embed_index",
+  "embed_index_source",
   "trust_grants",
   "checkins",
 ];
@@ -51,11 +55,11 @@ describe("migration 001", () => {
       expect(names).toContain(name);
     }
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(db.pragma("user_version", { simple: true })).toBe(1);
+    expect(db.pragma("user_version", { simple: true })).toBe(2);
     db.close();
 
     const again = openMemoryDatabase(path);
-    expect(again.pragma("user_version", { simple: true })).toBe(1);
+    expect(again.pragma("user_version", { simple: true })).toBe(2);
     expect(again.prepare("SELECT count(*) AS n FROM facts").get()).toEqual({
       n: 0,
     });
@@ -136,6 +140,28 @@ describe("migration 001", () => {
       .get(embedding) as { fact_id: string; distance: number };
     expect(nearest.fact_id).toBe("fact-near");
     expect(nearest.distance).toBeLessThan(1e-5);
+    db.close();
+  });
+
+  it("upgrades a version 1 database with migration 002 and leaves 001 untouched", () => {
+    const initial = readFileSync(
+      new URL("./migrations/001_initial.sql", import.meta.url),
+      "utf8",
+    );
+    expect(initial).not.toContain("embed_index");
+    const path = tempDbPath();
+    const created = new Database(path);
+    created.pragma("journal_mode = WAL");
+    created.loadExtension(sqliteVec.getLoadablePath());
+    created.exec(initial);
+    created.pragma("user_version = 1");
+    created.close();
+
+    const db = openMemoryDatabase(path);
+    expect(db.pragma("user_version", { simple: true })).toBe(2);
+    expect(db.prepare("SELECT count(*) AS n FROM embed_index").get()).toEqual({
+      n: 0,
+    });
     db.close();
   });
 });
