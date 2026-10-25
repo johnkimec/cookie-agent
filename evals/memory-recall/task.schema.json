@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "cookie-memory-recall-task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "question", "expectedFact", "sessions"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "question": { "type": "string", "minLength": 1 },
+    "expectedFact": { "type": "string", "minLength": 1 },
+    "sessions": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "startedAt", "surface", "turns"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "startedAt": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+          },
+          "surface": {
+            "type": "string",
+            "enum": ["popup", "menubar", "checkin", "widget"]
+          },
+          "turns": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["role", "content", "createdAt"],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": ["user", "assistant", "tool"]
+                },
+                "content": { "type": "string", "minLength": 1 },
+                "createdAt": {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
