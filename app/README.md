@@ -34,6 +34,8 @@ With the real core, the shell launches `llama-server` unless `GET http://127.0.0
 
 `swift test --package-path app` builds the tests. `swift run --package-path app CookieAgent` runs the same executable without the bundle. The bundle's display name is Cookie. The file name is `Cookie Agent.app`.
 
+The same supervisor also starts an embedding `llama-server` when the model file is present. The command is `llama-server --embeddings --pooling mean -m <model> --host 127.0.0.1 --port <port> -ngl 99 -c 8192 -np 4 -b 2048 -ub 2048`. The binary is the same `COOKIE_LLAMA_SERVER` override. The model defaults to `~/cookie-runtime/models/nomic-embed-text-v1.5.Q8_0.gguf` (`COOKIE_EMBED_MODEL_PATH` overrides it). The port defaults to `8081` (`COOKIE_EMBED_PORT`). The shell writes that resolved port into the core child's environment even when the parent left `COOKIE_EMBED_PORT` unset. Logs go to `<dataDir>/logs/llama-embed.log`. Pid files are `<dataDir>/logs/llama-embed.pid` and, when `COOKIE_DATA_DIR` was unset, `~/cookie-runtime/run/llama-server-<port>.pid`. A missing model file is logged and skipped. Embedder crashes do not change the menu status or block Send. Quit and SIGTERM wait until both owned servers have exited, then delete each pid file.
+
 Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another app may already own that key; the shell logs `RegisterEventHotKey failed` when registration loses.
 
 ## Accessibility identifiers
@@ -49,6 +51,7 @@ Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another ap
 | Input | `cookie.popup.input` | `Ask Cookie…` |
 | Mascot | `cookie.popup.mascot` | `Cookie, listening`, `Cookie, thinking`, `Cookie, talking`, or `Cookie, offline` |
 | Send mark | `cookie.popup.send` | `⏎` |
+| Stop (same control, while a reply is arriving) | `cookie.popup.stop` | `Stop` |
 | Refusal line | `cookie.popup.refusal` | `Cookie's model isn't ready yet.` or `Cookie's still answering.` |
 | Loading line | `cookie.popup.loading` | `Loading the model…` |
 | You turn | `cookie.turn.you.<n>` | `you` |
@@ -61,4 +64,4 @@ The Mac recipe is `.cursor/skills/verify-cookie/bin/drive-mac`. It does not run 
 
 ## M0 scope
 
-The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no cancel control and no screen chip. While `runtime.status` is `loading`, Send is disabled and the popup shows `Loading the model…` (`cookie.popup.loading`) instead of the refusal line. A `chat.send` error `-32002` while the runtime is not `down` is that loading state. Once the runtime is `up`, the menu status line includes the model name (`Qwen3.6` for `Qwen3.6-35B-A3B`). Escape closes the popup and does not cancel a stream. `Loading the model…` is placeholder copy pending John's review.
+The menu is the status line, `Ask Cookie…`, a checked `Local-only mode`, and `Quit Cookie`. The mascot is a static SwiftUI drawing, not Rive. There is no screen chip. While `runtime.status` is `loading` and no reply is arriving, Send is disabled and the popup shows `Loading the model…` (`cookie.popup.loading`) instead of the refusal line. A `chat.send` error `-32002` while the runtime is not `down` is that loading state. Once the runtime is `up`, the menu status line includes the model name (`Qwen3.6` for `Qwen3.6-35B-A3B`). While a reply is arriving, that same control is Stop (`cookie.popup.stop`, label `Stop`) and stays enabled. Return and Stop send one `chat.cancel`. The partial reply stays. The control returns to `⏎` (`cookie.popup.send`) when `chat.done` arrives or the cancel result arrives. Escape during a reply stops it and leaves the panel open. Escape when nothing is streaming closes the panel. Clicking outside closes the panel and does not cancel. `Loading the model…` and `Stop` are placeholder copy pending John's review.
