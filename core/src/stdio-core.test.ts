@@ -195,6 +195,13 @@ describe("stdio core", () => {
     expect(stderr).toContain("COOKIE_LLAMA_PORT");
   });
 
+  it("exits on a bad COOKIE_EMBED_PORT without speaking protocol", async () => {
+    const client = new StdioClient({ COOKIE_EMBED_PORT: "nope" });
+    expect(await client.exitCode()).toBe(1);
+    const stderr = await client.stderrText();
+    expect(stderr).toContain("COOKIE_EMBED_PORT");
+  });
+
   it("exits on a bad COOKIE_THINKING without speaking protocol", async () => {
     const client = new StdioClient({ COOKIE_THINKING: "yes" });
     expect(await client.exitCode()).toBe(1);

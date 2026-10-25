@@ -7,8 +7,11 @@
 import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { ChatLog } from "./memory/chat-log.ts";
+import { HttpEmbedder, readEmbedPort } from "./memory/http-embedder.ts";
+import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
 import { SqliteMemoryStore } from "./memory/sqlite-store.ts";
+import { SqliteVecIndex } from "./memory/sqlite-vec-index.ts";
 import {
   createLlamaServerProvider,
   readLlamaPort,
@@ -24,7 +27,17 @@ export function startStdioCore(
   try {
     port = readLlamaPort(env);
     thinking = readThinking(env);
-    history = new ChatLog(SqliteMemoryStore.open(memoryDatabasePath(env)));
+    const embedPort = readEmbedPort(env);
+    const store = SqliteMemoryStore.open(memoryDatabasePath(env));
+    const embedder = new HttpEmbedder({ port: embedPort });
+    const vectors = new SqliteVecIndex(store.database());
+    const indexer = new ContentIndexer({
+      db: store.database(),
+      embedder,
+      vectors,
+      available: async () => (await embedder.health()) === "up",
+    });
+    history = new ChatLog(store, indexer);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "bad config";
     process.stderr.write(`cookie-core: ${detail}\n`);

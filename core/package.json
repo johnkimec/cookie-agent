@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "spike-sqlite": "node scripts/spike-sqlite.mjs",
+    "check-embed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/check-embed.ts",
     "memory": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/memory/dump-cli.ts"
   },
   "dependencies": {

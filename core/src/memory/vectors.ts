@@ -13,6 +13,12 @@ export interface VectorIndex {
     embedding: Float32Array,
   ): Promise<void>;
   knn(table: VectorTable, query: Float32Array, k: number): Promise<VectorHit[]>;
+  /**
+   * Drop these ids from `vec_facts` and `vec_chunks`.
+   * An id that is not present is ignored. This is the only Step 0
+   * interface change in M1 step 2D. PR #18 adds the same signature.
+   */
+  delete(ids: string[]): Promise<void>;
 }
 
 function cosineDistance(left: Float32Array, right: Float32Array): number {
@@ -78,5 +84,17 @@ export class InMemoryVectorIndex implements VectorIndex {
         left.distance - right.distance || left.id.localeCompare(right.id),
     );
     return hits.slice(0, k);
+  }
+
+  async delete(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const drop = new Set(ids);
+    for (const rows of this.tables.values()) {
+      for (const id of drop) {
+        rows.delete(id);
+      }
+    }
   }
 }
