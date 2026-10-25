@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import {
+  mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -18,6 +20,7 @@ import { isCookieMessage, messageErrors } from "./protocol/validate.ts";
 import {
   type DriveInvocation,
   decodeProcAddress,
+  deletableScratch,
   HISTORY_CODE_WORD,
   resolveDriveExit,
 } from "./verify-drive.ts";
@@ -77,16 +80,7 @@ function macSurfaceLine(): string {
     : "verified-unreachable on Linux: requires macOS\n";
 }
 
-/**
- * Cleanup deletes a scratch dir only when `realpath` is still under the
- * unresolved runtime root. On macOS `/var` is `/private/var` and `/tmp` is
- * `/private/tmp`, so `deletableScratch` skips the dir and `stat` succeeds.
- */
 async function expectScratchGone(path: string): Promise<void> {
-  if (process.platform === "darwin") {
-    expect((await stat(path)).isDirectory()).toBe(true);
-    return;
-  }
   await expect(stat(path)).rejects.toThrow();
 }
 
@@ -410,6 +404,40 @@ describe("verify-cookie drive-core", () => {
       expect(failed).not.toBeNull();
       expect(failed?.code).toBe(2);
       expect(failed?.stdout).toBe(macSurfaceLine());
+    }
+  });
+
+  it("resolves a symlinked runtime root and rejects paths outside it", async () => {
+    const realRoot = await mkdtemp(join(tmpdir(), "cookie-real-"));
+    const linkParent = await mkdtemp(join(tmpdir(), "cookie-link-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "cookie-outside-"));
+    const linkRoot = join(linkParent, "runtime");
+    const outsideLink = join(linkParent, "outside");
+    await symlink(realRoot, linkRoot);
+    await symlink(outside, outsideLink);
+    await mkdir(join(realRoot, "inside"));
+    const insideReal = join(realRoot, "inside");
+    const insideLink = join(linkRoot, "inside");
+    const previous = process.env.COOKIE_VERIFY_RUNTIME;
+    process.env.COOKIE_VERIFY_RUNTIME = linkRoot;
+    try {
+      const resolvedInside = await realpath(insideReal);
+      expect(deletableScratch(insideLink)).toBe(resolvedInside);
+      expect(deletableScratch(insideReal)).toBe(resolvedInside);
+      expect(deletableScratch(outside)).toBeNull();
+      expect(deletableScratch(await realpath(outside))).toBeNull();
+      expect(deletableScratch(outsideLink)).toBeNull();
+      expect(deletableScratch(join(linkRoot, "missing"))).toBeNull();
+      expect(deletableScratch(join(realRoot, "missing"))).toBeNull();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COOKIE_VERIFY_RUNTIME;
+      } else {
+        process.env.COOKIE_VERIFY_RUNTIME = previous;
+      }
+      await rm(realRoot, { recursive: true, force: true });
+      await rm(linkParent, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 
