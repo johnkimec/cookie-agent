@@ -309,6 +309,13 @@ struct PopupRoot: View {
                     )
                 }
             }
+            IdentifiedText(
+                text: CookieCopy.onDevice,
+                identifier: CookieAX.onDeviceBadge,
+                label: CookieCopy.onDevice,
+                font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                textColor: .secondaryLabelColor
+            )
             IdentifiedButton(
                 title: control.title,
                 identifier: control.identifier,
@@ -341,18 +348,6 @@ struct TurnRow: View {
                 textColor: .labelColor
             )
             .frame(maxWidth: .infinity, alignment: .leading)
-            if let badge = turn.badge {
-                IdentifiedText(
-                    text: badge,
-                    identifier: CookieAX.badge(turn.index),
-                    label: badge,
-                    font: .systemFont(ofSize: NSFont.smallSystemFontSize),
-                    textColor: .labelColor
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: Capsule())
-            }
         }
     }
 

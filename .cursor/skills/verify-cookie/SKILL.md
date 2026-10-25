@@ -97,6 +97,53 @@ export COOKIE_APP="$PWD/dist/Cookie Agent.app"
 .cursor/skills/verify-cookie/bin/drive-mac all
 ```
 
+### How to run the planned Mac recipes
+
+These sixteen commands are the drives for the sub-features that are still `planned`. They do not flip that status. Sergey runs them on the Mac, keeps the evidence, and only then marks a sub-feature verified. Do not run them in parallel. Each one needs its own `COOKIE_DATA_DIR`. Port `18080` must be free before `status-loading`, `status-down`, `status-offline-chat`, and `status-local-only`. If it is already listening, the recipe exits and does not kill it. Accessibility must already be granted to the parent app.
+
+The script sets `COOKIE_DRIVE_KEYS`, `COOKIE_DRAFT_TTL_SECONDS`, `COOKIE_FAKE_DELTA_MS`, `COOKIE_LLAMA_SERVER`, and the blackhole proxy itself. Do not export those in the shell. `popup-draft` proves the draft survives a close and an immediate reopen at the product 600-second window, then a second launch with `COOKIE_DRAFT_TTL_SECONDS=2` sleeps 3 seconds and requires an empty field. That is not a wall-clock 10-minute wait. `popup-hotkey` prints `skipped` and exits 3, sending nothing, when `cookieagent_comm_pids` finds any `CookieAgent` before launch. The skip file is `popup-hotkey-skip.txt`. Otherwise it launches the drive copy and checks `cookieagent_comm_pids` again immediately before option-space. A pid other than this drive's copy prints `skipped`, exits 3, sends nothing, and writes `popup-hotkey-skip.txt` with reason `a CookieAgent appeared after launch`. The send happens only when stderr and `cookie-shell.log` do not contain `RegisterEventHotKey failed`. That send does not require the accessory app to be frontmost. `chat-talking-pose` records Reduce Motion as `yes` or `no` and requires the mascot label `Cookie, talking` in both cases. The app does not special-case Reduce Motion. A second send while a reply is in flight stops the reply (`chat-stop`). That sub-feature stays `planned`. These sixteen recipes do not drive Stop.
+
+```bash
+for v in $(env | sed -n 's/^\(COOKIE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+unset NODE_OPTIONS
+app/Scripts/package-app.sh
+export COOKIE_LLAMA_PORT=18080
+export COOKIE_CORE_CWD="$(pwd)"
+export COOKIE_APP="$PWD/dist/Cookie Agent.app"
+for recipe in menu-local-only menu-option-click menu-thinking popup-hotkey popup-escape popup-click-outside popup-option-click popup-input popup-draft popup-layout chat-popup-reply chat-talking-pose status-loading status-down status-offline-chat status-local-only; do
+  export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"
+  .cursor/skills/verify-cookie/bin/drive-mac "$recipe" --evidence "verify-evidence/$recipe"
+done
+```
+
+One recipe:
+
+```bash
+export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"
+.cursor/skills/verify-cookie/bin/drive-mac menu-local-only --evidence verify-evidence/menu-local-only
+```
+
+| Recipe | What a passing run asserts |
+| --- | --- |
+| `menu-local-only` | `cookie.menu.local-only` is named `Local-only mode` and `AXMenuItemMarkChar` is set. |
+| `menu-option-click` | Option-click on `cookie.menu.icon` opens the popup. `cookie.popup.input` is labelled `Ask Cookie…`. |
+| `menu-thinking` | While the cookie turn is a non-empty strict prefix of the fake reply, the menu VoiceOver is `Cookie, thinking`. After the full reply, with the popup still open, it is `Cookie, listening`. |
+| `popup-hotkey` | Before launch, any `CookieAgent` prints `skipped`, exits 3, and writes `popup-hotkey-skip.txt`. Immediately before option-space, a CookieAgent other than this drive's copy does the same with reason `a CookieAgent appeared after launch` and sends nothing. Otherwise option-space opens, closes, and opens the popup after this copy's hotkey registration succeeded. |
+| `popup-escape` | `AXCancel` on `cookie.popup.input` closes the panel. |
+| `popup-click-outside` | After the 0.8s outside-click suppression, a click in the lower fifth of that screen, outside the panel, closes it. |
+| `popup-option-click` | The panel is titled `Ask Cookie…`, subrole `AXSystemDialog`, and `cookie.popup` and `cookie.popup.input` are present. |
+| `popup-input` | The field label is `Ask Cookie…`. Shift-Return inserts a newline and does not submit, and it stops at 5 lines. ⌘K clears. Return sends a `you` turn labelled `you`. Up at the start of the empty field recalls that text and does not delete the turn. |
+| `popup-draft` | An unsent draft is still there after Escape and reopen. After the shortened ttl it is gone. |
+| `popup-layout` | The panel is 560 pt wide (±2), centred horizontally (±16), with its vertical centre within ±24 of the centre of the upper third. The mascot is 40 pt (±4) at the left of the input row. |
+| `chat-popup-reply` | `cookie.turn.you.0` is `you` / `hello from drive-mac`. `cookie.turn.cookie.0` grows as a strict prefix of the fake reply, then the full text. The input-row dot `cookie.badge.on-device` is `on-device`. |
+| `chat-talking-pose` | On at least two prefix samples the menu is `Cookie, thinking` and the mascot is `Cookie, talking`, and the mascot label does not change. |
+| `status-loading` | VoiceOver is `Cookie, loading`. The status line is `🐾 Cookie · starting model…`. `cookie.popup.send` is disabled. `cookie.popup.loading` is `Loading the model…`. `cookie.popup.refusal` is absent. Return adds no turn. The draft stays. |
+| `status-down` | After three failed restarts, VoiceOver is `Cookie, offline` and the status line is `🐾 Cookie · model offline`. Return adds no cookie turn. The draft stays. `cookie.popup.refusal` is `Cookie's model isn't ready yet.` There is no `cloud` badge. |
+| `status-offline-chat` | With the network proxied away from loopback, the status line is `🐾 Cookie · on-device · Qwen3.6` before and after the reply. The reply is `Hello. This reply is from the local stub, on device.` The badge is `on-device`. The glyph is not `Cookie, offline`. The app's sockets stay on loopback. Quit leaves the stub this app did not launch still running. |
+| `status-local-only` | `Local-only mode` stays checked in the fake up state, in loading, and in down. |
+
+Evidence for each recipe is `verify-evidence/<recipe>/` (`command.txt`, the AX or menu transcript, `summary.txt`, and `screencapture` files where the recipe takes one). That directory is gitignored.
+
 Real runtime on the Mac, from a clean shell. This is the drive cited on `chat-real-runtime`:
 
 ```bash

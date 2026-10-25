@@ -10,17 +10,22 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 usage() {
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all|self-check] [--runtime fake|real] [--evidence dir]" >&2
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all|self-check|menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
 }
 
 feature="all"
 runtime="fake"
 evidence=""
+focused=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     menu-bar-icon|hotkey-popup|chat|all|self-check)
       feature="$1"
+      ;;
+    menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only)
+      feature="$1"
+      focused=1
       ;;
     --runtime)
       [[ $# -ge 2 ]] || usage
@@ -41,6 +46,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$focused" == "1" && -z "$evidence" ]]; then
+  usage
+fi
 
 port="${COOKIE_LLAMA_PORT:-}"
 data="${COOKIE_DATA_DIR:-}"
@@ -127,10 +136,41 @@ stop_pid() {
 }
 DECOY_DATA=""
 DRIVE_DATA=""
+STUB_PID=""
+pid_is_fault_stub() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  pid_alive "$pid" || return 1
+  ps -p "$pid" -o command= 2>/dev/null | grep -E 'llama-fault-stub|llama-fault-wrapper' >/dev/null
+}
+
+stop_stub_pid() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  if ! pid_is_fault_stub "$pid"; then
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local attempt
+  for attempt in $(seq 1 20); do
+    pid_alive "$pid" || return 0
+    sleep 0.2
+  done
+  if pid_is_fault_stub "$pid"; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+}
+
 cleanup() {
-  local root
+  local root fault
   stop_pid "$APP_PID" "$BIN" "${DRIVE_PROCESS_NAME:-}" "${DRIVE_BUNDLE_ID:-}"
   stop_pid "$DECOY_PID" "$DECOY_BIN" "$DECOY_PROCESS_NAME" "$DECOY_BUNDLE_ID"
+  stop_stub_pid "${STUB_PID:-}" || true
+  STUB_PID=""
+  if declare -F pid_file_pid >/dev/null; then
+    fault="$(pid_file_pid || true)"
+    stop_stub_pid "$fault" || true
+  fi
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     case "$root" in
@@ -221,7 +261,11 @@ launch_verified() {
   if [[ -n "${existing// /}" ]]; then
     fail "refusing to launch: $bin already running as pid ${existing}"
   fi
-  "$bin" &
+  if [[ "$focused" == "1" && -n "${evidence:-}" ]]; then
+    "$bin" >>"$evidence/app-stdout.txt" 2>>"$evidence/app-stderr.txt" &
+  else
+    "$bin" &
+  fi
   pid=$!
   reason=""
   for attempt in $(seq 1 30); do
@@ -338,21 +382,41 @@ trim_osascript() {
 }
 
 # Key codes go to the frontmost process. Refuse unless that unix id is ours.
+# popup-hotkey is the exception: a third argument "hotkey" is option-space
+# for a copy that already registered the global hotkey. That app is
+# .accessory and is not frontmost. Every other send still requires it.
 send_key_code() {
   local code="$1"
+  local modifier="${2:-}"
+  local hotkey="${3:-}"
   [[ "$code" =~ ^[0-9]+$ ]] || fail "refusing keystroke: code is not an integer"
-  COOKIE_KEY_CODE="$code" osascript_run <<'APPLESCRIPT'
+  if [[ -n "$modifier" && "$modifier" != "option" ]]; then
+    fail "refusing keystroke: modifier is not option"
+  fi
+  if [[ -n "$hotkey" && "$hotkey" != "hotkey" ]]; then
+    fail "refusing keystroke: hotkey flag is not hotkey"
+  fi
+  if [[ "$hotkey" == "hotkey" && ( "$modifier" != "option" || "$code" != "49" ) ]]; then
+    fail "refusing keystroke: hotkey send is option-space only"
+  fi
+  COOKIE_KEY_CODE="$code" COOKIE_KEY_OPTION="$modifier" COOKIE_KEY_HOTKEY="$hotkey" osascript_run <<'APPLESCRIPT'
 set drivePid to (system attribute "COOKIE_DRIVE_PID") as integer
 set keyCode to (system attribute "COOKIE_KEY_CODE") as integer
 set expectedName to system attribute "COOKIE_DRIVE_PROCESS_NAME"
 set expectedBundle to system attribute "COOKIE_DRIVE_BUNDLE_ID"
+set hotkeySend to system attribute "COOKIE_KEY_HOTKEY"
+if hotkeySend is missing value then set hotkeySend to ""
 tell application "System Events"
   set frontProc to first process whose frontmost is true
   set frontPid to unix id of frontProc
-  if frontPid is not drivePid then error "refusing keystroke: frontmost unix id " & frontPid & " is not drive pid " & drivePid
-  if name of frontProc is not expectedName then error "refusing keystroke: frontmost process is not the launched executable"
-  if bundle identifier of frontProc is not expectedBundle then error "refusing keystroke: frontmost bundle id is not the launched app"
-  key code keyCode
+  if hotkeySend is not "hotkey" then
+    if frontPid is not drivePid then error "refusing keystroke: frontmost unix id " & frontPid & " is not drive pid " & drivePid
+    if name of frontProc is not expectedName then error "refusing keystroke: frontmost process is not the launched executable"
+    if bundle identifier of frontProc is not expectedBundle then error "refusing keystroke: frontmost bundle id is not the launched app"
+  end if
+  set mods to {}
+  if (system attribute "COOKIE_KEY_OPTION") is "option" then set end of mods to option down
+  key code keyCode using mods
 end tell
 APPLESCRIPT
 }
@@ -909,32 +973,7 @@ APPLESCRIPT
 }
 
 option_click_status() {
-  osascript_run <<'APPLESCRIPT'
-set cookieProc to my cookieDriveProcess()
-tell application "System Events"
-  tell cookieProc
-    set statusItem to missing value
-    repeat with barIndex from 1 to (count of menu bars)
-      if (count of menu bar items of menu bar barIndex) > 0 then
-        set statusItem to menu bar item 1 of menu bar barIndex
-      end if
-    end repeat
-    if statusItem is missing value then error "no menu bar item"
-  end tell
-  -- System-wide, not inside the process tell. The panel reads NSEvent.modifierFlags.
-  key down option
-  delay 0.1
-  try
-    tell cookieProc to click statusItem
-    key up option
-  on error errText
-    try
-      key up option
-    end try
-    error errText
-  end try
-end tell
-APPLESCRIPT
+  osascript_run "$DRIVE_BIN_DIR/scripts/option-click.applescript"
 }
 
 wait_for_menu() {
@@ -1126,6 +1165,13 @@ run_self_check() {
 if [[ "$feature" == "self-check" ]]; then
   run_self_check
   log "ok"
+  exit 0
+fi
+
+if [[ "$focused" == "1" ]]; then
+  # shellcheck disable=SC1091
+  source "$DRIVE_BIN_DIR/drive-mac-recipes"
+  run_focused_recipe
   exit 0
 fi
 

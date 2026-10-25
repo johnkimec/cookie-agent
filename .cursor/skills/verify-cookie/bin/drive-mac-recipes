@@ -1,0 +1,873 @@
+# Sourced by drive-mac on macOS. Each recipe asserts one planned sub-feature.
+# Status stays planned until Sergey runs the recipe and keeps the evidence.
+
+SCRIPTS="$ROOT/.cursor/skills/verify-cookie/bin/scripts"
+STUB_JS="$ROOT/.cursor/skills/verify-cookie/bin/llama-fault-stub.mjs"
+FAKE_REPLY="I'm here. This reply is from the fake core, with no model loaded."
+LOCAL_REPLY="Hello. This reply is from the local stub, on device."
+STATUS_UP_FAKE="🐾 Cookie · on-device · fake-local"
+STATUS_UP_QWEN="🐾 Cookie · on-device · Qwen3.6"
+STATUS_LOADING="🐾 Cookie · starting model…"
+STATUS_DOWN="🐾 Cookie · model offline"
+LOADING_LINE="Loading the model…"
+NOT_READY="Cookie's model isn't ready yet."
+
+note() {
+  log "$@"
+  printf '%s\n' "$*" >>"$evidence/summary.txt"
+}
+
+write_command() {
+  mkdir -p "$evidence"
+  : >"$evidence/summary.txt"
+  {
+    printf '%s\n' "drive-mac $feature --evidence $evidence"
+    printf '%s\n' "COOKIE_DATA_DIR=${COOKIE_DATA_DIR:-}"
+    printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+    printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND-<unset>}"
+    printf '%s\n' "COOKIE_CORE_CWD=${COOKIE_CORE_CWD:-}"
+    printf '%s\n' "COOKIE_FAKE_DELTA_MS=${COOKIE_FAKE_DELTA_MS-<unset>}"
+    printf '%s\n' "COOKIE_DRIVE_KEYS=${COOKIE_DRIVE_KEYS-<unset>}"
+    printf '%s\n' "COOKIE_DRAFT_TTL_SECONDS=${COOKIE_DRAFT_TTL_SECONDS-<unset>}"
+    printf '%s\n' "COOKIE_LLAMA_SERVER=${COOKIE_LLAMA_SERVER-<unset>}"
+    printf '%s\n' "COOKIE_LLAMA_FAULT=${COOKIE_LLAMA_FAULT-<unset>}"
+  } >"$evidence/command.txt"
+}
+
+refresh_command() {
+  {
+    printf '%s\n' "drive-mac $feature --evidence $evidence"
+    printf '%s\n' "COOKIE_DATA_DIR=${COOKIE_DATA_DIR:-}"
+    printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+    printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND-<unset>}"
+    printf '%s\n' "COOKIE_CORE_CWD=${COOKIE_CORE_CWD:-}"
+    printf '%s\n' "COOKIE_FAKE_DELTA_MS=${COOKIE_FAKE_DELTA_MS-<unset>}"
+    printf '%s\n' "COOKIE_DRIVE_KEYS=${COOKIE_DRIVE_KEYS-<unset>}"
+    printf '%s\n' "COOKIE_DRAFT_TTL_SECONDS=${COOKIE_DRAFT_TTL_SECONDS-<unset>}"
+    printf '%s\n' "COOKIE_LLAMA_SERVER=${COOKIE_LLAMA_SERVER-<unset>}"
+    printf '%s\n' "COOKIE_LLAMA_FAULT=${COOKIE_LLAMA_FAULT-<unset>}"
+  } >"$evidence/command.txt"
+}
+
+focused_launch() {
+  refresh_command
+  if [[ -z "${DRIVE_PROCESS_NAME:-}" || "$DRIVE_PROCESS_NAME" == "CookieAgent" ]]; then
+    install_prepared_identity "$SOURCE_APP"
+  fi
+  note "launch $BIN process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID"
+  launch_direct
+  if ! wait_for_menu; then
+    fail "menu bar did not appear"
+  fi
+}
+
+quit_focused() {
+  if [[ -z "${APP_PID:-}" ]] || ! kill -0 "$APP_PID" 2>/dev/null; then
+    APP_PID=""
+    return 0
+  fi
+  osascript_run "$SCRIPTS/quit-cookie.applescript" || true
+  local attempt
+  for attempt in $(seq 1 50); do
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      wait "$APP_PID" 2>/dev/null || true
+      APP_PID=""
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "app still running after Quit Cookie"
+}
+
+require_port_free() {
+  if port_listening 18080; then
+    fail "port 18080 is already listening; this recipe leaves that listener alone"
+  fi
+}
+
+install_fault_wrapper() {
+  local mode="$1"
+  local node_bin wrapper
+  node_bin="$(command -v node || true)"
+  [[ -n "$node_bin" ]] || fail "node is not on PATH"
+  wrapper="$evidence/llama-fault-wrapper"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf 'export COOKIE_LLAMA_FAULT=%q\n' "$mode"
+    printf 'exec %q %q "$@"\n' "$node_bin" "$STUB_JS"
+  } >"$wrapper"
+  chmod +x "$wrapper"
+  export COOKIE_LLAMA_SERVER="$wrapper"
+  export COOKIE_LLAMA_FAULT="$mode"
+  unset COOKIE_CORE_COMMAND
+}
+
+use_fake_core() {
+  unset COOKIE_LLAMA_SERVER COOKIE_LLAMA_FAULT
+  export COOKIE_LLAMA_PORT=18080
+  export COOKIE_CORE_COMMAND="pnpm --filter @cookie-agent/core fake-core"
+}
+
+start_up_stub() {
+  local node_bin attempt pid
+  node_bin="$(command -v node || true)"
+  [[ -n "$node_bin" ]] || fail "node is not on PATH"
+  require_port_free
+  "$node_bin" "$STUB_JS" --mode up --port 18080 >"$evidence/stub.log" 2>&1 &
+  STUB_PID=$!
+  for attempt in $(seq 1 50); do
+    if curl -sf -m 1 "http://127.0.0.1:18080/health" >/dev/null; then
+      note "up stub pid=$STUB_PID"
+      return 0
+    fi
+    pid="$STUB_PID"
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fail "up stub exited"
+    fi
+    sleep 0.1
+  done
+  fail "up stub did not answer /health"
+}
+
+export_blackhole_proxy() {
+  export http_proxy=http://127.0.0.1:9
+  export https_proxy=http://127.0.0.1:9
+  export HTTP_PROXY=http://127.0.0.1:9
+  export HTTPS_PROXY=http://127.0.0.1:9
+  export ALL_PROXY=http://127.0.0.1:9
+  export all_proxy=http://127.0.0.1:9
+  export NO_PROXY=127.0.0.1,localhost
+  export no_proxy=127.0.0.1,localhost
+}
+
+shoot() {
+  local dest="$1"
+  screencapture -x "$dest"
+  if [[ ! -s "$dest" ]]; then
+    fail "screencapture wrote no file ($dest)"
+  fi
+}
+
+menu_label() {
+  osascript_run "$SCRIPTS/menu-label.applescript"
+}
+
+wait_menu_contains() {
+  local needle="$1"
+  local tries="${2:-40}"
+  local attempt
+  for attempt in $(seq 1 "$tries"); do
+    if read_menu >"$evidence/menu.txt" 2>"$evidence/menu.err"; then
+      if grep -F "$needle" "$evidence/menu.txt" >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+wait_label() {
+  local want="$1"
+  local tries="${2:-40}"
+  local attempt label
+  for attempt in $(seq 1 "$tries"); do
+    label="$(menu_label || true)"
+    printf '%s\n' "$label" >"$evidence/label.txt"
+    if [[ "$label" == "$want" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+dump_ax() {
+  local dest="$1"
+  if ! osascript_run "$SCRIPTS/popup-dump.applescript" >"$dest"; then
+    fail "popup accessibility read failed"
+  fi
+}
+
+open_popup() {
+  if [[ "$(popup_is_open)" != "yes" ]]; then
+    open_via_ask
+    sleep 0.6
+  fi
+  if [[ "$(popup_is_open)" != "yes" ]]; then
+    fail "popup did not open"
+  fi
+}
+
+close_popup_if_open() {
+  if [[ "$(popup_is_open)" == "yes" ]]; then
+    osascript_run "$SCRIPTS/popup-action.applescript" cancel
+    sleep 0.4
+  fi
+  if [[ "$(popup_is_open)" == "yes" ]]; then
+    fail "popup stayed open"
+  fi
+}
+
+set_field() {
+  export COOKIE_AX_TEXT="$1"
+  osascript_run "$SCRIPTS/popup-action.applescript" set
+}
+
+press_action() {
+  osascript_run "$SCRIPTS/popup-action.applescript" press "$1"
+}
+
+assert_ax() {
+  python3 "$SCRIPTS/assert-ax.py" "$@"
+}
+
+assert_mark() {
+  local file="$1"
+  local result
+  result="$(assert_ax mark "$file")" || fail "Local-only mode was not checked ($(cat "$file"))"
+  note "$result"
+}
+
+capture_mark() {
+  local dest="$1"
+  local shot="$2"
+  if ! osascript_run "$SCRIPTS/menu-mark.applescript" "$shot" >"$dest"; then
+    fail "could not read the Local-only check mark"
+  fi
+  assert_mark "$dest"
+  if [[ ! -s "$shot" ]]; then
+    fail "menu screenshot was not written"
+  fi
+}
+
+save_logs() {
+  if [[ -f "$COOKIE_DATA_DIR/logs/cookie-shell.log" ]]; then
+    cp "$COOKIE_DATA_DIR/logs/cookie-shell.log" "$evidence/cookie-shell.log"
+  fi
+  if [[ -f "$COOKIE_DATA_DIR/logs/llama-server.log" ]]; then
+    cp "$COOKIE_DATA_DIR/logs/llama-server.log" "$evidence/llama-server.log"
+  fi
+}
+
+spawn_count() {
+  local log="$COOKIE_DATA_DIR/logs/llama-server.log"
+  [[ -f "$log" && -n "${COOKIE_LLAMA_SERVER:-}" ]] || {
+    printf '%s\n' 0
+    return
+  }
+  grep -c -F "$COOKIE_LLAMA_SERVER" "$log" || true
+}
+
+assert_no_egress() {
+  local root="$1"
+  local queue="$root"
+  local seen=" $root "
+  : >"$evidence/sockets.txt"
+  while [[ -n "$queue" ]]; do
+    local current="${queue%% *}"
+    if [[ "$queue" == "$current" ]]; then
+      queue=""
+    else
+      queue="${queue#* }"
+    fi
+    printf 'pid %s\n' "$current" >>"$evidence/sockets.txt"
+    lsof -nP -a -p "$current" -iTCP -Fn >>"$evidence/sockets.txt" 2>/dev/null || true
+    local children child
+    children="$(pgrep -P "$current" 2>/dev/null || true)"
+    for child in $children; do
+      case "$seen" in
+        *" $child "*) continue ;;
+      esac
+      seen="$seen$child "
+      if [[ -z "$queue" ]]; then
+        queue="$child"
+      else
+        queue="$queue $child"
+      fi
+    done
+  done
+  assert_ax egress "$evidence/sockets.txt" || fail "a non-loopback socket was open"
+  note "sockets loopback"
+}
+
+recipe_menu_local_only() {
+  use_fake_core
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_FAKE" 40; then
+    fail "menu did not show $STATUS_UP_FAKE"
+  fi
+  capture_mark "$evidence/mark.txt" "$evidence/menu.png"
+  note "menu-local-only name=Local-only mode mark set"
+  quit_focused
+}
+
+recipe_menu_option_click() {
+  use_fake_core
+  focused_launch
+  close_popup_if_open
+  option_click_status
+  sleep 0.6
+  if [[ "$(popup_is_open)" != "yes" ]]; then
+    fail "option-click did not open the popup"
+  fi
+  dump_ax "$evidence/ax.txt"
+  assert_ax field-label "$evidence/ax.txt" "Ask Cookie…" || fail "option-click field was not Ask Cookie…"
+  shoot "$evidence/popup.png"
+  note "menu-option-click opened cookie.popup.input Ask Cookie…"
+  quit_focused
+}
+
+recipe_popup_option_click() {
+  use_fake_core
+  focused_launch
+  close_popup_if_open
+  option_click_status
+  sleep 0.6
+  if [[ "$(popup_is_open)" != "yes" ]]; then
+    fail "option-click did not open the panel"
+  fi
+  dump_ax "$evidence/ax.txt"
+  assert_ax panel "$evidence/ax.txt" || fail "option-click panel did not match"
+  shoot "$evidence/popup.png"
+  note "popup-option-click panel Ask Cookie… AXSystemDialog"
+  quit_focused
+}
+
+recipe_popup_hotkey() {
+  local others
+  others="$(cookieagent_comm_pids | tr '\n' ' ')"
+  if [[ -n "${others// /}" ]]; then
+    log "popup-hotkey skipped: a CookieAgent is running (pid ${others}); not sending option-space"
+    {
+      printf '%s\n' "popup-hotkey skipped"
+      printf '%s\n' "reason=a CookieAgent is running"
+      printf '%s\n' "pids=${others}"
+      printf '%s\n' "signaled=none"
+    } >"$evidence/popup-hotkey-skip.txt"
+    printf '%s\n' "popup-hotkey=skipped" >>"$evidence/command.txt"
+    log "skipped"
+    exit 3
+  fi
+  use_fake_core
+  focused_launch
+  if ! hotkey_registered; then
+    fail "RegisterEventHotKey failed; not sending option-space"
+  fi
+  if [[ "$(popup_is_open)" == "yes" ]]; then
+    fail "popup was already open before option-space"
+  fi
+  toggle_hotkey yes "open"
+  sleep 0.45
+  toggle_hotkey no "close"
+  sleep 0.45
+  toggle_hotkey yes "open again"
+  note "popup-hotkey toggled open, closed, open"
+  quit_focused
+}
+
+hotkey_registered() {
+  local file hit=0
+  if [[ ! -f "$evidence/app-stderr.txt" ]]; then
+    note "popup-hotkey has no stderr log"
+    return 1
+  fi
+  for file in "$evidence/app-stderr.txt" "$COOKIE_DATA_DIR/logs/cookie-shell.log"; do
+    [[ -f "$file" ]] || continue
+    if grep -F "RegisterEventHotKey failed" "$file" >/dev/null; then
+      hit=1
+      note "RegisterEventHotKey failed in $file"
+      grep -F "RegisterEventHotKey failed" "$file" | while IFS= read -r line; do
+        note "$line"
+      done
+    fi
+  done
+  if [[ "$hit" == "1" ]]; then
+    return 1
+  fi
+  note "RegisterEventHotKey registered"
+  return 0
+}
+
+toggle_hotkey() {
+  local want="$1"
+  local why="$2"
+  local attempt state
+  guard_popup_hotkey_send "${APP_PID:-}" "${evidence:-}"
+  send_key_code 49 option hotkey
+  for attempt in $(seq 1 20); do
+    state="$(popup_is_open)"
+    if [[ "$state" == "$want" ]]; then
+      note "⌥Space $why -> $state"
+      return 0
+    fi
+    sleep 0.15
+  done
+  report_hotkey_failure
+  fail "⌥Space did not $why the popup"
+}
+
+report_hotkey_failure() {
+  local front
+  front="$(frontmost_app || true)"
+  note "frontmost ${front:-unknown}"
+  if [[ -f "$evidence/app-stderr.txt" ]] && grep -F "RegisterEventHotKey failed" "$evidence/app-stderr.txt" >/dev/null; then
+    grep -F "RegisterEventHotKey failed" "$evidence/app-stderr.txt" | while IFS= read -r line; do
+      note "$line"
+    done
+  else
+    note "RegisterEventHotKey did not report a failure. macOS does not name the app that owns ⌥Space."
+  fi
+}
+
+recipe_popup_escape() {
+  use_fake_core
+  focused_launch
+  open_popup
+  osascript_run "$SCRIPTS/popup-action.applescript" cancel
+  sleep 0.4
+  if [[ "$(popup_is_open)" != "no" ]]; then
+    fail "Escape did not close the popup"
+  fi
+  note "popup-escape closed"
+  quit_focused
+}
+
+recipe_popup_click_outside() {
+  use_fake_core
+  focused_launch
+  open_popup
+  sleep 1.2
+  osascript_run "$SCRIPTS/click-outside.applescript" | tee -a "$evidence/summary.txt"
+  sleep 0.4
+  if [[ "$(popup_is_open)" != "no" ]]; then
+    fail "click outside did not close the popup"
+  fi
+  note "popup-click-outside closed"
+  quit_focused
+}
+
+recipe_popup_layout() {
+  use_fake_core
+  focused_launch
+  open_popup
+  sleep 0.4
+  osascript_run "$SCRIPTS/layout-frames.applescript" >"$evidence/frames.txt"
+  dump_ax "$evidence/ax.txt"
+  assert_ax layout "$evidence/frames.txt" "$evidence/ax.txt" || fail "popup layout did not match"
+  shoot "$evidence/popup.png"
+  note "popup-layout 560 wide, upper third, 40 pt mascot on the left"
+  quit_focused
+}
+
+recipe_popup_input() {
+  use_fake_core
+  export COOKIE_DRIVE_KEYS=1
+  unset COOKIE_FAKE_DELTA_MS
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_FAKE" 40; then
+    fail "menu did not show $STATUS_UP_FAKE"
+  fi
+  open_popup
+  dump_ax "$evidence/ax-open.txt"
+  assert_ax field-label "$evidence/ax-open.txt" "Ask Cookie…" || fail "field label was not Ask Cookie…"
+  set_field "alpha"
+  sleep 0.2
+  press_action "Shift Return"
+  sleep 0.2
+  dump_ax "$evidence/ax-newline.txt"
+  assert_ax input-equals "$evidence/ax-newline.txt" 'alpha\n' forbid-you || fail "Shift-Return did not insert a newline"
+  local press
+  for press in 1 2 3; do
+    press_action "Shift Return"
+    sleep 0.15
+  done
+  dump_ax "$evidence/ax-five.txt"
+  press_action "Shift Return"
+  sleep 0.2
+  dump_ax "$evidence/ax-capped.txt"
+  assert_ax line-cap "$evidence/ax-five.txt" "$evidence/ax-capped.txt" || fail "Shift-Return did not stop at 5 lines"
+  press_action "Clear Field"
+  sleep 0.2
+  dump_ax "$evidence/ax-cleared.txt"
+  assert_ax input-equals "$evidence/ax-cleared.txt" "" allow || fail "⌘K did not clear the field"
+  set_field "hello from popup-input"
+  sleep 0.2
+  osascript_run "$SCRIPTS/popup-action.applescript" confirm
+  if ! wait_cookie_turn "$evidence/ax-sent.txt" 30; then
+    fail "Return did not produce a cookie turn"
+  fi
+  assert_ax you-turn "$evidence/ax-sent.txt" "hello from popup-input" || fail "Return did not send the you turn"
+  press_action "Recall Last"
+  sleep 0.3
+  dump_ax "$evidence/ax-recall.txt"
+  assert_ax recall "$evidence/ax-recall.txt" "hello from popup-input" || fail "Up did not recall the last you text"
+  shoot "$evidence/popup.png"
+  note "popup-input label, Shift-Return, ⌘K, Return, Up"
+  quit_focused
+}
+
+wait_cookie_turn() {
+  local dest="$1"
+  local tries="$2"
+  local attempt
+  for attempt in $(seq 1 "$tries"); do
+    if osascript_run "$SCRIPTS/popup-dump.applescript" >"$dest"; then
+      if grep -F $'cookie.turn.cookie.0\t' "$dest" >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+recipe_popup_draft() {
+  use_fake_core
+  unset COOKIE_DRAFT_TTL_SECONDS
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_FAKE" 40; then
+    fail "menu did not show $STATUS_UP_FAKE"
+  fi
+  open_popup
+  set_field "keep me"
+  sleep 0.3
+  osascript_run "$SCRIPTS/popup-action.applescript" cancel
+  sleep 0.4
+  if [[ "$(popup_is_open)" != "no" ]]; then
+    fail "closing the popup for the draft failed"
+  fi
+  open_popup
+  dump_ax "$evidence/ax-kept.txt"
+  assert_ax input-equals "$evidence/ax-kept.txt" "keep me" allow || fail "draft was not kept across close and open"
+  note "draft kept across close and open"
+  quit_focused
+  export COOKIE_DRAFT_TTL_SECONDS=2
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_FAKE" 40; then
+    fail "menu did not show $STATUS_UP_FAKE after relaunch"
+  fi
+  open_popup
+  set_field "expires"
+  sleep 0.3
+  osascript_run "$SCRIPTS/popup-action.applescript" cancel
+  sleep 0.4
+  if [[ "$(popup_is_open)" != "no" ]]; then
+    fail "popup stayed open while the draft ttl ran"
+  fi
+  sleep 3
+  open_popup
+  dump_ax "$evidence/ax-expired.txt"
+  assert_ax input-equals "$evidence/ax-expired.txt" "" allow || fail "draft was not cleared after the ttl"
+  note "draft cleared after COOKIE_DRAFT_TTL_SECONDS=2 (product default remains 600)"
+  quit_focused
+}
+
+recipe_popup_stream() {
+  local kind="$1"
+  use_fake_core
+  export COOKIE_FAKE_DELTA_MS=2000
+  unset COOKIE_DRIVE_KEYS
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_FAKE" 40; then
+    fail "menu did not show $STATUS_UP_FAKE"
+  fi
+  open_popup
+  set_field "hello from drive-mac"
+  sleep 0.2
+  osascript_run "$SCRIPTS/popup-action.applescript" confirm
+  : >"$evidence/samples.txt"
+  local attempt shot_prefix=0 state
+  for attempt in $(seq 1 50); do
+    menu_label >"$evidence/label.txt" || true
+    osascript_run "$SCRIPTS/popup-dump.applescript" >"$evidence/ax.txt" || true
+    state="$(assert_ax sample-line "$evidence/label.txt" "$evidence/ax.txt" "$FAKE_REPLY")"
+    printf '%s\n' "$state" >>"$evidence/samples.txt"
+    case "$state" in
+      prefix*)
+        if [[ "$shot_prefix" == "0" ]]; then
+          shoot "$evidence/thinking.png"
+          shot_prefix=1
+        fi
+        ;;
+      full*)
+        shoot "$evidence/popup.png"
+        break
+        ;;
+    esac
+    sleep 0.25
+  done
+  case "$kind" in
+    thinking) assert_menu_thinking ;;
+    talking) assert_talking_pose ;;
+    reply) assert_popup_reply ;;
+  esac
+  quit_focused
+}
+
+assert_menu_thinking() {
+  assert_ax thinking "$evidence/samples.txt" || fail "menu-thinking did not show Cookie, thinking then Cookie, listening"
+  if [[ ! -s "$evidence/thinking.png" || ! -s "$evidence/popup.png" ]]; then
+    fail "thinking screenshots were not written"
+  fi
+  note "menu-thinking Cookie, thinking then Cookie, listening"
+}
+
+assert_talking_pose() {
+  osascript_run "$SCRIPTS/reduce-motion.applescript" >"$evidence/reduce-motion.txt" || true
+  local reduce="unknown"
+  if [[ -f "$evidence/reduce-motion.txt" ]]; then
+    reduce="$(tr -d '[:space:]' <"$evidence/reduce-motion.txt")"
+  fi
+  assert_ax talking "$evidence/samples.txt" "$reduce" || fail "chat-talking-pose did not stay Cookie, talking"
+  note "chat-talking-pose Cookie, talking while chunks arrive (reduce motion $(cat "$evidence/reduce-motion.txt" 2>/dev/null || true))"
+}
+
+assert_popup_reply() {
+  assert_ax reply "$evidence/samples.txt" "$FAKE_REPLY" || fail "chat-popup-reply did not show chunks, you, and on-device"
+  if [[ ! -s "$evidence/popup.png" ]]; then
+    fail "popup screenshot was not written"
+  fi
+  cp "$evidence/samples.txt" "$evidence/chat.txt"
+  note "chat-popup-reply chunks, you, on-device"
+}
+
+recipe_menu_thinking() {
+  recipe_popup_stream thinking
+}
+
+recipe_chat_talking_pose() {
+  recipe_popup_stream talking
+}
+
+recipe_chat_popup_reply() {
+  recipe_popup_stream reply
+}
+
+recipe_status_loading() {
+  require_port_free
+  install_fault_wrapper loading
+  focused_launch
+  local attempt label count
+  for attempt in $(seq 1 60); do
+    label="$(menu_label || true)"
+    printf '%s\n' "$label" >"$evidence/label.txt"
+    read_menu >"$evidence/menu.txt" 2>"$evidence/menu.err" || true
+    count="$(spawn_count | tr -d '[:space:]')"
+    if [[ "$label" == "Cookie, loading" ]] && grep -F "$STATUS_LOADING" "$evidence/menu.txt" >/dev/null && [[ "${count:-0}" -ge 1 ]]; then
+      if [[ -f "$COOKIE_DATA_DIR/logs/llama-server.log" ]] && grep -F "llama-fault-stub loading" "$COOKIE_DATA_DIR/logs/llama-server.log" >/dev/null; then
+        break
+      fi
+    fi
+    label=""
+    sleep 0.5
+  done
+  if [[ "$label" != "Cookie, loading" ]]; then
+    fail "loading glyph did not stay up (label ${label:-empty})"
+  fi
+  shoot "$evidence/loading-menu.png"
+  open_popup
+  set_field "still drafting"
+  sleep 0.2
+  osascript_run "$SCRIPTS/popup-action.applescript" confirm || true
+  sleep 0.4
+  dump_ax "$evidence/ax.txt"
+  assert_ax loading "$evidence/ax.txt" "$LOADING_LINE" "still drafting" || fail "loading popup did not match"
+  shoot "$evidence/popup.png"
+  note "status-loading Cookie, loading; Send disabled; Loading the model…"
+  quit_focused
+  assert_fault_stub_gone
+}
+
+recipe_status_down() {
+  require_port_free
+  install_fault_wrapper down
+  focused_launch
+  local attempt label count=0
+  for attempt in $(seq 1 70); do
+    label="$(menu_label || true)"
+    printf '%s\n' "$label" >"$evidence/label.txt"
+    read_menu >"$evidence/menu.txt" 2>"$evidence/menu.err" || true
+    count="$(spawn_count | tr -d '[:space:]')"
+    if [[ "$label" == "Cookie, offline" ]] && grep -F "$STATUS_DOWN" "$evidence/menu.txt" >/dev/null && [[ "${count:-0}" -ge 3 ]]; then
+      break
+    fi
+    label=""
+    sleep 0.5
+  done
+  if [[ "$label" != "Cookie, offline" || "${count:-0}" -lt 3 ]]; then
+    fail "down did not follow 3 failed restarts (label ${label:-empty}, spawns ${count:-0})"
+  fi
+  note "status-down after $count failed restarts"
+  shoot "$evidence/offline-menu.png"
+  open_popup
+  set_field "offline draft"
+  sleep 0.2
+  osascript_run "$SCRIPTS/popup-action.applescript" confirm || true
+  sleep 0.4
+  dump_ax "$evidence/ax.txt"
+  assert_ax down "$evidence/ax.txt" "$NOT_READY" "offline draft" || fail "down send started a reply"
+  shoot "$evidence/popup.png"
+  note "status-down Cookie, offline; draft kept; no cookie turn"
+  quit_focused
+  assert_fault_stub_gone
+}
+
+assert_fault_stub_gone() {
+  local pid attempt
+  pid="$(pid_file_pid || true)"
+  for attempt in $(seq 1 20); do
+    if [[ -z "$pid" ]] || ! pid_is_fault_stub "$pid"; then
+      break
+    fi
+    sleep 0.25
+    pid="$(pid_file_pid || true)"
+  done
+  if [[ -n "$pid" ]] && pid_is_fault_stub "$pid"; then
+    fail "fault stub $pid still alive after quit"
+  fi
+  if port_listening 18080; then
+    fail "port 18080 still listening after quit"
+  fi
+  note "fault stub reaped and port 18080 clear"
+}
+
+recipe_status_offline_chat() {
+  unset COOKIE_CORE_COMMAND COOKIE_LLAMA_SERVER COOKIE_LLAMA_FAULT
+  export COOKIE_LLAMA_PORT=18080
+  start_up_stub
+  export_blackhole_proxy
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_QWEN" 90; then
+    fail "menu did not show $STATUS_UP_QWEN"
+  fi
+  if grep -E 'fake-local|starting model|model offline' "$evidence/menu.txt" >/dev/null; then
+    fail "status line was not the on-device Qwen line"
+  fi
+  local label
+  label="$(menu_label || true)"
+  if [[ "$label" == "Cookie, offline" ]]; then
+    fail "glyph was offline while the runtime was up"
+  fi
+  open_popup
+  local attempt
+  for attempt in 1 2 3; do
+    set_field "hello from drive-mac"
+    sleep 0.3
+    osascript_run "$SCRIPTS/popup-action.applescript" confirm || true
+    if wait_cookie_turn "$evidence/ax.txt" 20; then
+      break
+    fi
+  done
+  if ! grep -F $'cookie.turn.cookie.0\t' "$evidence/ax.txt" >/dev/null; then
+    fail "offline chat did not finish a reply"
+  fi
+  assert_ax offline "$evidence/ax.txt" "$LOCAL_REPLY" || fail "offline reply was not the local on-device reply"
+  shoot "$evidence/popup.png"
+  cp "$evidence/ax.txt" "$evidence/chat.txt"
+  if ! wait_menu_contains "$STATUS_UP_QWEN" 10; then
+    fail "status line changed after the offline reply"
+  fi
+  if grep -F "$STATUS_DOWN" "$evidence/menu.txt" >/dev/null; then
+    fail "status line became model offline"
+  fi
+  label="$(menu_label || true)"
+  if [[ "$label" == "Cookie, offline" ]]; then
+    fail "glyph became offline after the reply"
+  fi
+  printf '%s\n' "$label" >"$evidence/label-after.txt"
+  assert_no_egress "$APP_PID"
+  note "status-offline-chat on-device reply, status stayed $STATUS_UP_QWEN"
+  quit_focused
+  local pid="$STUB_PID"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "quit stopped the stub this app did not launch"
+  fi
+  note "unowned stub $STUB_PID still listening"
+  stop_stub_pid "$STUB_PID"
+  STUB_PID=""
+  if port_listening 18080; then
+    fail "port 18080 still listening after the recipe stopped its stub"
+  fi
+}
+
+recipe_status_local_only() {
+  use_fake_core
+  focused_launch
+  if ! wait_menu_contains "$STATUS_UP_FAKE" 40; then
+    fail "up state did not show $STATUS_UP_FAKE"
+  fi
+  capture_mark "$evidence/mark-up.txt" "$evidence/menu-up.png"
+  note "local-only checked while up"
+  quit_focused
+
+  require_port_free
+  install_fault_wrapper loading
+  focused_launch
+  local attempt label count
+  for attempt in $(seq 1 60); do
+    label="$(menu_label || true)"
+    read_menu >"$evidence/menu-loading.txt" 2>"$evidence/menu.err" || true
+    if [[ "$label" == "Cookie, loading" ]] && grep -F "$STATUS_LOADING" "$evidence/menu-loading.txt" >/dev/null; then
+      break
+    fi
+    label=""
+    sleep 0.5
+  done
+  if [[ "$label" != "Cookie, loading" ]]; then
+    fail "did not reach loading for the local-only check"
+  fi
+  capture_mark "$evidence/mark-loading.txt" "$evidence/menu-loading.png"
+  note "local-only checked while loading"
+  quit_focused
+  assert_fault_stub_gone
+
+  require_port_free
+  install_fault_wrapper down
+  focused_launch
+  for attempt in $(seq 1 70); do
+    label="$(menu_label || true)"
+    read_menu >"$evidence/menu-down.txt" 2>"$evidence/menu.err" || true
+    count="$(spawn_count | tr -d '[:space:]')"
+    if [[ "$label" == "Cookie, offline" && "${count:-0}" -ge 3 ]] && grep -F "$STATUS_DOWN" "$evidence/menu-down.txt" >/dev/null; then
+      break
+    fi
+    label=""
+    sleep 0.5
+  done
+  if [[ "$label" != "Cookie, offline" ]]; then
+    fail "did not reach down for the local-only check"
+  fi
+  capture_mark "$evidence/mark-down.txt" "$evidence/menu-down.png"
+  note "local-only checked while down"
+  quit_focused
+  assert_fault_stub_gone
+}
+
+run_focused_recipe() {
+  mkdir -p "$evidence"
+  evidence="$(cd "$evidence" && pwd)"
+  unset COOKIE_DRIVE_KEYS COOKIE_DRAFT_TTL_SECONDS COOKIE_FAKE_DELTA_MS
+  write_command
+  case "$feature" in
+    menu-local-only) recipe_menu_local_only ;;
+    menu-option-click) recipe_menu_option_click ;;
+    menu-thinking) recipe_menu_thinking ;;
+    popup-hotkey) recipe_popup_hotkey ;;
+    popup-escape) recipe_popup_escape ;;
+    popup-click-outside) recipe_popup_click_outside ;;
+    popup-option-click) recipe_popup_option_click ;;
+    popup-input) recipe_popup_input ;;
+    popup-draft) recipe_popup_draft ;;
+    popup-layout) recipe_popup_layout ;;
+    chat-popup-reply) recipe_chat_popup_reply ;;
+    chat-talking-pose) recipe_chat_talking_pose ;;
+    status-loading) recipe_status_loading ;;
+    status-down) recipe_status_down ;;
+    status-offline-chat) recipe_status_offline_chat ;;
+    status-local-only) recipe_status_local_only ;;
+    *) fail "no recipe for $feature" ;;
+  esac
+  save_logs
+  note "ok"
+}

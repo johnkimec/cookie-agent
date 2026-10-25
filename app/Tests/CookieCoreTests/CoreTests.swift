@@ -68,7 +68,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieAX.popupLoading, "cookie.popup.loading")
         XCTAssertEqual(CookieAX.turnYou(0), "cookie.turn.you.0")
         XCTAssertEqual(CookieAX.turnCookie(1), "cookie.turn.cookie.1")
-        XCTAssertEqual(CookieAX.badge(0), "cookie.badge.on-device.0")
+        XCTAssertEqual(CookieAX.onDeviceBadge, "cookie.badge.on-device")
         XCTAssertEqual(CookieCopy.ask, "Ask Cookie…")
         XCTAssertEqual(CookieCopy.localOnly, "Local-only mode")
         XCTAssertEqual(CookieCopy.quit, "Quit Cookie")
@@ -95,6 +95,45 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(PopupLayout.collapsedHeight, 64)
         XCTAssertEqual(PopupLayout.mascot, 40)
         XCTAssertEqual(PopupLayout.draftTTL, 600)
+    }
+
+    func testDraftTTLOverrideStaysInsideTheProductWindow() {
+        XCTAssertEqual(resolvedDraftTTL(environment: [:]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": ""]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "0"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "-3"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "nope"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "601"]), PopupLayout.draftTTL)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "2"]), 2)
+        XCTAssertEqual(resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "2.5"]), 2.5)
+        XCTAssertFalse(cookieDriveKeysEnabled(environment: [:]))
+        XCTAssertFalse(cookieDriveKeysEnabled(environment: ["COOKIE_DRIVE_KEYS": "0"]))
+        XCTAssertTrue(cookieDriveKeysEnabled(environment: ["COOKIE_DRIVE_KEYS": "1"]))
+        XCTAssertNil(driveCaretLocation(textLength: 5, environment: [:]))
+        XCTAssertNil(driveCaretLocation(textLength: 5, environment: ["COOKIE_DRIVE_KEYS": "0"]))
+        XCTAssertEqual(driveCaretLocation(textLength: 5, environment: ["COOKIE_DRIVE_KEYS": "1"]), 5)
+        XCTAssertEqual(driveCaretLocation(textLength: 0, environment: ["COOKIE_DRIVE_KEYS": "1"]), 0)
+    }
+
+    func testShortDraftTTLClearsOnOpen() {
+        var chat = PopupConversation(draft: "expires")
+        let saved = Date(timeIntervalSince1970: 1_000)
+        chat.noteClose(at: saved)
+        let ttl = resolvedDraftTTL(environment: ["COOKIE_DRAFT_TTL_SECONDS": "2"])
+        chat.noteOpen(at: saved.addingTimeInterval(2), ttl: ttl)
+        XCTAssertEqual(chat.draft, "expires")
+        chat.noteOpen(at: saved.addingTimeInterval(2.01), ttl: ttl)
+        XCTAssertEqual(chat.draft, "")
+
+        let session = PopupChatSession(conversationID: "conv-ttl")
+        session.setDraft("expires")
+        session.open(at: saved)
+        session.close(at: saved)
+        session.open(at: saved.addingTimeInterval(2), ttl: ttl)
+        XCTAssertEqual(session.snapshot.conversation.draft, "expires")
+        session.close(at: saved.addingTimeInterval(2))
+        session.open(at: saved.addingTimeInterval(4.01), ttl: ttl)
+        XCTAssertEqual(session.snapshot.conversation.draft, "")
     }
 }
 

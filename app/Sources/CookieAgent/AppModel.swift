@@ -220,7 +220,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func openPopup() {
         lastToggle = Date()
         let wasOpen = popupOpen
-        turns.open(at: Date())
+        turns.open(
+            at: Date(),
+            ttl: resolvedDraftTTL(environment: ProcessInfo.processInfo.environment)
+        )
         if wasOpen {
             onPopup?(true)
         }

@@ -89,10 +89,10 @@ public final class PopupChatSession: @unchecked Sendable {
         }
     }
 
-    public func open(at date: Date = Date()) {
+    public func open(at date: Date = Date(), ttl: TimeInterval = PopupLayout.draftTTL) {
         mutate { state in
             state.popupOpen = true
-            state.conversation.noteOpen(at: date)
+            state.conversation.noteOpen(at: date, ttl: ttl)
             return .none
         }
     }

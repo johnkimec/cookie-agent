@@ -101,6 +101,12 @@ final class AskTextView: NSTextView {
     override func setAccessibilityValue(_ accessibilityValue: Any?) {
         let text = (accessibilityValue as? String) ?? ""
         string = text
+        if let caret = driveCaretLocation(
+            textLength: (string as NSString).length,
+            environment: ProcessInfo.processInfo.environment
+        ) {
+            setSelectedRange(NSRange(location: caret, length: 0))
+        }
         onChange(text)
         needsDisplay = true
     }
@@ -113,6 +119,64 @@ final class AskTextView: NSTextView {
     override func accessibilityPerformCancel() -> Bool {
         onEscape()
         return true
+    }
+
+    /// Present only when `COOKIE_DRIVE_KEYS=1`. Each action calls `keyDown`,
+    /// the same path as the key. Names stay off the accessibility tree otherwise.
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        guard cookieDriveKeysEnabled(environment: ProcessInfo.processInfo.environment) else {
+            return super.accessibilityCustomActions()
+        }
+        return [
+            NSAccessibilityCustomAction(
+                name: "Shift Return",
+                target: self,
+                selector: #selector(driveShiftReturn)
+            ),
+            NSAccessibilityCustomAction(
+                name: "Clear Field",
+                target: self,
+                selector: #selector(driveClearField)
+            ),
+            NSAccessibilityCustomAction(
+                name: "Recall Last",
+                target: self,
+                selector: #selector(driveRecallLast)
+            ),
+        ]
+    }
+
+    @objc func driveShiftReturn() -> Bool {
+        driveKey(code: 36, flags: .shift, characters: "\r")
+        return true
+    }
+
+    @objc func driveClearField() -> Bool {
+        driveKey(code: 40, flags: .command, characters: "k")
+        return true
+    }
+
+    @objc func driveRecallLast() -> Bool {
+        driveKey(code: 126, flags: [], characters: "")
+        return true
+    }
+
+    private func driveKey(code: UInt16, flags: NSEvent.ModifierFlags, characters: String) {
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: flags,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: code
+        )
+        if let event {
+            keyDown(with: event)
+        }
     }
 
     override func keyDown(with event: NSEvent) {
