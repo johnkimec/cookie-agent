@@ -148,7 +148,7 @@ public final class PopupChatSession: @unchecked Sendable {
     public func close(at date: Date? = nil) {
         let now = date ?? clock.now()
         mutate { state in
-            state.noteClose(at: now)
+            _ = state.noteClose(at: now)
             return .none
         }
     }
@@ -433,7 +433,8 @@ private struct PopupChatState {
         guard let messageID = conversation.inflightMessageID else { return .none }
         cancelWhenAcked = false
         cancelForMessageID = messageID
-        return .cancel(messageID)
+        let id = inflightConversationID ?? conversationID
+        return .cancel(messageID: messageID, conversationID: id)
     }
 }
 
