@@ -1,4 +1,4 @@
-import type { ModelMessage } from "ai";
+import type { ModelMessage, ToolSet } from "ai";
 import type { RuntimeState } from "../protocol/types.ts";
 
 export interface ModelUsage {
@@ -35,5 +35,7 @@ export interface ModelProvider {
     system: string;
     messages: ModelMessage[];
     abortSignal: AbortSignal;
+    /** When set, the model may call these tools before the reply text. */
+    tools?: ToolSet;
   }): ModelStream;
 }

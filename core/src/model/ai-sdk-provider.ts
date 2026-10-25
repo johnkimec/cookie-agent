@@ -2,8 +2,10 @@ import {
   type FinishReason,
   type LanguageModel,
   type LanguageModelUsage,
+  stepCountIs,
   streamText,
 } from "ai";
+import { LOCAL_TOOL_STEP_LIMIT } from "../memory/tools.ts";
 import type { RuntimeState } from "../protocol/types.ts";
 import type {
   ModelCompletion,
@@ -40,6 +42,12 @@ export function createAiSdkProvider(
         abortSignal: args.abortSignal,
         maxRetries: 0,
         reasoning: options.thinking === true ? "provider-default" : "none",
+        ...(args.tools === undefined
+          ? {}
+          : {
+              tools: args.tools,
+              stopWhen: stepCountIs(LOCAL_TOOL_STEP_LIMIT),
+            }),
         onError: ({ error }) => {
           providerError = error;
         },

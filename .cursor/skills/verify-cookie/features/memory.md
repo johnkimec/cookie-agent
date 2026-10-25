@@ -48,6 +48,7 @@ Preconditions:
 ## Gotchas
 
 - None of these drives exist yet. `.cursor/skills/verify-cookie/bin/drive-core drive memory-persist --evidence /tmp/cookie-memory-evidence --core real` prints usage and exits 2. A vitest run is not feature evidence. Do not mark any sub-feature `verified` from this file alone.
+- Core tests cover idle reflect, `memory.remember`, `memory.forget`, consolidation, and the profile cap against a fake model. They do not write `verify-evidence/`. `memory-remember`, `memory-forget`, `memory-reflect`, `memory-profile-cap`, and `memory-rebuild` stay `planned`.
 - `drive-core` does not launch the Mac app. The Mac half of recall, against real Qwen, is a later `drive-mac` or real-core run from a fresh temp data dir.
 - Do not use port `8080`. Verification uses `COOKIE_LLAMA_PORT=18080`.
 - Do not point `COOKIE_DATA_DIR` at `~/Library/Application Support/com.johnkimec.cookie-agent`.

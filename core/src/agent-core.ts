@@ -10,6 +10,7 @@ import {
   CORE_SERVER_VERSION,
   SYSTEM_PROMPT,
 } from "./identity.ts";
+import type { MemoryHost } from "./memory/host.ts";
 import { ConversationMemory } from "./memory.ts";
 import { isAbortError } from "./model/ai-sdk-provider.ts";
 import type {
@@ -55,6 +56,7 @@ interface Flight {
   userText: string;
   sent: string[];
   cancelled: boolean;
+  settled: boolean;
   abort: AbortController;
 }
 
@@ -70,6 +72,11 @@ export interface AgentCoreOptions {
    * {@link RUNTIME_WATCH_MS}.
    */
   watchIntervalMs?: number;
+  /**
+   * Reflect, consolidation, and `memory.*` tools. Omitted, the core
+   * stays the M0 chat loop with no tools.
+   */
+  memoryHost?: MemoryHost;
   emit?: (message: unknown) => void;
   log?: (line: string) => void;
   exit?: (code: number) => void;
@@ -89,6 +96,7 @@ export class AgentCore {
   private readonly now: () => number;
   private readonly provider: ModelProvider;
   private readonly memory = new ConversationMemory();
+  private readonly memoryHost: MemoryHost | undefined;
   private readonly emitMessage: (message: unknown) => void;
   private readonly logLine: (line: string) => void;
   private readonly requestExit: (code: number) => void;
@@ -111,6 +119,7 @@ export class AgentCore {
 
   constructor(options: AgentCoreOptions) {
     this.provider = options.provider;
+    this.memoryHost = options.memoryHost;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 1000;
     this.now = options.now ?? (() => Date.now());
     this.serverName = options.serverName ?? CORE_SERVER_NAME;
@@ -174,7 +183,9 @@ export class AgentCore {
     if (flight !== null) {
       flight.cancelled = true;
       flight.abort.abort();
+      this.settleChat(flight, "cancelled");
     }
+    this.memoryHost?.onStop();
     this.flushAndExit(0);
   }
 
@@ -305,6 +316,7 @@ export class AgentCore {
     this.stopWatch();
     this.stopped.abort();
     this.cancelFlight(this.inflight);
+    this.memoryHost?.onStop();
     this.emit({ jsonrpc: "2.0", id, result: { ok: true } });
     this.flushAndExit(0);
   }
@@ -387,6 +399,7 @@ export class AgentCore {
       userText: body.text,
       sent: [],
       cancelled: false,
+      settled: false,
       abort: new AbortController(),
     };
     const onStop = (): void => {
@@ -396,6 +409,17 @@ export class AgentCore {
       onStop();
     } else {
       this.stopped.signal.addEventListener("abort", onStop, { once: true });
+    }
+    this.memoryHost?.slot.chatStarted();
+    try {
+      this.memoryHost?.onChatStarted({
+        conversationId: body.conversationId,
+        messageId,
+        userText: body.text,
+      });
+    } catch {
+      // A memory write must not refuse the chat. The slot still
+      // releases when the turn settles.
     }
     this.inflight = flight;
     this.emit({
@@ -536,12 +560,13 @@ export class AgentCore {
     let stream: ModelStream;
     try {
       stream = this.provider.streamChat({
-        system: SYSTEM_PROMPT,
+        system: this.memoryHost?.systemPrompt ?? SYSTEM_PROMPT,
         messages: this.memory.messagesFor(
           flight.conversationId,
           flight.userText,
         ),
         abortSignal: flight.abort.signal,
+        tools: this.memoryHost?.tools,
       });
     } catch (error) {
       this.failStream(flight, error);
@@ -635,6 +660,7 @@ export class AgentCore {
       flight.userText,
       flight.sent.join(""),
     );
+    this.settleChat(flight, finishReason);
     this.emit(this.doneMessage(flight, finishReason, usage));
   }
 
@@ -650,8 +676,31 @@ export class AgentCore {
       flight.userText,
       flight.sent.join(""),
     );
+    this.settleChat(flight, "cancelled");
     // The aborted request does not return a usage payload. See lessons.
     this.emit(this.doneMessage(flight, "cancelled", ZERO_USAGE));
+  }
+
+  private settleChat(flight: Flight, finishReason: FinishReason): void {
+    if (flight.settled) {
+      return;
+    }
+    flight.settled = true;
+    // Release the slot before the idle jobs run. onChatSettled starts
+    // those jobs, and they must see chat as idle.
+    this.memoryHost?.slot.chatFinished();
+    try {
+      this.memoryHost?.onChatSettled({
+        conversationId: flight.conversationId,
+        messageId: flight.messageId,
+        userText: flight.userText,
+        assistantText: flight.sent.join(""),
+        cancelled: finishReason === "cancelled",
+        finishReason,
+      });
+    } catch {
+      // The reply is already finished. Memory bookkeeping stops here.
+    }
   }
 
   private doneMessage(
