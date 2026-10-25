@@ -185,6 +185,7 @@ Run cleanup after a failed drive too, so a core is not left running. Then confir
 .cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-real-model-status --core real
 .cursor/skills/verify-cookie/bin/drive-core drive runtime-restart --evidence verify-evidence/m0-runtime-restart --core real
 .cursor/skills/verify-cookie/bin/drive-core drive chat-history --evidence verify-evidence/m0-chat-history --core real --llama external
+.cursor/skills/verify-cookie/bin/drive-core drive memory-persist --evidence verify-evidence/m1-memory-persist --core real
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
 .cursor/skills/verify-cookie/bin/drive-mac all

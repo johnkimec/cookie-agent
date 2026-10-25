@@ -137,7 +137,17 @@ jobs:
             echo "a compiler or node-gyp ran during install" >&2
             exit 1
           fi
-          grep -q "prebuild-install || node-gyp rebuild --release" "$log"
+          if grep -q "prebuild-install || node-gyp rebuild --release" "$log"; then
+            echo "install script ran: prebuild-install || node-gyp rebuild --release"
+          else
+            echo "install script was not reprinted; pnpm reused a store entry"
+            binary="core/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+            if [ ! -f "$binary" ]; then
+              binary="$(find node_modules -path '*/better-sqlite3/build/Release/better_sqlite3.node' -type f -print -quit)"
+            fi
+            test -f "$binary"
+            file "$binary"
+          fi
 
       - name: Require runner architecture
         run: |

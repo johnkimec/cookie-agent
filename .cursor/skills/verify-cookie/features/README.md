@@ -2,7 +2,7 @@
 
 This directory is the maintained source for verifying Cookie's user-facing M0 behavior. Read the index before driving, then use the matching feature file as the recipe.
 
-M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the local core, and an honest model status. Memory is a feature file, and every memory sub-feature is still `planned`. Calendar, screen, tools, check-ins, and widgets are not features here yet.
+M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the local core, and an honest model status. Memory is a feature file. `memory-persist` is verified. The other memory sub-features are `planned`. Calendar, screen, tools, check-ins, and widgets are not features here yet.
 
 ## Baseline preconditions
 
@@ -21,7 +21,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - Drive the core with `.cursor/skills/verify-cookie/bin/drive-core`.
 - On macOS, drive the menu and popup with `.cursor/skills/verify-cookie/bin/drive-mac` and the accessibility identifiers in the feature files (`cookie.menu.ask`, `cookie.popup.input`, and the labels `Ask Cookie…`, `Local-only mode`, `Quit Cookie`, `Cookie, thinking`). `drive-core` does not launch the GUI. The default `drive-mac` mode uses the fake core. `drive-mac chat --runtime real` drives the real core and `llama-server`. Sergey verified that drive on the Mac on 2026-10-25 at commit c89adc6. Evidence is `verify-evidence/m0-mac-real/`. Sub-features that drive does not assert stay `planned`. Do not click by coordinate.
 - One short-lived core per drive. It exits on `shutdown`. `--core real` also stops its stub.
-- Restore nothing in the user's home directory. Neither core writes files there in M0. The real core keeps history in memory.
+- Restore nothing in the user's home directory. The fake core does not read or write `COOKIE_DATA_DIR`. The real core stores turns in `<COOKIE_DATA_DIR>/cookie.db`. Verification sets that variable to a fresh temp directory.
 - Do not remove proof artifacts during cleanup.
 
 ## Proof and skip reporting
@@ -56,4 +56,4 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Hotkey popup](./hotkey-popup.md) covers ⌥Space, the `Ask Cookie…` field, and closing the panel.
 - [Chat streaming](./chat-streaming.md) covers sending a message, seeing the reply arrive in chunks, and cancelling it.
 - [Model status and offline](./model-status-offline.md) covers up, loading, and down, chatting with no network while the model is up, and `runtime-embeddings` (still `planned`).
-- [Memory](./memory.md) covers persistence, recall, remember, forget, reflect, the profile cap, rebuild, embeddings down, and zero egress. Every sub-feature is `planned`.
+- [Memory](./memory.md) covers persistence, recall, remember, forget, reflect, the profile cap, rebuild, embeddings down, and zero egress. `memory-persist` is verified. The other sub-features are `planned`.
