@@ -11,6 +11,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - Set `COOKIE_DATA_DIR` to a new temporary directory for every run. The helper does this itself.
 - Set `COOKIE_LLAMA_PORT=18080`. Never use `8080`. That is the product default and may be John's real `llama-server`.
 - Run `.cursor/skills/verify-cookie/bin/drive-core doctor` and require `ok`, `protocolVersion 0.1`, `runtime up fake-local`, `llamaPort 18080`, and `sockets none`. For the real core, run `doctor --core real` and require `server cookie-core`, `runtime up Qwen3.6-35B-A3B`, and `sockets loopback`.
+- On a Mac, start from a shell with no `COOKIE_*` or `NODE_OPTIONS` exported, and with Accessibility granted to the app that runs `osascript` (Terminal, or `Grok Bot.app` for an agent run). See Mac preflight in `SKILL.md`.
 - Never drive a core or a Mac app this run did not start. Do not point `COOKIE_DATA_DIR` at John's Application Support folder.
 
 ## Driving conventions
@@ -33,6 +34,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - A vitest run is not feature evidence. `status: verified` requires a path under `verify-evidence/` written by this skill.
 - Record the feature file and the sub-feature id with every artifact.
 - Report an unreachable path with the attempted command and the unmet precondition.
+- A drive that exits 0 verifies only the sub-features its script asserts. `drive-mac chat --runtime real` never presses ⌥Space or Escape and never sees `loading`, so those sub-features stay `planned` after it passes.
 - Do not report a skipped entry point as verified through a different path. A `runtime.status` line inside the chat-streaming transcript does not verify model status.
 
 ## Feature entry contract

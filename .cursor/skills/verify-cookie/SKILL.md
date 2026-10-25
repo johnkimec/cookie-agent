@@ -78,7 +78,7 @@ Core, on Linux or macOS:
 
 `model-status` pushes `loading` with `modelId` `Qwen3.6-35B-A3B`, expects `chat.send` to fail with code `-32002`, pushes `down`, expects the same refusal, pushes `up`, and expects a recovered `chat.done` `stop`. The fake core's `up` id is `fake-local`. The real core's `up` id is `Qwen3.6-35B-A3B`. On Linux its stdout also contains `verified-unreachable on Linux: requires macOS` for the menu-bar half of that feature. Exit 0 means the core half passed. It does not mean the glyphs were seen.
 
-Mac app, recipe only (proof pending):
+Mac app:
 
 ```bash
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
@@ -97,11 +97,45 @@ export COOKIE_APP="$PWD/dist/Cookie Agent.app"
 .cursor/skills/verify-cookie/bin/drive-mac all
 ```
 
+Real runtime on the Mac, from a clean shell. This is the drive cited on `chat-real-runtime`:
+
+```bash
+for v in $(env | sed -n 's/^\(COOKIE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+unset NODE_OPTIONS
+app/Scripts/package-app.sh
+export COOKIE_DATA_DIR="$(mktemp -d /tmp/cookie-m0.XXXXXX)"
+.cursor/skills/verify-cookie/bin/drive-mac chat --runtime real --evidence verify-evidence/m0-mac-real
+```
+
+Real model, core only. This aims at the product port `8080` on purpose. First check `lsof -nP -iTCP:8080 -sTCP:LISTEN`. If John's own server is already listening, drive against it and do not start or stop anything. Otherwise start one, drive, and stop only the pid you started:
+
+```bash
+/opt/homebrew/bin/llama-server -m ~/cookie-runtime/models/Qwen3.6-35B-A3B-Q4_K_M.gguf --host 127.0.0.1 --port 8080 -c 32768 -np 1 -ngl 99 -fa on --jinja --metrics > /tmp/cookie-llama.log 2>&1 &
+llama_pid=$!
+.cursor/skills/verify-cookie/bin/drive-core drive chat-history --evidence verify-evidence/m0-chat-history --core real --llama external
+kill -TERM "$llama_pid"; sleep 6; kill -0 "$llama_pid" 2>/dev/null && kill -KILL "$llama_pid"
+```
+
+### Mac preflight
+
+Each of these cost a failed run on 2026-10-25. Check them before the first Mac drive.
+
+- **Accessibility belongs to the parent app.** `drive-mac` reads the menu and popup through System Events. macOS grants Accessibility to the app at the top of the process tree that runs `osascript`, not to `osascript` or the script. From Terminal that is Terminal. When an agent drives through Grok Bot's shell on the Mac, it is `Grok Bot.app`. If System Events says the process is not allowed assistive access, add that parent app under System Settings › Privacy & Security › Accessibility and rerun. Granting Terminal does not help an agent-driven run. This is a permission problem, not a Cookie bug.
+- **Unset leaked environment.** A shell that ran an earlier drive still exports `COOKIE_DATA_DIR`, `COOKIE_LLAMA_PORT`, `COOKIE_CORE_COMMAND`, `COOKIE_CORE_CWD`, `COOKIE_APP`, and maybe `NODE_OPTIONS`. A stale `COOKIE_DATA_DIR` points the app at an old run's pid files and logs. An empty `COOKIE_LLAMA_PORT` leaves the app with no usable port, and the launch line reads `port=invalid`. Unset every `COOKIE_*` and `NODE_OPTIONS` first (the loop above), then export only what the recipe names. The app logs one launch line with `dataDir=`, `dataDirSource=`, and `port=` to `<COOKIE_DATA_DIR>/logs/cookie-shell.log`. Require `dataDirSource=environment`, `dataDir` equal to the directory you just made, and `port=18080` for the fake mode or `port=8080` for `--runtime real`. Anything else: run cleanup, open a fresh shell, start over.
+- **A fresh data directory per run.** `drive-mac` refuses to start unless `COOKIE_DATA_DIR` is already set, and it will not use Application Support. It does not create the directory. Run `mktemp -d /tmp/cookie-m0.XXXXXX` for every run. Do not reuse the last run's directory; its pid files name processes that are gone.
+- **llama-server exits slowly.** It ignores SIGTERM for about 5 seconds. Quit and SIGTERM send SIGTERM to the server's process group, wait 5 seconds, then SIGKILL. The app exits only after that: up to 5 seconds of core `shutdown`, 5 seconds of grace, a 2 second SIGKILL wait, and a 15 second reply backstop. Poll for the server to go away. A server alive 3 seconds after Quit is normal. One alive after 15 seconds is a failure.
+- **Diagnose a hang with `sample`.** If `CookieAgent` is still running after Quit or SIGTERM, run `sample <pid> 5 -file verify-evidence/<run>/hang-sample.txt` before you kill it. A main thread parked under `_shouldTerminate` in a modal run loop is the `.terminateLater` deadlock (`docs/lessons.md` L-2026-10-25-10). A main thread in the status-item tracking loop is the event-tracking hop (L-2026-10-25-12). Then `kill -9` that pid only and stop the server named in `<COOKIE_DATA_DIR>/logs/llama-server.pid`.
+- **Target pids, never names.** Do not `pkill` or `killall` `CookieAgent` or `llama-server`. John may have his own running. Use the pid that appeared after your launch and the pid file that launch wrote. A harness step that reads the status menu leaves the app's main thread in event-tracking run-loop mode, so a signal or quit sent right after it must still work in that mode.
+- **Finder and `open` launches.** They start the app with cwd `/` and `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. The app finds the repo from Info.plist `CookieRepoRoot`, which `app/Scripts/package-app.sh` writes, and then adds the Homebrew and pnpm directories to `PATH`. Repackage after moving the checkout. `🐾 Cookie · core not found` or `🐾 Cookie · pnpm not found` means that lookup failed.
+- **Leave the Mac idle.** After the last drive, `lsof -nP -iTCP:8080 -sTCP:LISTEN` and `lsof -nP -iTCP:18080 -sTCP:LISTEN` show nothing this run started.
+
 Never attach to a Cookie already running in John's session. The process name is `CookieAgent`. The input's accessibility label is `Ask Cookie…`. Identifiers are listed in `app/README.md` and the feature files. Read them with `osascript` and System Events, not a click coordinate. `drive-mac` opens the popup from the menu item `Ask Cookie…`, then reads each element's `AXIdentifier`. It does not coerce `entire contents` to a string, and it asks for the frontmost process outside `tell process "CookieAgent"`. Handlers that read `AXIdentifier` tell System Events themselves. A top-level handler does not inherit that tell, and `attribute` is then a syntax error (`-2741`). Inside that tell, `name of elem as text` is the same error, because `text` is a property; coerce with `as string` outside the tell. macOS CI compiles every embedded script with `osacompile`. Each identifier is on exactly one element. A chat drive sets `AXValue` on `cookie.popup.input` and performs `AXConfirm`. Keystrokes go to the frontmost app, not this panel. The first cookie turn is `cookie.turn.cookie.0`. `--evidence` receives `chat.txt` and `popup.png` from `screencapture -x`, and a chat drive exits non-zero when either file is missing. Option-click is a second open check. Any failed step exits non-zero. The menu bar's VoiceOver label while a reply streams is `Cookie, thinking`. Quit with the menu item `Quit Cookie`. Then run cleanup. Do not mark a Mac sub-feature verified from a core transcript, or from a different drive. `drive-mac chat --runtime real` on commit c89adc6 is verified by Sergey on the Mac, 2026-10-25, at `verify-evidence/m0-mac-real/`. Sub-features that drive does not assert stay `planned`.
 
 ## Evidence
 
 Proof goes in `verify-evidence/` at the repository root. That directory is gitignored. Cleanup does not delete it.
+
+Every core `drive` (`chat-streaming`, `model-status`, `chat-history`, `runtime-restart`) requires `--evidence <dir>`. Without it `drive-core` prints its usage, writes nothing, and exits 2.
 
 A drive writes these files into `--evidence`:
 
@@ -149,9 +183,12 @@ Run cleanup after a failed drive too, so a core is not left running. Then confir
 .cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-model-status
 .cursor/skills/verify-cookie/bin/drive-core drive chat-streaming --evidence verify-evidence/m0-real-chat-streaming --core real
 .cursor/skills/verify-cookie/bin/drive-core drive model-status --evidence verify-evidence/m0-real-model-status --core real
+.cursor/skills/verify-cookie/bin/drive-core drive runtime-restart --evidence verify-evidence/m0-runtime-restart --core real
+.cursor/skills/verify-cookie/bin/drive-core drive chat-history --evidence verify-evidence/m0-chat-history --core real --llama external
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
 .cursor/skills/verify-cookie/bin/drive-mac all
+.cursor/skills/verify-cookie/bin/drive-mac chat --runtime real --evidence verify-evidence/m0-mac-real
 .cursor/skills/verify-cookie/bin/drive-core cleanup
 ```
 

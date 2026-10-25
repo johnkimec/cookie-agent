@@ -43,4 +43,5 @@ Preconditions:
 - The panel is non-activating, so it may not be the frontmost accessibility app. Target the label `Ask Cookie…`, not "the frontmost window".
 - An `osascript` handler does not inherit `tell application "System Events"`. `value of attribute "AXIdentifier"` in that handler is a compile error (`-2741`). The handler tells System Events itself. Inside that tell, `name of elem as text` is the same error: `text` is a property there. Read the property, then coerce it with `as string` outside the tell.
 - Clicking outside does not close the panel when an action card is pending. M0 has no action cards, so a click outside closes it.
+- An `osascript` error saying assistive access is not allowed is a permission on the parent app (Terminal, or `Grok Bot.app` for an agent run). It is not a popup bug.
 - Another app may already own ⌥Space. If the popup does not open, say which app took the hotkey. Do not remap John's shortcut to force the check.
