@@ -206,7 +206,7 @@ struct IdentifiedText: NSViewRepresentable {
     var font: NSFont
     var textColor: NSColor
 
-    func makeNSView(context: Context) -> WrappingLabel {
+    fileprivate func makeNSView(context: Context) -> WrappingLabel {
         let field = WrappingLabel(wrappingLabelWithString: text)
         field.isEditable = false
         field.isSelectable = true
@@ -224,7 +224,7 @@ struct IdentifiedText: NSViewRepresentable {
         return field
     }
 
-    func updateNSView(_ field: WrappingLabel, context: Context) {
+    fileprivate func updateNSView(_ field: WrappingLabel, context: Context) {
         if field.stringValue != text {
             field.stringValue = text
         }
@@ -235,7 +235,7 @@ struct IdentifiedText: NSViewRepresentable {
         field.setAccessibilityValue(text)
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: WrappingLabel, context: Context) -> CGSize? {
+    fileprivate func sizeThatFits(_ proposal: ProposedViewSize, nsView: WrappingLabel, context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
         if nsView.preferredMaxLayoutWidth != width {
             nsView.preferredMaxLayoutWidth = width
