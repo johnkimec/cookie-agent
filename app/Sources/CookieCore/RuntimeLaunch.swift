@@ -16,8 +16,9 @@ public struct RuntimeLaunch: Equatable, Sendable {
     public var modelId: String
     public var logFile: String
     public var pidFile: String
-    /// Written only when the shell chose the data directory itself, so the
-    /// next launch can find an orphan after that temporary directory is gone.
+    /// Extra copy under `~/cookie-runtime/run` when the shell chose the data
+    /// directory. The product default is already stable; this still covers a
+    /// launch whose `COOKIE_DATA_DIR` was unset.
     public var stablePidFile: String?
     public var dataDirectory: String
 
@@ -171,6 +172,7 @@ public protocol RuntimeLaunching: Sendable {
     func start(_ spec: RuntimeProcessSpec) throws -> OwnedProcess
     func isAlive(_ pid: Int32) -> Bool
     func terminate(pid: Int32, processGroup: Int32, leadsGroup: Bool)
+    func forceTerminate(pid: Int32, processGroup: Int32, leadsGroup: Bool)
     func reap(_ pid: Int32) -> Int32?
     func isOurServer(pid: Int32, executable: String) -> Bool
 }
@@ -209,6 +211,14 @@ public func interpretHealth(status: Int, body: Data) -> RuntimeProbe {
     }
     return .up
 }
+
+public func logShell(_ message: String) {
+    let line = "cookie-shell: \(message)\n"
+    FileHandle.standardError.write(Data(line.utf8))
+}
+
+/// How long Quit waits after SIGTERM before SIGKILL.
+public let runtimeStopGraceSeconds = 5.0
 
 private func nonEmpty(_ value: String?) -> String? {
     guard let value, !value.isEmpty else { return nil }

@@ -26,6 +26,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var coreReady = false
     private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
+    private var terminationStarted = false
 
     var menuGlyphState: MenuGlyph {
         menuGlyph(
@@ -55,16 +56,18 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let launch = CoreLaunch.resolve(
             environment: ProcessInfo.processInfo.environment,
             currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
-            temporaryDirectory: FileManager.default.temporaryDirectory,
-            pid: ProcessInfo.processInfo.processIdentifier
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
         do {
             try launch.prepareDataDirectory()
         } catch {
             log("data dir: \(error)")
         }
+        let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
+        let inherited = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
+        let portText = parseLlamaPort(launch.environment["COOKIE_LLAMA_PORT"]).map(String.init) ?? "invalid"
         log(
-            "dataDir=\(launch.environment["COOKIE_DATA_DIR"] ?? "") port=\(launch.environment["COOKIE_LLAMA_PORT"] ?? "") core=\(launch.arguments.joined(separator: " ")) cwd=\(launch.workingDirectory.path)"
+            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) core=\(launch.arguments.joined(separator: " ")) cwd=\(launch.workingDirectory.path)"
         )
         let transport = ProcessTransport(launch: launch)
         let supervisor = CoreSupervisor(transport: transport)
@@ -88,7 +91,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             self.runtimeSupervisor = runtime
             self.runtime = RuntimeStatus(state: .loading, modelId: runtimeLaunch.modelId)
             log(
-                "llama=\(runtimeLaunch.executable) \(runtimeLaunch.arguments.joined(separator: " ")) log=\(runtimeLaunch.logFile)"
+                "llama=\(runtimeLaunch.executable) \(runtimeLaunch.arguments.joined(separator: " ")) log=\(runtimeLaunch.logFile) pid=\(runtimeLaunch.pidFile)"
             )
             let runtimeEvents = runtime.events
             runtimeEventsTask = Task { [weak self] in
@@ -111,14 +114,26 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// `applicationShouldTerminate` calls this and replies only after the
+    /// owned server has exited. A second call (willTerminate) does not
+    /// start another shutdown.
+    func prepareTermination() {
+        if terminationStarted { return }
+        terminationStarted = true
+        Task { [weak self] in
+            await self?.shutdownForExit()
+            DispatchQueue.main.async {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+    }
+
     func stopCore() {
-        transport?.stop()
-        eventsTask?.cancel()
-        runtimeEventsTask?.cancel()
-        let runtime = runtimeSupervisor
+        if terminationStarted { return }
+        terminationStarted = true
         let gate = ExitGate()
-        Task {
-            await runtime?.stop()
+        Task { [weak self] in
+            await self?.shutdownForExit()
             gate.signal()
         }
         gate.wait()
@@ -188,14 +203,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     func quit() {
-        Task { [weak self] in
-            try? await self?.supervisor?.shutdown()
-            self?.transport?.stop()
-            await self?.runtimeSupervisor?.stop()
-            DispatchQueue.main.async {
-                NSApp.terminate(nil)
-            }
-        }
+        NSApp.terminate(nil)
+    }
+
+    private func shutdownForExit() async {
+        try? await supervisor?.shutdown()
+        transport?.stop()
+        eventsTask?.cancel()
+        runtimeEventsTask?.cancel()
+        await runtimeSupervisor?.stop()
     }
 
     private func noteAck(_ messageID: String) {
@@ -320,8 +336,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func log(_ message: String) {
-        let line = "cookie-shell: \(message)\n"
-        FileHandle.standardError.write(Data(line.utf8))
+        logShell(message)
     }
 }
 
@@ -335,6 +350,6 @@ private final class ExitGate: @unchecked Sendable {
     }
 
     func wait() {
-        _ = semaphore.wait(timeout: .now() + 2)
+        _ = semaphore.wait(timeout: .now() + 15)
     }
 }

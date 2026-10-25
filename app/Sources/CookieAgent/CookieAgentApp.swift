@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.start()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model.prepareTermination()
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         model.stopCore()
     }

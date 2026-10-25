@@ -162,17 +162,20 @@ final class ConversationTests: XCTestCase {
 }
 
 final class LaunchTests: XCTestCase {
-    func testUnsetDataDirStaysOutOfApplicationSupport() {
-        let temp = URL(fileURLWithPath: "/tmp/cookie-launch-test", isDirectory: true)
+    func testUnsetDataDirUsesApplicationSupport() {
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
         let launch = CoreLaunch.resolve(
             environment: [:],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            temporaryDirectory: temp,
-            pid: 42
+            homeDirectory: home
         )
         let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
-        XCTAssertEqual(dataDir, temp.appendingPathComponent("cookie-agent-42", isDirectory: true).path)
-        XCTAssertFalse(dataDir.contains("Application Support"))
+        XCTAssertEqual(
+            dataDir,
+            "/Users/john/Library/Application Support/com.johnkimec.cookie-agent"
+        )
+        XCTAssertFalse(dataDir.contains("/tmp/cookie-m0"))
+        XCTAssertFalse(dataDir.contains("cookie-agent-"))
         XCTAssertNil(launch.environment["COOKIE_LLAMA_PORT"])
         XCTAssertEqual(launch.arguments, ["pnpm", "--filter", "@cookie-agent/core", "start"])
         XCTAssertTrue(launch.supervisesRuntime)
@@ -188,8 +191,7 @@ final class LaunchTests: XCTestCase {
                 "COOKIE_CORE_CWD": "/tmp/cookie-repo",
             ],
             currentDirectory: URL(fileURLWithPath: "/tmp/ignored", isDirectory: true),
-            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
-            pid: 7
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
         )
         XCTAssertEqual(launch.environment["COOKIE_DATA_DIR"], "/tmp/cookie-isolated")
         XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "18080")
@@ -202,13 +204,12 @@ final class LaunchTests: XCTestCase {
     }
 
     func testUnsetAndEmptyPortStayUnset() {
-        let temp = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
         let cwd = URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true)
         let unset = CoreLaunch.resolve(
             environment: ["OTHER": "kept"],
             currentDirectory: cwd,
-            temporaryDirectory: temp,
-            pid: 1
+            homeDirectory: home
         )
         XCTAssertNil(unset.environment["COOKIE_LLAMA_PORT"])
         XCTAssertEqual(unset.environment["OTHER"], "kept")
@@ -216,8 +217,7 @@ final class LaunchTests: XCTestCase {
         let empty = CoreLaunch.resolve(
             environment: ["COOKIE_LLAMA_PORT": ""],
             currentDirectory: cwd,
-            temporaryDirectory: temp,
-            pid: 2
+            homeDirectory: home
         )
         XCTAssertNil(empty.environment["COOKIE_LLAMA_PORT"])
     }
@@ -226,8 +226,7 @@ final class LaunchTests: XCTestCase {
         let launch = CoreLaunch.resolve(
             environment: ["COOKIE_LLAMA_PORT": "8080"],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
-            pid: 3
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
         )
         XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "8080")
     }
@@ -236,15 +235,13 @@ final class LaunchTests: XCTestCase {
         let fake = CoreLaunch.resolve(
             environment: ["COOKIE_CORE_COMMAND": "pnpm --filter @cookie-agent/core fake-core"],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
-            pid: 9
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
         )
         XCTAssertFalse(fake.supervisesRuntime)
         let real = CoreLaunch.resolve(
             environment: [:],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            temporaryDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true),
-            pid: 10
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
         )
         XCTAssertTrue(real.supervisesRuntime)
     }
@@ -526,6 +523,109 @@ final class RuntimeSupervisorTests: XCTestCase {
         XCTAssertFalse(ownsProcess)
     }
 
+    func testOwnedHealthyServerIsReused() async {
+        let launcher = ScriptedLauncher()
+        launcher.alive.insert(42)
+        launcher.ourPids.insert(42)
+        let pids = MemoryPidStore()
+        pids.record = RuntimePidRecord(pid: 42, processGroup: 42, leadsGroup: true)
+        let supervisor = makeSupervisor(
+            launcher: launcher,
+            health: ScriptedHealth(results: [.up]),
+            pids: pids,
+            clock: ScriptedClock()
+        )
+        await supervisor.start()
+        XCTAssertTrue(launcher.terminated.isEmpty)
+        XCTAssertTrue(launcher.started.isEmpty)
+        XCTAssertEqual(pids.record?.pid, 42)
+        let ownsProcess = await supervisor.isOwningProcess
+        XCTAssertTrue(ownsProcess)
+        let status = await supervisor.status
+        XCTAssertEqual(status.state, .up)
+        await supervisor.stop()
+        XCTAssertEqual(launcher.terminated, [42])
+        XCTAssertTrue(launcher.killed.isEmpty)
+        XCTAssertNil(pids.record)
+    }
+
+    func testLaunchWritesPidFileUnderDataDir() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-pid-launch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launch = RuntimeLaunch.resolve(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: root.path,
+            recordsStablePid: false
+        )
+        XCTAssertEqual(launch.pidFile, root.appendingPathComponent("logs/llama-server.pid").path)
+        let store = FileRuntimePidStore(path: launch.pidFile)
+        let launcher = ScriptedLauncher()
+        let supervisor = RuntimeSupervisor(
+            launch: launch,
+            launcher: launcher,
+            health: ScriptedHealth(results: [.down, .down, .up]),
+            pidStore: store,
+            clock: ScriptedClock(),
+            pollInterval: 0
+        )
+        await supervisor.start()
+        let record = store.load()
+        let started = launcher.lastStartedPid
+        XCTAssertEqual(record?.pid, started)
+        XCTAssertEqual(record?.processGroup, started)
+        XCTAssertEqual(record?.leadsGroup, true)
+        let text = try String(contentsOfFile: launch.pidFile, encoding: .utf8)
+        XCTAssertTrue(text.contains("\(started ?? 0) \(started ?? 0) 1"))
+        await supervisor.stop()
+        XCTAssertNil(store.load())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: launch.pidFile))
+    }
+
+    func testSigtermKeepsPidFileUntilSigkill() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-pid-kill-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launch = RuntimeLaunch.resolve(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: root.path,
+            recordsStablePid: false
+        )
+        let store = FileRuntimePidStore(path: launch.pidFile)
+        let launcher = ScriptedLauncher()
+        launcher.termKills = false
+        launcher.pidPath = launch.pidFile
+        let clock = ScriptedClock()
+        let supervisor = RuntimeSupervisor(
+            launch: launch,
+            launcher: launcher,
+            health: ScriptedHealth(results: [.down, .down, .up]),
+            pidStore: store,
+            clock: clock,
+            pollInterval: 0
+        )
+        await supervisor.start()
+        guard let pid = launcher.lastStartedPid else {
+            XCTFail("server was not started")
+            return
+        }
+        XCTAssertEqual(store.load()?.pid, pid)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: launch.pidFile))
+        await supervisor.stop()
+        let slept = clock.recorded().reduce(0, +)
+        XCTAssertGreaterThan(slept, 4.9)
+        XCTAssertTrue(launcher.fileExistedAtKill)
+        XCTAssertEqual(launcher.terminated, [pid])
+        XCTAssertEqual(launcher.killed, [pid])
+        XCTAssertNil(store.load())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: launch.pidFile))
+        XCTAssertFalse(launcher.isAlive(pid))
+    }
+
     func testLauncherWritesLogAndStopsSleep() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("cookie-launch-\(UUID().uuidString)", isDirectory: true)
@@ -569,6 +669,30 @@ final class RuntimeSupervisorTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.02)
         }
         XCTAssertFalse(launcher.isAlive(slept.pid))
+
+        let stubborn = try launcher.start(RuntimeProcessSpec(
+            executable: "/bin/sh",
+            arguments: ["-c", "trap '' TERM; while true; do sleep 30; done"],
+            logFile: log
+        ))
+        Thread.sleep(forTimeInterval: 0.3)
+        launcher.terminate(
+            pid: stubborn.pid,
+            processGroup: stubborn.processGroup,
+            leadsGroup: stubborn.leadsGroup
+        )
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertTrue(launcher.isAlive(stubborn.pid))
+        launcher.forceTerminate(
+            pid: stubborn.pid,
+            processGroup: stubborn.processGroup,
+            leadsGroup: stubborn.leadsGroup
+        )
+        let killDeadline = Date().addingTimeInterval(3)
+        while launcher.isAlive(stubborn.pid), Date() < killDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertFalse(launcher.isAlive(stubborn.pid))
     }
 }
 
@@ -676,10 +800,15 @@ private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var started: [RuntimeProcessSpec] = []
     private(set) var terminated: [Int32] = []
+    private(set) var killed: [Int32] = []
+    private(set) var lastStartedPid: Int32?
     var alive: Set<Int32> = []
     var ourPids: Set<Int32> = []
     var deathsRemaining: Int
     var failStarts: Int
+    var termKills = true
+    var pidPath: String?
+    private(set) var fileExistedAtKill = false
     private var nextPid: Int32 = 100
 
     init(deathsRemaining: Int = 0, failStarts: Int = 0) {
@@ -703,6 +832,7 @@ private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
         let pid = nextPid
         nextPid += 1
         started.append(spec)
+        lastStartedPid = pid
         ourPids.insert(pid)
         if deathsRemaining > 0 {
             deathsRemaining -= 1
@@ -721,6 +851,19 @@ private final class ScriptedLauncher: RuntimeLaunching, @unchecked Sendable {
     func terminate(pid: Int32, processGroup: Int32, leadsGroup: Bool) {
         lock.lock()
         terminated.append(pid)
+        let kills = termKills
+        if kills {
+            alive.remove(pid)
+            alive.remove(processGroup)
+        }
+        lock.unlock()
+    }
+
+    func forceTerminate(pid: Int32, processGroup: Int32, leadsGroup: Bool) {
+        let existed = pidPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+        lock.lock()
+        fileExistedAtKill = existed
+        killed.append(pid)
         alive.remove(pid)
         alive.remove(processGroup)
         lock.unlock()

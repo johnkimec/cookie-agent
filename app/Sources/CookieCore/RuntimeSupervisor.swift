@@ -45,13 +45,18 @@ public struct FileRuntimePidStore: RuntimePidStoring {
 
     public func save(_ record: RuntimePidRecord) {
         let url = URL(fileURLWithPath: path)
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let flag = record.leadsGroup ? "1" : "0"
-        let text = "\(record.pid) \(record.processGroup) \(flag)\n"
-        try? text.write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let flag = record.leadsGroup ? "1" : "0"
+            let text = "\(record.pid) \(record.processGroup) \(flag)\n"
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            logShell("pid file \(path)")
+        } catch {
+            logShell("pid file \(path) write failed: \(error)")
+        }
     }
 
     public func remove() {
@@ -101,6 +106,7 @@ public actor RuntimeSupervisor {
     private let pollInterval: Double
     private var stopped = false
     private var ownsProcess = false
+    private var ownedRecord: RuntimePidRecord?
     private var watchGeneration = 0
     public private(set) var status: RuntimeStatus
 
@@ -146,7 +152,17 @@ public actor RuntimeSupervisor {
             return
         }
         publish(RuntimeStatus(state: .loading, modelId: launch.modelId))
-        await reclaimStale()
+        switch await reclaimStale() {
+        case .adopted:
+            return
+        case .spawn:
+            if let port = launch.port, !stopped {
+                await runOwned(port: port, initialBackoff: false)
+            }
+            return
+        case .cleared:
+            break
+        }
         if stopped { return }
         guard let port = launch.port else { return }
         switch await health.probe(port: port) {
@@ -160,22 +176,21 @@ public actor RuntimeSupervisor {
         }
     }
 
-    /// Quit. An adopted server (healthy port, no pid of ours) is left running.
-    public func stop() {
+    /// Quit. A server this app did not launch is left running. An owned
+    /// server gets SIGTERM, then SIGKILL if it is still alive after the
+    /// grace period. The pid file stays until that process has exited.
+    public func stop() async {
         stopped = true
         watchGeneration += 1
-        guard ownsProcess, let record = pidStore.load() else {
+        let record = ownedRecord ?? (ownsProcess ? pidStore.load() : nil)
+        guard ownsProcess, let record else {
+            logShell("runtime stop skipped owns=\(ownsProcess)")
             ownsProcess = false
+            ownedRecord = nil
             return
         }
-        launcher.terminate(
-            pid: record.pid,
-            processGroup: record.processGroup,
-            leadsGroup: record.leadsGroup
-        )
-        _ = launcher.reap(record.pid)
-        pidStore.remove()
-        ownsProcess = false
+        logShell("runtime stop pid=\(record.pid) pgid=\(record.processGroup)")
+        await signalUntilDead(record)
     }
 
     /// Re-read `/health` after a `-32002` so a cold load is not stuck on screen.
@@ -199,23 +214,116 @@ public actor RuntimeSupervisor {
         eventsContinuation.yield(status)
     }
 
-    private func reclaimStale() async {
-        guard let record = pidStore.load() else { return }
-        if launcher.isAlive(record.pid),
-           launcher.isOurServer(pid: record.pid, executable: launch.executable) {
-            launcher.terminate(
-                pid: record.pid,
-                processGroup: record.processGroup,
-                leadsGroup: record.leadsGroup
-            )
-            var spins = 0
-            while launcher.isAlive(record.pid), spins < 20, !stopped {
-                await clock.sleep(seconds: 0.05)
-                spins += 1
+    private enum Reclaim {
+        /// Kept the recorded server. Do not spawn another.
+        case adopted
+        /// Recorded server was not healthy and has been killed.
+        case spawn
+        /// No owned server. The caller probes the port.
+        case cleared
+    }
+
+    /// A live `llama-server` recorded in the pid file is one we started.
+    /// Reuse it when the port is healthy or still loading. Otherwise kill
+    /// it before a new server is spawned.
+    private func reclaimStale() async -> Reclaim {
+        guard let port = launch.port, let record = pidStore.load() else {
+            if pidStore.load() != nil {
+                pidStore.remove()
             }
-            _ = launcher.reap(record.pid)
+            return .cleared
         }
-        pidStore.remove()
+        let alive = launcher.isAlive(record.pid)
+        let ours = alive && launcher.isOurServer(pid: record.pid, executable: launch.executable)
+        guard ours else {
+            pidStore.remove()
+            return .cleared
+        }
+        let owned = OwnedProcess(
+            pid: record.pid,
+            processGroup: record.processGroup,
+            leadsGroup: record.leadsGroup
+        )
+        switch await health.probe(port: port) {
+        case .up:
+            remember(record)
+            publish(RuntimeStatus(state: .up, modelId: launch.modelId))
+            armWatch(owned, port: port)
+            return .adopted
+        case .loading:
+            remember(record)
+            switch await waitUntilReady(port: port, owned: owned) {
+            case .ready:
+                publish(RuntimeStatus(state: .up, modelId: launch.modelId))
+                armWatch(owned, port: port)
+                return .adopted
+            case .exited:
+                forgetProcess(removePid: true)
+                return .cleared
+            case .stopped:
+                return .adopted
+            }
+        case .down:
+            await signalUntilDead(record)
+            if launcher.isAlive(record.pid) {
+                publish(RuntimeStatus(state: .down, modelId: nil))
+                return .adopted
+            }
+            return .spawn
+        }
+    }
+
+    private func remember(_ record: RuntimePidRecord) {
+        ownsProcess = true
+        ownedRecord = record
+    }
+
+    private func forgetProcess(removePid: Bool) {
+        ownsProcess = false
+        ownedRecord = nil
+        if removePid {
+            pidStore.remove()
+        }
+    }
+
+    /// SIGTERM the process group, wait, then SIGKILL. Remove the pid file
+    /// only after the process is gone so the next launch can still find it.
+    private func signalUntilDead(_ record: RuntimePidRecord) async {
+        launcher.terminate(
+            pid: record.pid,
+            processGroup: record.processGroup,
+            leadsGroup: record.leadsGroup
+        )
+        if await waitUntilDead(record.pid, seconds: runtimeStopGraceSeconds) {
+            _ = launcher.reap(record.pid)
+            forgetProcess(removePid: true)
+            return
+        }
+        logShell("runtime SIGKILL pid=\(record.pid) pgid=\(record.processGroup)")
+        launcher.forceTerminate(
+            pid: record.pid,
+            processGroup: record.processGroup,
+            leadsGroup: record.leadsGroup
+        )
+        if await waitUntilDead(record.pid, seconds: 2) {
+            _ = launcher.reap(record.pid)
+            forgetProcess(removePid: true)
+            return
+        }
+        logShell("runtime pid \(record.pid) still alive; keeping \(launch.pidFile)")
+        forgetProcess(removePid: false)
+    }
+
+    private func waitUntilDead(_ pid: Int32, seconds: Double) async -> Bool {
+        let slice = 0.05
+        var waited = 0.0
+        while launcher.isAlive(pid) {
+            if waited >= seconds { return false }
+            let step = min(slice, seconds - waited)
+            await clock.sleep(seconds: step)
+            waited += step
+        }
+        return true
     }
 
     private func waitForExternal(port: Int) async {
@@ -248,8 +356,7 @@ public actor RuntimeSupervisor {
             }
             switch await health.probe(port: port) {
             case .up:
-                ownsProcess = false
-                pidStore.remove()
+                forgetProcess(removePid: true)
                 publish(RuntimeStatus(state: .up, modelId: launch.modelId))
                 return
             case .loading:
@@ -280,20 +387,23 @@ public actor RuntimeSupervisor {
                 }
                 continue
             }
-            ownsProcess = true
-            pidStore.save(RuntimePidRecord(
+            let record = RuntimePidRecord(
                 pid: owned.pid,
                 processGroup: owned.processGroup,
                 leadsGroup: owned.leadsGroup
-            ))
+            )
+            remember(record)
+            pidStore.save(record)
+            if pidStore.load()?.pid != record.pid {
+                logShell("pid file \(launch.pidFile) missing after save")
+            }
             switch await waitUntilReady(port: port, owned: owned) {
             case .ready:
                 publish(RuntimeStatus(state: .up, modelId: launch.modelId))
                 armWatch(owned, port: port)
                 return
             case .exited:
-                ownsProcess = false
-                pidStore.remove()
+                forgetProcess(removePid: true)
                 if failures >= RuntimeLaunch.maxStartAttempts {
                     giveUp()
                     return
@@ -306,8 +416,7 @@ public actor RuntimeSupervisor {
     }
 
     private func giveUp() {
-        ownsProcess = false
-        pidStore.remove()
+        forgetProcess(removePid: true)
         publish(RuntimeStatus(state: .down, modelId: nil))
     }
 
@@ -348,8 +457,7 @@ public actor RuntimeSupervisor {
             await clock.sleep(seconds: pollInterval)
         }
         guard !stopped, generation == watchGeneration else { return }
-        ownsProcess = false
-        pidStore.remove()
+        forgetProcess(removePid: true)
         await runOwned(port: port, initialBackoff: true)
     }
 }
@@ -438,11 +546,19 @@ public final class DarwinRuntimeLauncher: RuntimeLaunching, @unchecked Sendable 
     }
 
     public func terminate(pid: Int32, processGroup: Int32, leadsGroup: Bool) {
+        signal(pid: pid, processGroup: processGroup, leadsGroup: leadsGroup, sig: SIGTERM)
+    }
+
+    public func forceTerminate(pid: Int32, processGroup: Int32, leadsGroup: Bool) {
+        signal(pid: pid, processGroup: processGroup, leadsGroup: leadsGroup, sig: SIGKILL)
+    }
+
+    private func signal(pid: Int32, processGroup: Int32, leadsGroup: Bool, sig: Int32) {
         guard pid > 1 else { return }
         if leadsGroup, processGroup > 1 {
-            _ = kill(-processGroup, SIGTERM)
+            _ = kill(-processGroup, sig)
         } else {
-            _ = kill(pid, SIGTERM)
+            _ = kill(pid, sig)
         }
     }
 

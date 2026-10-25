@@ -25,16 +25,24 @@ public struct CoreLaunch: Equatable, Sendable {
         self.environment = environment
     }
 
+    /// Stable product default. Verification sets `COOKIE_DATA_DIR` itself.
+    public static let applicationSupportFolder = "com.johnkimec.cookie-agent"
+
+    public static func defaultDataDirectory(home: URL) -> URL {
+        home
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent(applicationSupportFolder, isDirectory: true)
+    }
+
     public static func resolve(
         environment: [String: String],
         currentDirectory: URL,
-        temporaryDirectory: URL,
-        pid: Int32
+        homeDirectory: URL
     ) -> CoreLaunch {
         var env = environment
         if env["COOKIE_DATA_DIR"]?.isEmpty ?? true {
-            let dir = temporaryDirectory.appendingPathComponent("cookie-agent-\(pid)", isDirectory: true)
-            env["COOKIE_DATA_DIR"] = dir.path
+            env["COOKIE_DATA_DIR"] = defaultDataDirectory(home: homeDirectory).path
         }
         if env["COOKIE_LLAMA_PORT"]?.isEmpty ?? false {
             env.removeValue(forKey: "COOKIE_LLAMA_PORT")
