@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, it } from "vitest";
+import { defaultMemoryDataDir, MEMORY_DB_FILENAME } from "./memory/path.ts";
 import { TYPE_STRIP_NODE_ARGS } from "./node-launch.ts";
 import { protocolErrors } from "./protocol/errors.ts";
 import {
@@ -18,6 +19,7 @@ import {
 
 const entry = new URL("./index.ts", import.meta.url);
 const children: ChildProcess[] = [];
+const dataDirs: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
@@ -28,7 +30,21 @@ afterEach(async () => {
       }
     }),
   );
+  await Promise.all(
+    dataDirs
+      .splice(0)
+      .map(async (dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
+
+function isolated(extra: NodeJS.ProcessEnv = {}): {
+  env: NodeJS.ProcessEnv;
+  dataDir: string;
+} {
+  const dataDir = mkdtempSync(join(tmpdir(), "cookie-stdio-"));
+  dataDirs.push(dataDir);
+  return { env: { ...extra, COOKIE_DATA_DIR: dataDir }, dataDir };
+}
 
 class StdioClient {
   readonly messages: unknown[] = [];
@@ -189,45 +205,63 @@ describe("stdio core", () => {
   });
 
   it("exits on a bad COOKIE_LLAMA_PORT without speaking protocol", async () => {
-    const client = new StdioClient({ COOKIE_LLAMA_PORT: "nope" });
+    const client = new StdioClient(isolated({ COOKIE_LLAMA_PORT: "nope" }).env);
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_LLAMA_PORT");
   });
 
   it("exits on a bad COOKIE_EMBED_PORT without speaking protocol", async () => {
-    const client = new StdioClient({ COOKIE_EMBED_PORT: "nope" });
+    const client = new StdioClient(isolated({ COOKIE_EMBED_PORT: "nope" }).env);
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_EMBED_PORT");
   });
 
   it("exits on a bad COOKIE_RRF_VECTOR without speaking protocol", async () => {
-    const client = new StdioClient({ COOKIE_RRF_VECTOR: "nope" });
+    const client = new StdioClient(isolated({ COOKIE_RRF_VECTOR: "nope" }).env);
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_RRF_VECTOR");
   });
 
   it("exits on a bad COOKIE_EMBED_TIMEOUT_MS without speaking protocol", async () => {
-    const client = new StdioClient({ COOKIE_EMBED_TIMEOUT_MS: "nope" });
+    const { env, dataDir } = isolated({ COOKIE_EMBED_TIMEOUT_MS: "nope" });
+    const client = new StdioClient(env);
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_EMBED_TIMEOUT_MS");
+    expect(existsSync(join(dataDir, "cookie.db"))).toBe(false);
   });
 
   it("exits on a bad COOKIE_RERANK without speaking protocol", async () => {
-    const client = new StdioClient({ COOKIE_RERANK: "yes" });
+    const client = new StdioClient(isolated({ COOKIE_RERANK: "yes" }).env);
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_RERANK");
   });
 
   it("exits on a bad COOKIE_THINKING without speaking protocol", async () => {
-    const client = new StdioClient({ COOKIE_THINKING: "yes" });
+    const client = new StdioClient(isolated({ COOKIE_THINKING: "yes" }).env);
     expect(await client.exitCode()).toBe(1);
     const stderr = await client.stderrText();
     expect(stderr).toContain("COOKIE_THINKING");
+  });
+
+  it("refuses the default data directory under test", async () => {
+    const db = join(defaultMemoryDataDir(), MEMORY_DB_FILENAME);
+    const before = existsSync(db);
+    const client = new StdioClient({
+      VITEST: "true",
+      NODE_ENV: "test",
+      COOKIE_LLAMA_PORT: "9",
+      COOKIE_DATA_DIR: "",
+    });
+    expect(await client.exitCode()).toBe(1);
+    const stderr = await client.stderrText();
+    expect(stderr).toContain("refusing to open the default data directory");
+    expect(stderr).toContain("COOKIE_DATA_DIR");
+    expect(existsSync(db)).toBe(before);
   });
 
   it("starts through a symlinked path", async () => {
