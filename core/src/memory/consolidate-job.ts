@@ -4,7 +4,8 @@ import {
   type FactRecord,
   TOMBSTONE_SUBJECT,
 } from "./derived.ts";
-import { documentInput, type Embedder, queryInput } from "./embedder.ts";
+import type { Embedder } from "./embedder.ts";
+import { prefixDocument, prefixQuery } from "./http-embedder.ts";
 import { activeFacts, isActiveFact, MERGE_DISTANCE } from "./policy.ts";
 import { capProfile, PROFILE_TOKEN_CAP } from "./profile-cap.ts";
 import { abortError } from "./slot.ts";
@@ -111,7 +112,7 @@ export class LocalConsolidator {
       }
       await embedFact(this.options, fact);
       const embedding = await this.options.embedder.embed(
-        queryInput(fact.text),
+        prefixQuery(fact.text),
       );
       const hits = await this.options.vectors.knn("vec_facts", embedding, 8);
       for (const hit of hits) {
@@ -182,7 +183,7 @@ export class LocalConsolidator {
         throwIfAborted(signal);
         this.options.derived.upsertChunk(chunk);
         const embedding = await this.options.embedder.embed(
-          documentInput(chunk.text),
+          prefixDocument(chunk.text),
         );
         await this.options.vectors.upsert(
           "vec_chunks",

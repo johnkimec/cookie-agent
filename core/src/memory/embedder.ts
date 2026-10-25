@@ -1,26 +1,7 @@
+import { DOCUMENT_PREFIX, QUERY_PREFIX } from "./http-embedder.ts";
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
 
-/**
- * nomic document prefix. Callers add this before `embed` when indexing.
- * `embed` itself does not.
- */
-export const DOCUMENT_PREFIX = "search_document: ";
-
-/**
- * nomic query prefix. Callers add this before `embed` when searching.
- * `embed` itself does not.
- */
-export const QUERY_PREFIX = "search_query: ";
-
-export function documentInput(text: string): string {
-  return `${DOCUMENT_PREFIX}${text}`;
-}
-
-export function queryInput(text: string): string {
-  return `${QUERY_PREFIX}${text}`;
-}
-
-/** Text to a 768-d vector. CI uses a fake. The local model is a later step. */
+/** Text to a 768-d vector. CI uses a fake. The local model is HTTP. */
 export interface Embedder {
   embed(text: string): Promise<Float32Array>;
 }

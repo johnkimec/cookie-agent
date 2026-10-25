@@ -9,7 +9,8 @@ import {
   type ProfileRecord,
   TOMBSTONE_SUBJECT,
 } from "./derived.ts";
-import { documentInput, type Embedder, queryInput } from "./embedder.ts";
+import type { Embedder } from "./embedder.ts";
+import { prefixDocument, prefixQuery } from "./http-embedder.ts";
 import {
   activeFacts,
   FORGET_DISTANCE,
@@ -374,7 +375,7 @@ export async function nearestActive(
   text: string,
   now: number,
 ): Promise<{ fact: FactRecord; distance: number } | null> {
-  const embedding = await deps.embedder.embed(queryInput(text));
+  const embedding = await deps.embedder.embed(prefixQuery(text));
   const hits = await deps.vectors.knn("vec_facts", embedding, 8);
   for (const hit of hits) {
     const fact = deps.derived.factById(hit.id);
@@ -393,7 +394,7 @@ export async function embedFact(
   if (fact.subject === TOMBSTONE_SUBJECT) {
     return;
   }
-  const embedding = await deps.embedder.embed(documentInput(fact.text));
+  const embedding = await deps.embedder.embed(prefixDocument(fact.text));
   await deps.vectors.upsert("vec_facts", fact.id, embedding);
 }
 

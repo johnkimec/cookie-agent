@@ -106,10 +106,16 @@ describe("memory contracts", () => {
       { id: "chunk", distance: expect.any(Number) },
     ]);
     expect(await index.knn("vec_facts", near, 0)).toEqual([]);
-    await index.delete(["near", "chunk"]);
+    await index.delete(["near"]);
     expect(
       (await index.knn("vec_facts", near, 2)).map((hit) => hit.id),
     ).toEqual(["far"]);
+    await index.delete([]);
+    await index.delete(["missing"]);
+    expect(await index.knn("vec_chunks", near, 1)).toEqual([
+      { id: "chunk", distance: expect.any(Number) },
+    ]);
+    await index.delete(["chunk"]);
     expect(await index.knn("vec_chunks", near, 1)).toEqual([]);
     const wrong = new Float32Array(3);
     await expect(index.upsert("vec_facts", "bad", wrong)).rejects.toThrow(

@@ -14,9 +14,10 @@ export interface VectorIndex {
   ): Promise<void>;
   knn(table: VectorTable, query: Float32Array, k: number): Promise<VectorHit[]>;
   /**
-   * Drop these ids from every table. sqlite-vec's implementation is a
-   * later PR. The in-memory fake removes them so forget and rebuild
-   * do not leave stale hits.
+   * Drop these ids from `vec_facts` and `vec_chunks`.
+   * An id that is not present is ignored. This is the only Step 0
+   * interface change in M1 step 2D. PR #18 adds the same signature.
+   * `SqliteVecIndex` deletes the id from both tables.
    */
   delete(ids: string[]): Promise<void>;
 }
