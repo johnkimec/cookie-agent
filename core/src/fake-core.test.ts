@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,6 +23,7 @@ import {
 
 const coreDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fakeCore = join(coreDir, "src/fake-core.ts");
+const dataDirs: string[] = [];
 
 class CoreClient {
   readonly notes: unknown[] = [];
@@ -30,11 +32,14 @@ class CoreClient {
   private readonly waiters: Array<(message: unknown) => void> = [];
 
   constructor(deltaMs: string, entry = fakeCore) {
+    const dataDir = mkdtempSync(join(tmpdir(), "cookie-fake-core-"));
+    dataDirs.push(dataDir);
     this.child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, entry], {
       cwd: coreDir,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
+        COOKIE_DATA_DIR: dataDir,
         COOKIE_FAKE_DELTA_MS: deltaMs,
         COOKIE_LLAMA_PORT: "18080",
       },
@@ -120,6 +125,11 @@ const clients: CoreClient[] = [];
 afterEach(async () => {
   const open = clients.splice(0);
   await Promise.all(open.map((client) => client.close()));
+  await Promise.all(
+    dataDirs
+      .splice(0)
+      .map(async (dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 function open(deltaMs = "0"): CoreClient {
