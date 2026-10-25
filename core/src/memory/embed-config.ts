@@ -38,20 +38,21 @@ export function cachedProbe(
 }
 
 /**
- * Embedder for `createMemoryRuntime` (PR #18).
+ * Embedder for `createMemoryRuntime`.
  *
- * TODO(#18): `createMemoryRuntime` is not on this branch. It still
- * constructs `FakeEmbedder` itself. Whichever of #18 and this PR merges
- * second should pass `await resolveEmbedder(process.env)` as
- * `options.embedder`. That is the only wiring. Do not change `Embedder`.
+ * `startStdioCore` passes `await resolveEmbedder(process.env)` as
+ * `options.embedder` and always passes the same `SqliteVecIndex` the
+ * indexer and the retriever use. Tests that omit the embedder still
+ * get `FakeEmbedder`. Do not change `Embedder`.
  *
  * HTTP when `COOKIE_EMBED_PORT` (default 8081) answers `GET /health`.
  * `COOKIE_EMBEDDER=fake`, and a port that does not answer, return
  * `FakeEmbedder` so tests and a down server still construct a runtime.
- * Do not point that fake at sqlite-vec. `ContentIndexer` skips the write
- * when health is down so cookie.db does not fill with fake vectors.
- * `embed` does not add nomic prefixes. Callers that need
- * `search_query: ` or `search_document: ` add them before `embed`.
+ * `ContentIndexer` skips the write when health is down so cookie.db
+ * does not fill with fake vectors. Forget still deletes through the
+ * shared sqlite index. `embed` does not add nomic prefixes. Callers
+ * that need `search_query: ` or `search_document: ` add them before
+ * `embed`.
  */
 export async function resolveEmbedder(
   env: NodeJS.ProcessEnv = process.env,

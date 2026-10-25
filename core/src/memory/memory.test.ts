@@ -64,6 +64,17 @@ describe("memory contracts", () => {
     expect(() => store.appendTurn(turn("missing", "ses-missing", 1))).toThrow(
       /unknown session/,
     );
+    expect(store.listSessions().map((row) => row.id)).toEqual([
+      "ses-1",
+      "ses-2",
+    ]);
+    expect(
+      store.listSessions({ needsReflect: true }).map((row) => row.id),
+    ).toEqual(["ses-1", "ses-2"]);
+    store.appendSession({ ...session("ses-3"), summary: "done" });
+    expect(
+      store.listSessions({ needsReflect: false }).map((row) => row.id),
+    ).toEqual(["ses-3"]);
   });
 
   it("embeds offline to a stable 768-d vector", async () => {

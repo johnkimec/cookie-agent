@@ -1,14 +1,23 @@
 import type { SessionRecord, TurnRecord } from "./types.ts";
 
 /**
+ * Optional filter for {@link MemoryStore.listSessions}.
+ * `needsReflect: true` is a session that has turns and no summary yet.
+ */
+export interface ListSessionsQuery {
+  needsReflect?: boolean;
+}
+
+/**
  * Open cookie.db, append sessions and turns, and read recent turns.
- * The SQLite store is Step 1A. This interface and the in-memory fake are
- * the Step 0 contract.
+ * Derived tables are a separate interface. `listSessions` is read-only
+ * so consolidation can see sessions from earlier runs.
  */
 export interface MemoryStore {
   appendSession(session: SessionRecord): void;
   appendTurn(turn: TurnRecord): void;
   recentTurns(sessionId: string, limit: number): TurnRecord[];
+  listSessions(query?: ListSessionsQuery): SessionRecord[];
 }
 
 export class InMemoryMemoryStore implements MemoryStore {
@@ -46,4 +55,27 @@ export class InMemoryMemoryStore implements MemoryStore {
       ...row,
     }));
   }
+
+  listSessions(query?: ListSessionsQuery): SessionRecord[] {
+    const rows = [...this.sessions.values()].sort(
+      (left, right) =>
+        left.startedAt - right.startedAt || left.id.localeCompare(right.id),
+    );
+    return rows
+      .filter((session) => matchesReflect(session, this.turns, query))
+      .map((session) => ({ ...session }));
+  }
+}
+
+function matchesReflect(
+  session: SessionRecord,
+  turns: readonly TurnRecord[],
+  query: ListSessionsQuery | undefined,
+): boolean {
+  if (query?.needsReflect === undefined) {
+    return true;
+  }
+  const hasTurns = turns.some((turn) => turn.sessionId === session.id);
+  const needs = session.summary === null && hasTurns;
+  return query.needsReflect ? needs : session.summary !== null;
 }

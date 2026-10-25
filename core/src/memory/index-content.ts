@@ -172,6 +172,9 @@ export class ContentIndexer {
             WHERE e.source = 'turn' AND e.source_id = t.id AND e.model = ?
           ) AS indexed
          FROM turns t
+         WHERE NOT EXISTS (
+           SELECT 1 FROM forgotten_turns f WHERE f.turn_id = t.id
+         )
          ORDER BY t.created_at, t.id`,
       )
       .all(this.model) as Array<PendingTurn & { indexed: number }>;
@@ -197,6 +200,7 @@ export class ContentIndexer {
         `SELECT id, text FROM facts f
          WHERE f.superseded_by IS NULL
            AND (f.valid_until IS NULL OR f.valid_until > ?)
+           AND (f.subject IS NULL OR f.subject != 'memory:tombstone')
            AND NOT EXISTS (
              SELECT 1 FROM embed_index e
              WHERE e.source = 'fact' AND e.source_id = f.id AND e.model = ?

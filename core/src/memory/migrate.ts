@@ -17,6 +17,13 @@ const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
       "utf8",
     ),
   },
+  {
+    version: 3,
+    sql: readFileSync(
+      new URL("./migrations/003_meta.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 /** Latest `PRAGMA user_version` this process knows how to open. */
@@ -27,6 +34,7 @@ export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
  * apply any migration whose version is above `PRAGMA user_version`.
  * A second open of the same file does not run the SQL again.
  * Migration 001 is never edited. Later schema lives in later files.
+ * Version 2 is the embed index. Version 3 is memory_meta and forgotten_turns.
  */
 export function openMemoryDatabase(path: string): Database.Database {
   const db = new Database(path);

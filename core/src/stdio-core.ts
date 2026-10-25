@@ -7,7 +7,7 @@
 import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { ChatLog } from "./memory/chat-log.ts";
-import { cachedProbe } from "./memory/embed-config.ts";
+import { cachedProbe, resolveEmbedder } from "./memory/embed-config.ts";
 import {
   DEFAULT_EMBED_TIMEOUT_MS,
   HttpEmbedder,
@@ -24,6 +24,8 @@ import {
   RERANK_RESPONSE_FORMAT,
   readRerankConfig,
 } from "./memory/rerank.ts";
+import { createMemoryRuntime } from "./memory/runtime.ts";
+import { readReflectIdleMs, readTimeZone } from "./memory/schedule.ts";
 import { SqliteMemoryStore } from "./memory/sqlite-store.ts";
 import { SqliteVecIndex } from "./memory/sqlite-vec-index.ts";
 import {
@@ -33,20 +35,29 @@ import {
 } from "./model/llama.ts";
 import type { ModelProvider } from "./model/provider.ts";
 
-export function startStdioCore(
+export async function startStdioCore(
   env: NodeJS.ProcessEnv = process.env,
-): AgentCore {
+): Promise<AgentCore> {
   let port: number;
   let thinking: boolean;
-  let history: ChatLog;
+  let idleMs: number;
+  let timeZone: string;
+  let store: SqliteMemoryStore;
   let provider: ModelProvider;
+  let history: ChatLog;
+  let vectors: SqliteVecIndex;
   try {
     port = readLlamaPort(env);
     thinking = readThinking(env);
     const embedPort = readEmbedPort(env);
+    idleMs = readReflectIdleMs(env);
+    timeZone = readTimeZone(env);
     const weights = readRrfWeights(env);
     const rerankConfig = readRerankConfig(env);
-    const store = SqliteMemoryStore.open(memoryDatabasePath(env));
+    store = SqliteMemoryStore.open(memoryDatabasePath(env));
+    // One index for the indexer, retrieval, and forget. A down embed
+    // server must not leave forget deleting a different in-memory index.
+    vectors = new SqliteVecIndex(store.database());
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
       timeoutMs: readQueryEmbedTimeoutMs(env),
@@ -55,7 +66,6 @@ export function startStdioCore(
       port: embedPort,
       timeoutMs: DEFAULT_EMBED_TIMEOUT_MS,
     });
-    const vectors = new SqliteVecIndex(store.database());
     const embedUp = cachedProbe(
       async () => (await queryEmbedder.health()) === "up",
     );
@@ -90,11 +100,24 @@ export function startStdioCore(
     process.stderr.write(`cookie-core: ${detail}\n`);
     process.exit(1);
   }
+  const embedder = await resolveEmbedder(env);
+  const memory = createMemoryRuntime({
+    provider,
+    idleMs,
+    timeZone,
+    store,
+    derived: store,
+    recordTurns: false,
+    embedder,
+    vectors,
+  });
   const core = new AgentCore({
     provider,
     watchIntervalMs: RUNTIME_WATCH_MS,
+    memoryHost: memory.host,
     history,
   });
+  memory.start();
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   process.stdout.on("error", () => {
     process.exit(0);

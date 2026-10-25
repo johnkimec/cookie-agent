@@ -407,6 +407,9 @@ describe("hybrid retrieval", () => {
       async delete(ids) {
         await index.delete(ids);
       },
+      async has(table, id) {
+        return index.has(table, id);
+      },
       async knn(table, query, k) {
         asked.push(k);
         if (k > KNN_MAX_K) {
@@ -438,6 +441,9 @@ describe("hybrid retrieval", () => {
       },
       async delete() {
         return undefined;
+      },
+      async has() {
+        return false;
       },
       async knn(table, _query, k) {
         if (k > KNN_MAX_K) {

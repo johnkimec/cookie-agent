@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { TOMBSTONE_SUBJECT } from "./derived.ts";
 import type { Embedder } from "./embedder.ts";
 import { prefixQuery } from "./http-embedder.ts";
 import type { Retrieve } from "./retrieve.ts";
@@ -73,6 +74,7 @@ export interface HybridRetrieverOptions {
 interface FactRow {
   id: string;
   text: string;
+  subject: string | null;
   superseded_by: string | null;
   valid_until: number | null;
 }
@@ -98,6 +100,7 @@ export class HybridRetriever {
   private readonly pool: number;
   private readonly limit: number;
   private readonly store: unknown;
+  private omitTurnIds: ReadonlySet<string> = new Set();
 
   constructor(options: HybridRetrieverOptions) {
     this.db = options.db;
@@ -112,7 +115,18 @@ export class HybridRetriever {
     this.store = options.store ?? null;
   }
 
+  /**
+   * Turn ids already in the prompt, including the user row just stored.
+   * They are dropped before the pool limit so they cannot take a slot
+   * and then be omitted. Consumed by the next `retrieve`.
+   */
+  setOmitTurnIds(ids: ReadonlySet<string>): void {
+    this.omitTurnIds = ids;
+  }
+
   readonly retrieve: Retrieve = async (query, signal) => {
+    const omit = this.omitTurnIds;
+    this.omitTurnIds = new Set();
     if (isAborted(signal)) {
       return [];
     }
@@ -120,7 +134,7 @@ export class HybridRetriever {
     const now = this.now();
     const forgotten = readForgottenTurnIds(this.store);
     const facts = match === "" ? [] : this.bm25Facts(match, now);
-    const turns = match === "" ? [] : this.bm25Turns(match, forgotten);
+    const turns = match === "" ? [] : this.bm25Turns(match, forgotten, omit);
     const summaries = match === "" ? [] : this.bm25Summaries(query, forgotten);
     const byId = new Map<string, Memory>();
     for (const memory of [...facts, ...turns, ...summaries]) {
@@ -213,21 +227,27 @@ export class HybridRetriever {
   private bm25Facts(match: string, now: number): Memory[] {
     const rows = this.db
       .prepare(
-        `SELECT f.id, f.text, f.superseded_by, f.valid_until
+        `SELECT f.id, f.text, f.subject, f.superseded_by, f.valid_until
          FROM facts_fts
          JOIN facts f ON f.rowid = facts_fts.rowid
          WHERE facts_fts MATCH ?
            AND f.superseded_by IS NULL
            AND (f.valid_until IS NULL OR f.valid_until > ?)
+           AND (f.subject IS NULL OR f.subject != ?)
          ORDER BY bm25(facts_fts), f.created_at, f.id
          LIMIT ?`,
       )
-      .all(match, now, this.pool) as FactRow[];
+      .all(match, now, TOMBSTONE_SUBJECT, this.pool) as FactRow[];
     return rows.map((row) => memoryFrom(row.id, row.text, "fact"));
   }
 
-  private bm25Turns(match: string, forgotten: ReadonlySet<string>): Memory[] {
-    const hidden = forgotten.size > 0;
+  private bm25Turns(
+    match: string,
+    forgotten: ReadonlySet<string>,
+    omit: ReadonlySet<string> = new Set(),
+  ): Memory[] {
+    const hiddenIds = new Set<string>([...forgotten, ...omit]);
+    const hidden = hiddenIds.size > 0;
     const rows = this.db
       .prepare(
         `SELECT t.id AS id, t.content AS text
@@ -240,7 +260,7 @@ export class HybridRetriever {
       )
       .all(
         ...(hidden
-          ? [match, JSON.stringify([...forgotten]), this.pool]
+          ? [match, JSON.stringify([...hiddenIds]), this.pool]
           : [match, this.pool]),
       ) as Array<{ id: string; text: string }>;
     return rows.map((row) => memoryFrom(row.id, row.text, "turn"));
@@ -288,7 +308,7 @@ export class HybridRetriever {
     const hits = await this.knnUntil(embedding, "vec_facts", (id) => {
       const row = this.db
         .prepare(
-          "SELECT id, text, superseded_by, valid_until FROM facts WHERE id = ?",
+          "SELECT id, text, subject, superseded_by, valid_until FROM facts WHERE id = ?",
         )
         .get(id) as FactRow | undefined;
       if (row === undefined || !liveFact(row, now)) {
@@ -623,6 +643,9 @@ function sessionHasForgottenTurn(
 }
 
 function liveFact(row: FactRow, now: number): boolean {
+  if (row.subject === TOMBSTONE_SUBJECT) {
+    return false;
+  }
   if (row.superseded_by !== null && row.superseded_by !== "") {
     return false;
   }
