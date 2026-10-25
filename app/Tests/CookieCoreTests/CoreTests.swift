@@ -273,11 +273,11 @@ final class LaunchTests: XCTestCase {
     }
 
     func testSkipHotkeyReadsThePlistFlag() {
-        XCTAssertFalse(CoreLaunch.skipsHotkey(nil))
-        XCTAssertFalse(CoreLaunch.skipsHotkey(false))
-        XCTAssertTrue(CoreLaunch.skipsHotkey(true))
-        XCTAssertTrue(CoreLaunch.skipsHotkey("YES"))
-        XCTAssertFalse(CoreLaunch.skipsHotkey("no"))
+        XCTAssertFalse(CoreLaunch.skipsHotkey(plistValue: nil))
+        XCTAssertFalse(CoreLaunch.skipsHotkey(plistValue: false))
+        XCTAssertTrue(CoreLaunch.skipsHotkey(plistValue: true))
+        XCTAssertTrue(CoreLaunch.skipsHotkey(plistValue: "YES"))
+        XCTAssertFalse(CoreLaunch.skipsHotkey(plistValue: "no"))
     }
 
     func testExplicitDataDirAndCommandAreHonoured() {

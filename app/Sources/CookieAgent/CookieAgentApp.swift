@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onLayout = {
             popup.relayout()
         }
-        if !CoreLaunch.skipsHotkey(Bundle.main.object(forInfoDictionaryKey: "CookieSkipHotkey")) {
+        if !CoreLaunch.skipsHotkey(plistValue: Bundle.main.object(forInfoDictionaryKey: "CookieSkipHotkey")) {
             let hotkey = HotkeyCenter { [weak model] in
                 DispatchQueue.main.async {
                     model?.togglePopup()
