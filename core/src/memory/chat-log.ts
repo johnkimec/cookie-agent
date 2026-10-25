@@ -69,8 +69,11 @@ export class ChatLog implements ConversationHistory {
       this.lastUserTurnId = null;
       return [{ role: "user", content: userText }];
     }
+    const forgotten = new Set(this.store.forgottenTurnIds());
     const prior = recentWithinBudget(
-      this.store.recentTurns(conversationId, HISTORY_TURN_LIMIT),
+      this.store
+        .recentTurns(conversationId, HISTORY_TURN_LIMIT)
+        .filter((turn) => !forgotten.has(turn.id)),
       LOCAL_RECENT_TURN_TOKEN_BUDGET,
     );
     for (const turn of prior) {

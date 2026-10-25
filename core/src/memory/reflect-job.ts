@@ -14,7 +14,12 @@ import {
 import type { ReflectOptions, Reflector } from "./reflect.ts";
 import { abortError, isAbortError } from "./slot.ts";
 import type { MemoryStore } from "./store.ts";
-import { embedFact, isFactKind, nearestActive } from "./tools.ts";
+import {
+  embedFact,
+  isFactKind,
+  nearestActive,
+  sharesDistinctiveToken,
+} from "./tools.ts";
 import type { TurnRecord } from "./types.ts";
 import type { VectorIndex } from "./vectors.ts";
 
@@ -135,17 +140,52 @@ export class LocalReflector implements Reflector {
       turns,
     );
     const summary = cleanSummary(extracted.summary);
+    const promptTurnIds = turns.map((turn) => turn.id);
+    let toEmbed: FactRecord[] = [];
     this.options.derived.transaction(() => {
-      if (journal !== null) {
+      // A forget can land while `complete` or the embedding calls in
+      // `planFacts` are in flight. The set read before that await is
+      // stale. Read it again inside this commit.
+      const forgottenNow = new Set(this.options.derived.forgottenTurnIds());
+      const blocked = new Set(
+        promptTurnIds.filter((id) => forgottenNow.has(id)),
+      );
+      const inserts = planned.inserts.filter(
+        (fact) => fact.sourceTurn === null || !blocked.has(fact.sourceTurn),
+      );
+      const droppedIds = new Set(
+        planned.inserts
+          .filter((fact) => !inserts.includes(fact))
+          .map((fact) => fact.id),
+      );
+      const updates = planned.updates.filter((fact) => {
+        if (fact.sourceTurn !== null && blocked.has(fact.sourceTurn)) {
+          return false;
+        }
+        return fact.supersededBy === null || !droppedIds.has(fact.supersededBy);
+      });
+      const droppedFacts = planned.inserts.filter((fact) =>
+        droppedIds.has(fact.id),
+      );
+      const liveProfile = profile.filter((row) => {
+        if (row.sourceTurn !== null && forgottenNow.has(row.sourceTurn)) {
+          return false;
+        }
+        return !droppedFacts.some((fact) =>
+          sharesDistinctiveToken(row.value, fact.text),
+        );
+      });
+      const raced = blocked.size > 0;
+      if (!raced && journal !== null) {
         this.options.derived.insertJournal(journal);
       }
-      for (const fact of planned.inserts) {
+      for (const fact of inserts) {
         this.options.derived.insertFact(fact);
       }
-      for (const fact of planned.updates) {
+      for (const fact of updates) {
         this.options.derived.updateFact(fact);
       }
-      for (const row of profile) {
+      for (const row of liveProfile) {
         this.options.derived.upsertProfile(row);
       }
       this.options.derived.replaceProfile(
@@ -155,11 +195,24 @@ export class LocalReflector implements Reflector {
           this.options.log ?? (() => undefined),
         ),
       );
-      if (summary !== null) {
+      if (raced) {
+        const stillThere = promptTurnIds.some((id) => !forgottenNow.has(id));
+        if (!stillThere) {
+          this.options.derived.setSummary(sessionId, "");
+        }
+      } else if (summary !== null) {
         this.options.derived.setSummary(sessionId, summary);
       }
+      toEmbed = inserts;
     });
-    for (const fact of planned.inserts) {
+    for (const fact of toEmbed) {
+      const forgottenNow = new Set(this.options.derived.forgottenTurnIds());
+      if (fact.sourceTurn !== null && forgottenNow.has(fact.sourceTurn)) {
+        continue;
+      }
+      if (this.options.derived.factById(fact.id) === null) {
+        continue;
+      }
       await embedFact(this.options, fact);
     }
   }
@@ -314,6 +367,11 @@ export function sourceForProfile(
   for (const turn of turns) {
     if (turn.content.toLowerCase().includes(needle)) {
       return turn.id;
+    }
+  }
+  for (const fact of facts) {
+    if (fact.sourceTurn !== null && sharesDistinctiveToken(needle, fact.text)) {
+      return fact.sourceTurn;
     }
   }
   return null;
