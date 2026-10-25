@@ -276,3 +276,140 @@ drive_temp_data_dir() {
       ;;
   esac
 }
+
+# Distinct from 0 (ok) and 3 (open-clean skipped).
+ISOLATION_REFUSAL_CODE=4
+
+# The account's home from Directory Service. Used when the process had no
+# HOME at startup. dscl is macOS. getent is Linux.
+directory_service_home() {
+  local home=""
+  if command -v dscl >/dev/null 2>&1; then
+    home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk 'NR==1 { sub(/^[^ ]+ /, ""); print; exit }' || true)"
+  fi
+  if [[ -z "$home" ]] && command -v getent >/dev/null 2>&1; then
+    home="$(getent passwd "$(id -un)" 2>/dev/null | awk -F: 'NR==1 { print $6; exit }' || true)"
+  fi
+  [[ -n "$home" ]] || return 1
+  printf '%s\n' "$home"
+}
+
+isolation_fail() {
+  printf '%s\n' "not-ok" "refusing to launch: $*" >&2
+  exit "$ISOLATION_REFUSAL_CODE"
+}
+
+# One private temp directory per run, realpath'd. Per-run HOME and data
+# directories are children. Cleanup removes only a path with this marker.
+ensure_isolate_root() {
+  if [[ -n "${ISOLATE_ROOT:-}" ]]; then
+    return 0
+  fi
+  local created resolved
+  created="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-isolate.XXXXXX")"
+  resolved="$(real_path "$created")"
+  case "$resolved" in
+    *"/cookie-drive-isolate."*) ;;
+    *)
+      rm -rf "$created"
+      isolation_fail "isolate root $resolved is not a private temp directory"
+      ;;
+  esac
+  ISOLATE_ROOT="$resolved"
+}
+
+# Sets ISOLATE_LAST. Call it in the current shell. A command substitution
+# would drop the ISOLATE_ROOT assignment on the first call.
+isolate_dir() {
+  local kind="$1"
+  local created resolved
+  ensure_isolate_root
+  created="$(mktemp -d "$ISOLATE_ROOT/${kind}.XXXXXX")"
+  resolved="$(real_path "$created")"
+  case "$resolved" in
+    "$ISOLATE_ROOT"/*) ;;
+    *)
+      rm -rf "$created"
+      isolation_fail "isolated $kind directory escaped the private temp dir"
+      ;;
+  esac
+  ISOLATE_LAST="$resolved"
+}
+
+remove_isolate_root() {
+  local root="${1-${ISOLATE_ROOT-}}"
+  [[ -n "$root" ]] || return 0
+  case "$root" in
+    *"/cookie-drive-isolate."*)
+      rm -rf "$root"
+      ;;
+  esac
+}
+
+# Realpath HOME and COOKIE_DATA_DIR and compare them case-insensitively with
+# the real home and with $REAL_HOME/Library/Application Support/com.johnkimec.cookie-agent.
+# APFS is usually case-insensitive, so a mixed-case spelling is the same directory.
+# Exit 4 before any launch when HOME is the real home, or either path is that
+# data directory or inside it. Arguments override the current environment so a
+# launch can pass its own HOME without changing the shell.
+assert_isolated_data_dir() {
+  local home="${1-${HOME-}}"
+  local data="${2-${COOKIE_DATA_DIR-}}"
+  local real_home="${3-${REAL_HOME-}}"
+  if [[ -z "$real_home" ]]; then
+    real_home="$(directory_service_home)" || isolation_fail "cannot resolve the real home"
+  fi
+  local reason="" code=0
+  reason="$(python3 - "$home" "$data" "$real_home" <<'PY'
+import os
+import sys
+
+home, data, real_home = sys.argv[1:]
+
+def resolve(path, label):
+    if path == "":
+        print("%s is empty" % label)
+        sys.exit(1)
+    try:
+        resolved = os.path.realpath(path)
+    except OSError as exc:
+        print("cannot realpath %s (%s): %s" % (label, path, exc))
+        sys.exit(2)
+    if resolved == "":
+        print("cannot realpath %s (%s)" % (label, path))
+        sys.exit(2)
+    return resolved.rstrip("/").casefold()
+
+def within(child, parent):
+    return child == parent or child.startswith(parent + "/")
+
+home_key = resolve(home, "HOME")
+data_key = resolve(data, "COOKIE_DATA_DIR")
+real_home_key = resolve(real_home, "the real home")
+real_data = os.path.join(
+    real_home,
+    "Library",
+    "Application Support",
+    "com.johnkimec.cookie-agent",
+)
+real_data_key = resolve(real_data, "the real cookie data directory")
+if home_key == real_home_key:
+    print("HOME is the real home (%s)" % home)
+    sys.exit(1)
+if within(home_key, real_data_key):
+    print("HOME is the real cookie data directory or inside it (%s)" % home)
+    sys.exit(1)
+if within(data_key, real_data_key):
+    print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+    sys.exit(1)
+sys.exit(0)
+PY
+)" || code=$?
+  if [[ "$code" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ -z "$reason" ]]; then
+    reason="cannot realpath HOME, COOKIE_DATA_DIR, or the real home"
+  fi
+  isolation_fail "$reason"
+}

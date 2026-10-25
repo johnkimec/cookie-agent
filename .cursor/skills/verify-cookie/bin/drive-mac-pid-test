@@ -319,4 +319,172 @@ case "$observe" in
     ;;
 esac
 
+# Isolation refusals. This does not launch the app. Linux CI runs this file
+# from lint-drive-mac-targeting. Exit 4 is the refusal. 3 is the open-clean skip.
+cat >"$FIXTURE/bin/open" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >"$FIXTURE/launched"
+exit 99
+EOF
+chmod +x "$FIXTURE/bin/open"
+
+if [[ "$ISOLATION_REFUSAL_CODE" -eq 0 || "$ISOLATION_REFUSAL_CODE" -eq 3 ]]; then
+  printf 'isolation exit code must not be 0 or 3\n' >&2
+  exit 1
+fi
+if [[ "$ISOLATION_REFUSAL_CODE" -ne 4 ]]; then
+  printf 'isolation exit code is %s, want 4\n' "$ISOLATION_REFUSAL_CODE" >&2
+  exit 1
+fi
+
+expect_refuse() {
+  local label="$1" home="$2" data="$3" real="$4" needle="$5"
+  local err code
+  code=0
+  err="$(HOME="$home" COOKIE_DATA_DIR="$data" REAL_HOME="$real" assert_isolated_data_dir 2>&1)" || code=$?
+  if [[ "$code" -eq 0 || "$code" -eq 3 ]]; then
+    printf 'isolation %s exited %s\n' "$label" "$code" >&2
+    exit 1
+  fi
+  if [[ "$code" -ne 4 ]]; then
+    printf 'isolation %s exited %s, want 4: %s\n' "$label" "$code" "$err" >&2
+    exit 1
+  fi
+  case "$err" in
+    *"refusing to launch"*) ;;
+    *)
+      printf 'isolation %s missing refusal: %s\n' "$label" "$err" >&2
+      exit 1
+      ;;
+  esac
+  case "$err" in
+    *"$needle"*) ;;
+    *)
+      printf 'isolation %s missing %s: %s\n' "$label" "$needle" "$err" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -f "$FIXTURE/launched" ]]; then
+    printf 'isolation %s launched the app\n' "$label" >&2
+    exit 1
+  fi
+}
+
+expect_allow() {
+  local label="$1" home="$2" data="$3" real="$4"
+  local err code
+  code=0
+  err="$(HOME="$home" COOKIE_DATA_DIR="$data" REAL_HOME="$real" assert_isolated_data_dir 2>&1)" || code=$?
+  if [[ "$code" -ne 0 ]]; then
+    printf 'isolation %s exited %s: %s\n' "$label" "$code" "$err" >&2
+    exit 1
+  fi
+  if [[ -n "$err" ]]; then
+    printf 'isolation %s printed %s\n' "$label" "$err" >&2
+    exit 1
+  fi
+  if [[ -f "$FIXTURE/launched" ]]; then
+    printf 'isolation %s launched the app\n' "$label" >&2
+    exit 1
+  fi
+}
+
+ISO="$(mktemp -d "$FIXTURE/iso.XXXXXX")"
+REAL="$ISO/RealHome"
+DATA="$REAL/Library/Application Support/com.johnkimec.cookie-agent"
+mkdir -p "$DATA/nested"
+SAFE_HOME="$(mktemp -d "$FIXTURE/safe-home.XXXXXX")"
+SAFE_DATA="$(mktemp -d "$FIXTURE/safe-data.XXXXXX")"
+ln -s "$DATA/nested" "$FIXTURE/into-data"
+ln -s "$REAL" "$FIXTURE/home-link"
+mkdir -p "$REAL/Library/Application Support/com.johnkimec.cookie-agent-extra"
+
+expect_refuse "data-dir" "$SAFE_HOME" "$DATA" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "subdir" "$SAFE_HOME" "$DATA/nested" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "mixed-case" "$SAFE_HOME" "$REAL/library/APPLICATION SUPPORT/com.johnkimec.COOKIE-AGENT" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "symlink" "$SAFE_HOME" "$FIXTURE/into-data" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "home" "$REAL" "$SAFE_DATA" "$REAL" "HOME is the real home"
+expect_refuse "home-mixed" "$ISO/realhome" "$SAFE_DATA" "$REAL" "HOME is the real home"
+expect_refuse "home-symlink" "$FIXTURE/home-link" "$SAFE_DATA" "$REAL" "HOME is the real home"
+expect_refuse "home-inside-data" "$DATA/nested" "$SAFE_DATA" "$REAL" "HOME is the real cookie data directory"
+expect_refuse "empty-data" "$SAFE_HOME" "" "$REAL" "COOKIE_DATA_DIR is empty"
+expect_allow "temp" "$SAFE_HOME" "$SAFE_DATA" "$REAL"
+expect_allow "sibling" "$SAFE_HOME" "$REAL/Library/Application Support/com.johnkimec.cookie-agent-extra" "$REAL"
+
+account_home="$(directory_service_home)"
+expect_refuse "account-home" "$account_home" "$SAFE_DATA" "" "HOME is the real home"
+expect_allow "overridden-home" "$SAFE_HOME" "$SAFE_DATA" ""
+
+ISOLATE_ROOT=""
+ensure_isolate_root
+isolate_dir home
+iso_home="$ISOLATE_LAST"
+isolate_dir data
+iso_data="$ISOLATE_LAST"
+if [[ ! -d "$iso_home" || ! -d "$iso_data" ]]; then
+  printf 'isolate directories were not created\n' >&2
+  exit 1
+fi
+if [[ "$iso_home" != "$ISOLATE_ROOT/"* || "$iso_data" != "$ISOLATE_ROOT/"* ]]; then
+  printf 'isolate directories escaped %s (%s %s)\n' "$ISOLATE_ROOT" "$iso_home" "$iso_data" >&2
+  exit 1
+fi
+if [[ "$(real_path "$ISOLATE_ROOT")" != "$ISOLATE_ROOT" ]]; then
+  printf 'isolate root was not realpath'\''d: %s\n' "$ISOLATE_ROOT" >&2
+  exit 1
+fi
+expect_allow "isolate-dirs" "$iso_home" "$iso_data" "$REAL"
+iso_root="$ISOLATE_ROOT"
+remove_isolate_root "$iso_root"
+if [[ -d "$iso_root" || -d "$iso_home" || -d "$iso_data" ]]; then
+  printf 'isolate cleanup left %s\n' "$iso_root" >&2
+  exit 1
+fi
+remove_isolate_root "$REAL"
+if [[ ! -d "$REAL" ]]; then
+  printf 'isolate cleanup removed the real home\n' >&2
+  exit 1
+fi
+remove_isolate_root "$DATA"
+if [[ ! -d "$DATA" ]]; then
+  printf 'isolate cleanup removed the real data directory\n' >&2
+  exit 1
+fi
+ISOLATE_ROOT=""
+
+python3 - "$BIN_DIR/drive-mac" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+
+
+def body(name, end_marker):
+    start = text.index(name + "() {")
+    end = text.index(end_marker, start)
+    return text[start:end]
+
+
+launch = body("launch_verified", "\nlaunch_direct()")
+if launch.index("assert_isolated_data_dir") > launch.index('"$bin" &'):
+    sys.exit("assert_isolated_data_dir is after the direct launch")
+if "HOME=" not in launch.split('"$bin" &', 1)[0]:
+    sys.exit("direct launch does not set HOME before the binary")
+
+opened = body("open_clean_check", "\nopen_clean_status=0")
+if opened.index("assert_isolated_data_dir") > opened.index("/usr/bin/open -n"):
+    sys.exit("assert_isolated_data_dir is after open -n")
+env = opened.split("env -i", 1)[1].split("/usr/bin/open -n", 1)[0]
+for needle in ('HOME="$isolate_home"', 'COOKIE_DATA_DIR="$isolate_data"'):
+    if needle not in env:
+        sys.exit("open-clean launch env missing " + needle)
+if 'HOME="$HOME"' in text:
+    sys.exit("a launch still passes the real HOME through")
+if "assert_isolated_data_dir" not in launch or "assert_isolated_data_dir" not in opened:
+    sys.exit("a launch path skipped assert_isolated_data_dir")
+if "$(isolate_dir" in text:
+    sys.exit("isolate_dir is inside a command substitution, so cleanup would miss the temp dir")
+PY
+
+printf '%s\n' "isolation self-test ok"
 printf '%s\n' "drive-mac pid test ok"
