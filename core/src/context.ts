@@ -145,7 +145,7 @@ export function previewAround(
   }
   const at = matchIndex(text, matchText);
   if (at < 0) {
-    return cutEdge(text.slice(0, maxChars), false, true);
+    return cutEdge(text.slice(0, snapEnd(text, maxChars)), false, true);
   }
   const needle = matchText ?? "";
   const focus = Math.min(needle.length, Math.max(0, text.length - at));
@@ -155,6 +155,11 @@ export function previewAround(
   if (end > text.length) {
     end = text.length;
     start = Math.max(0, end - maxChars);
+  }
+  start = snapStart(text, start);
+  end = snapEnd(text, end);
+  if (end < start) {
+    end = start;
   }
   return cutEdge(text.slice(start, end), start > 0, end < text.length);
 }
@@ -174,13 +179,79 @@ function matchIndex(text: string, matchText: string | undefined): number {
 
 function cutEdge(slice: string, lead: boolean, tail: boolean): string {
   let out = slice;
-  if (lead && out.length > 0) {
-    out = ELLIPSIS + out.slice(1);
+  if (lead) {
+    out = dropFirstCodePoint(out);
   }
-  if (tail && out.length > 0) {
-    out = out.slice(0, -1) + ELLIPSIS;
+  if (tail) {
+    out = dropLastCodePoint(out);
+  }
+  if (lead) {
+    out = ELLIPSIS + out;
+  }
+  if (tail) {
+    out = out + ELLIPSIS;
   }
   return out;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/** Move a start index off a dangling low surrogate. */
+function snapStart(text: string, index: number): number {
+  if (index <= 0 || index >= text.length) {
+    return Math.min(Math.max(index, 0), text.length);
+  }
+  if (isLowSurrogate(text.charCodeAt(index))) {
+    return index + 1;
+  }
+  return index;
+}
+
+/** Move an end index off a dangling high surrogate. */
+function snapEnd(text: string, index: number): number {
+  if (index <= 0 || index >= text.length) {
+    return Math.min(Math.max(index, 0), text.length);
+  }
+  if (isHighSurrogate(text.charCodeAt(index - 1))) {
+    return index - 1;
+  }
+  return index;
+}
+
+function dropFirstCodePoint(text: string): string {
+  if (text.length === 0) {
+    return text;
+  }
+  const first = text.charCodeAt(0);
+  if (
+    isHighSurrogate(first) &&
+    text.length > 1 &&
+    isLowSurrogate(text.charCodeAt(1))
+  ) {
+    return text.slice(2);
+  }
+  return text.slice(1);
+}
+
+function dropLastCodePoint(text: string): string {
+  if (text.length === 0) {
+    return text;
+  }
+  const last = text.charCodeAt(text.length - 1);
+  if (
+    isLowSurrogate(last) &&
+    text.length > 1 &&
+    isHighSurrogate(text.charCodeAt(text.length - 2))
+  ) {
+    return text.slice(0, -2);
+  }
+  return text.slice(0, -1);
 }
 
 export function fitTokens(text: string, maxTokens: number): string {
@@ -191,5 +262,5 @@ export function fitTokens(text: string, maxTokens: number): string {
   if (text.length <= maxChars) {
     return text;
   }
-  return text.slice(0, maxChars).trim();
+  return text.slice(0, snapEnd(text, maxChars)).trim();
 }

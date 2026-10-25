@@ -71,7 +71,7 @@ describe("rerank config", () => {
     const ranked = await reranker.rerank("picnic", candidates);
     expect(ranked.map((row) => row.id)).toEqual(["b"]);
     expect(RERANK_PREVIEW_CHARS).toBe(100);
-    expect(RERANK_MAX_TOKENS).toBe(48);
+    expect(RERANK_MAX_TOKENS).toBe(64);
     expect(RERANK_RESPONSE_FORMAT.schema).toMatchObject({
       required: ["indices"],
       properties: { indices: { maxItems: 8 } },

@@ -595,6 +595,102 @@ describe("content indexer", () => {
     expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
     db.close();
   });
+
+  it("does not spend attempt limit on timeouts or connection errors", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let calls = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(): Promise<Float32Array> {
+          calls += 1;
+          if (calls <= INDEX_TURN_ATTEMPT_LIMIT) {
+            const error = new Error("embedder unreachable: timeout");
+            error.name = "TimeoutError";
+            throw error;
+          }
+          const refused = new Error("connect failed");
+          (refused as { code?: string }).code = "ECONNREFUSED";
+          throw refused;
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', 'still try this turn', 1)`,
+    ).run();
+    for (
+      let attempt = 0;
+      attempt < INDEX_TURN_ATTEMPT_LIMIT + 1;
+      attempt += 1
+    ) {
+      const failed = await indexer.indexPending();
+      expect(failed.skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    }
+    expect(calls).toBe(INDEX_TURN_ATTEMPT_LIMIT + 1);
+    db.close();
+  });
+
+  it("resets attempt counts after a successful batch", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let mode: "bad" | "ok" = "bad";
+    let badEmbeds = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          if (text.includes("bbbb")) {
+            badEmbeds += 1;
+            if (mode === "bad") {
+              throw new Error("bad turn");
+            }
+          }
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    const bad = Array.from({ length: 20 }, () => "b".repeat(2000)).join(" ");
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', ?, 1)`,
+    ).run(bad);
+    expect((await indexer.indexPending()).skipped).toBe(true);
+    expect((await indexer.indexPending()).skipped).toBe(true);
+    mode = "ok";
+    expect((await indexer.indexPending()).skipped).toBe(false);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBeGreaterThan(
+      0,
+    );
+    db.prepare("DELETE FROM embed_index WHERE source_id = 'old'").run();
+    db.prepare("DELETE FROM chunks WHERE first_turn = 'old'").run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('new', 'ses', 'user', 'fresh note', 2)`,
+    ).run();
+    mode = "bad";
+    const before = badEmbeds;
+    for (let attempt = 0; attempt < INDEX_TURN_ATTEMPT_LIMIT; attempt += 1) {
+      expect((await indexer.indexPending()).skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'new'")).toBe(0);
+    }
+    expect(badEmbeds).toBe(before + INDEX_TURN_ATTEMPT_LIMIT);
+    expect((await indexer.indexPending()).turns).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'new'")).toBe(1);
+    db.close();
+  });
 });
 
 function countRows(

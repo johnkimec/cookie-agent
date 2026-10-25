@@ -215,6 +215,9 @@ export class HybridRetriever {
         ranked = candidates.slice(0, this.limit);
       }
     }
+    if (isAborted(signal)) {
+      return [];
+    }
     return dedupeText(ranked).slice(0, this.limit);
   };
 
@@ -492,14 +495,14 @@ export function collapseChunkHits(
       continue;
     }
     const turn = turnOf(turnId);
-    const text =
-      turn !== null && turn.text.length > 0 ? turn.text : memory.text;
+    const chunk = memory.text;
+    const text = turn !== null && turn.text.length > 0 ? turn.text : chunk;
     out.push({
       id: turnId,
       text,
       source: "turn",
       createdAt: turn?.createdAt ?? memory.createdAt,
-      matchText: text === memory.text ? memory.matchText : memory.text,
+      matchText: chunk,
     });
   }
   return out;
@@ -734,25 +737,56 @@ function remember(byId: Map<string, Memory>, memory: Memory): void {
   }
 }
 
-/** Exact slice of `text` for the earliest query token, used to center a preview. */
-function matchSpan(text: string, query: string): string | undefined {
-  const tokens = query
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((token) => token.length > 0);
-  let best = -1;
-  let span = "";
-  for (const token of tokens) {
-    const at = text.toLowerCase().indexOf(token.toLowerCase());
-    if (at < 0) {
-      continue;
+const MATCH_STOPWORDS = new Set(
+  `a an the and or but if of to in on for at by with from as is it its be am
+   are was were do does did my me we our you your he she they them their this
+   that these those what who how when where why not no so than then into about
+   just can will would could should have has had`
+    .split(/\s+/)
+    .filter((word) => word.length > 0),
+);
+
+/**
+ * Whole word from `text` for the longest useful query token.
+ * Stopwords and tokens under 3 characters are skipped, so "is" does not
+ * match inside "This". Comparison is case-insensitive on the original
+ * word, so "İ" does not shift the slice.
+ */
+export function matchSpan(text: string, query: string): string | undefined {
+  const tokens = query.split(/[^\p{L}\p{N}]+/u).filter((token) => {
+    if (token.length < 3) {
+      return false;
     }
-    if (best >= 0 && at >= best) {
-      continue;
-    }
-    best = at;
-    span = text.slice(at, at + token.length);
+    return !MATCH_STOPWORDS.has(token.toLocaleLowerCase("en"));
+  });
+  if (tokens.length === 0) {
+    return undefined;
   }
-  return span.length > 0 ? span : undefined;
+  let best: { at: number; length: number; rank: number } | null = null;
+  for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const word = match[0];
+    const at = match.index;
+    if (word === undefined || at === undefined) {
+      continue;
+    }
+    for (const token of tokens) {
+      if (word.localeCompare(token, "en", { sensitivity: "base" }) !== 0) {
+        continue;
+      }
+      const rank = token.length;
+      if (
+        best === null ||
+        rank > best.rank ||
+        (rank === best.rank && at < best.at)
+      ) {
+        best = { at, length: word.length, rank };
+      }
+    }
+  }
+  if (best === null) {
+    return undefined;
+  }
+  return text.slice(best.at, best.at + best.length);
 }
 
 function dedupeText(memories: readonly Memory[]): Memory[] {

@@ -240,12 +240,20 @@ describe("stdio core", () => {
   });
 
   it("exits on a bad query or index embed timeout without speaking protocol", async () => {
-    const query = new StdioClient({ COOKIE_EMBED_QUERY_TIMEOUT_MS: "nope" });
-    expect(await query.exitCode()).toBe(1);
-    expect(await query.stderrText()).toContain("COOKIE_EMBED_QUERY_TIMEOUT_MS");
-    const index = new StdioClient({ COOKIE_EMBED_INDEX_TIMEOUT_MS: "nope" });
-    expect(await index.exitCode()).toBe(1);
-    expect(await index.stderrText()).toContain("COOKIE_EMBED_INDEX_TIMEOUT_MS");
+    const query = isolated({ COOKIE_EMBED_QUERY_TIMEOUT_MS: "nope" });
+    const queryClient = new StdioClient(query.env);
+    expect(await queryClient.exitCode()).toBe(1);
+    expect(await queryClient.stderrText()).toContain(
+      "COOKIE_EMBED_QUERY_TIMEOUT_MS",
+    );
+    expect(existsSync(join(query.dataDir, "cookie.db"))).toBe(false);
+    const index = isolated({ COOKIE_EMBED_INDEX_TIMEOUT_MS: "nope" });
+    const indexClient = new StdioClient(index.env);
+    expect(await indexClient.exitCode()).toBe(1);
+    expect(await indexClient.stderrText()).toContain(
+      "COOKIE_EMBED_INDEX_TIMEOUT_MS",
+    );
+    expect(existsSync(join(index.dataDir, "cookie.db"))).toBe(false);
   });
 
   it("aborts the rerank request when chat.cancel arrives during rerank", async () => {

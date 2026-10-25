@@ -53,6 +53,7 @@ export function startStdioCore(
     // Every env read stays above the open. A bad timeout must not create
     // cookie.db, and a test must not fall through to the product directory.
     const queryTimeoutMs = readQueryEmbedTimeoutMs(env);
+    const indexTimeoutMs = readIndexEmbedTimeoutMs(env);
     const store = SqliteMemoryStore.open(memoryDatabasePath(env));
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
@@ -60,7 +61,7 @@ export function startStdioCore(
     });
     const indexEmbedder = new HttpEmbedder({
       port: embedPort,
-      timeoutMs: readIndexEmbedTimeoutMs(env),
+      timeoutMs: indexTimeoutMs,
     });
     const vectors = new SqliteVecIndex(store.database());
     const embedUp = cachedProbe(

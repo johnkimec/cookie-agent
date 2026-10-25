@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { renderRetrieved } from "../context.ts";
 import { ChatLog } from "./chat-log.ts";
 import {
   HttpEmbedder,
@@ -11,13 +12,16 @@ import {
   readQueryEmbedTimeoutMs,
 } from "./http-embedder.ts";
 import {
+  collapseChunkHits,
   DEFAULT_RRF_WEIGHTS,
   ftsOrQuery,
   HybridRetriever,
   KNN_MAX_K,
+  matchSpan,
   readRrfWeights,
 } from "./hybrid-retrieve.ts";
 import { openMemoryDatabase } from "./migrate.ts";
+import { rerankPrompt } from "./rerank.ts";
 import { fuseRrf } from "./rrf.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
 import { SqliteVecIndex } from "./sqlite-vec-index.ts";
@@ -626,6 +630,114 @@ describe("hybrid retrieval", () => {
     expect(block).toContain("DEEPHIT");
     expect(block).not.toMatch(/\[turn\] a{20}/);
     store.close();
+  });
+
+  it("centers a long turn on a whole word, not a stopword inside another word", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    const filler =
+      "This is a long note about the week and many other things. ".repeat(40);
+    store.appendTurn({
+      id: "t1",
+      sessionId: "ses",
+      role: "user",
+      content: `${filler} My gym locker code is 4417. ${filler}`,
+      tainted: false,
+      model: null,
+      egress: false,
+      escalatedFrom: null,
+      tokensIn: null,
+      tokensCached: null,
+      tokensOut: null,
+      costUsd: null,
+      latencyMs: null,
+      createdAt: 5,
+    });
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: { embed: async () => new Float32Array(EMBEDDING_DIMENSIONS) },
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const hits = await retriever.retrieve("what is my locker code");
+    expect(hits[0]?.matchText).toBe("locker");
+    const block = renderRetrieved(hits, 1000);
+    expect(block).toContain("4417");
+    expect(matchSpan("This is a note", "what is my")).toBeUndefined();
+    expect(matchSpan("Cafe İSTANBUL opens", "where is istanbul")).toBe(
+      "İSTANBUL",
+    );
+    store.close();
+  });
+
+  it("returns nothing when the signal aborts during rerank", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      store.appendTurn({
+        id: `t${index}`,
+        sessionId: "ses",
+        role: "user",
+        content: `picnic note ${index}`,
+        tainted: false,
+        model: null,
+        egress: false,
+        escalatedFrom: null,
+        tokensIn: null,
+        tokensCached: null,
+        tokensOut: null,
+        costUsd: null,
+        latencyMs: null,
+        createdAt: 10 + index,
+      });
+    }
+    const controller = new AbortController();
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: { embed: async () => new Float32Array(EMBEDDING_DIMENSIONS) },
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+      rerank: (_query, _candidates, signal) =>
+        new Promise((_resolve, reject) => {
+          setTimeout(() => controller.abort(), 5);
+          signal?.addEventListener("abort", () => {
+            reject(new Error("aborted"));
+          });
+        }),
+    });
+    const hits = await retriever.retrieve("picnic", controller.signal);
+    expect(controller.signal.aborted).toBe(true);
+    expect(hits).toEqual([]);
+    store.close();
+  });
+
+  it("keeps the matching chunk as the rerank preview", () => {
+    const chunk = `${"w".repeat(40)} locker code 4417`;
+    const turn = `${"start ".repeat(30)}${chunk}`;
+    const collapsed = collapseChunkHits(
+      [{ id: "t1#2", text: chunk, source: "chunk" }],
+      new Set(),
+      () => ({ text: turn, createdAt: 1 }),
+    );
+    expect(collapsed[0]?.matchText).toBe(chunk);
+    expect(collapsed[0]?.text).toBe(turn);
+    const prompt = rerankPrompt("locker", collapsed);
+    expect(prompt).toContain("4417");
+    expect(prompt).not.toContain("start start");
   });
 });
 

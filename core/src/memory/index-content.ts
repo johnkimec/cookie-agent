@@ -156,10 +156,13 @@ export class ContentIndexer {
           );
         }
         await this.writeTurnBatch(batch, vectors, started);
+        this.clearTurnAttempts(batch);
         stats.chunks += batch.length;
       } catch (error) {
         stats.skipped = true;
-        this.noteTurnAttempts(batch);
+        if (!isTransientIndexError(error)) {
+          this.noteTurnAttempts(batch);
+        }
         process.stderr.write(
           `cookie-core: turn index failed: ${errorText(error)}\n`,
         );
@@ -379,6 +382,12 @@ export class ContentIndexer {
     write();
   }
 
+  private clearTurnAttempts(batch: readonly PlannedChunk[]): void {
+    for (const chunk of batch) {
+      this.turnAttempts.delete(chunk.turnId);
+    }
+  }
+
   private noteTurnAttempts(batch: readonly PlannedChunk[]): void {
     const seen = new Set<string>();
     for (const chunk of batch) {
@@ -500,6 +509,52 @@ function errorText(error: unknown): string {
     return error.message;
   }
   return "unknown error";
+}
+
+const TRANSIENT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** Timeouts and connection failures are not a bad turn. */
+function isTransientIndexError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current !== "object") {
+      return false;
+    }
+    const record = current as {
+      name?: unknown;
+      message?: unknown;
+      code?: unknown;
+      cause?: unknown;
+    };
+    if (record.name === "TimeoutError") {
+      return true;
+    }
+    if (typeof record.code === "string" && TRANSIENT_CODES.has(record.code)) {
+      return true;
+    }
+    if (
+      typeof record.message === "string" &&
+      /timeout|timed out|econnrefused|econnreset|embedder unreachable/i.test(
+        record.message,
+      )
+    ) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
 }
 
 /**
