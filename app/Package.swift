@@ -12,6 +12,9 @@ let package = Package(
         .library(name: "CookieCore", targets: ["CookieCore"]),
         .executable(name: "CookieAgent", targets: ["CookieAgent"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/microsoft/SwiftStreamingMarkdown", exact: "0.7.0")
+    ],
     targets: [
         .target(name: "CookieProtocol"),
         .target(
@@ -20,7 +23,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "CookieAgent",
-            dependencies: ["CookieProtocol", "CookieCore"]
+            dependencies: [
+                "CookieProtocol",
+                "CookieCore",
+                .product(name: "SwiftStreamingMarkdown", package: "SwiftStreamingMarkdown"),
+            ]
         ),
         .testTarget(
             name: "CookieProtocolTests",

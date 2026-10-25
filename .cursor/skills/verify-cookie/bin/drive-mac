@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 usage() {
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--runtime fake|real] [--evidence dir]" >&2
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|popup-reply|all] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
 }
 
@@ -19,7 +19,7 @@ runtime="fake"
 evidence=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    menu-bar-icon|hotkey-popup|chat|all)
+    menu-bar-icon|hotkey-popup|chat|popup-reply|all)
       feature="$1"
       ;;
     --runtime)
@@ -68,6 +68,13 @@ if [[ "$runtime" == "real" ]]; then
 else
   export COOKIE_LLAMA_PORT=18080
   export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+fi
+if [[ "$feature" == "popup-reply" ]]; then
+  if [[ "$runtime" != "fake" ]]; then
+    printf '%s\n' "not-ok" "popup-reply drives the long-reply fixture core, not --runtime real"
+    exit 1
+  fi
+  export COOKIE_CORE_COMMAND="node $ROOT/.cursor/skills/verify-cookie/bin/popup-long-reply-fake-core.mjs"
 fi
 
 log() { printf '%s\n' "$*"; }
@@ -521,6 +528,173 @@ end tell
 APPLESCRIPT
 }
 
+popup_reply_metrics() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+set replyHeight to 0
+set dotWidth to 0
+set inputHeight to 0
+set windowHeight to 0
+set bottomPlace to "outside"
+tell application "System Events"
+  if not (exists process "CookieAgent") then error "CookieAgent is not running"
+  tell process "CookieAgent"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set replyElem to missing value
+    set dotElem to missing value
+    set inputElem to missing value
+    set bottomElem to missing value
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is "cookie.badge.on-device.0" then error "per-message badge cookie.badge.on-device.0 is still present"
+      if theId is "cookie.turn.cookie.0" and replyElem is missing value then set replyElem to elem
+      if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
+      if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
+      if theId is "cookie.popup.transcript-bottom" and bottomElem is missing value then set bottomElem to elem
+    end repeat
+    if replyElem is missing value then error "missing cookie.turn.cookie.0"
+    if dotElem is missing value then error "missing cookie.badge.on-device"
+    if inputElem is missing value then error "missing cookie.popup.input"
+    if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
+    set replyHeight to item 2 of (size of replyElem)
+    set dotWidth to item 1 of (size of dotElem)
+    set inputHeight to item 2 of (size of inputElem)
+    set windowHeight to item 2 of (size of popupWindow)
+    set bLeft to item 1 of (position of bottomElem)
+    set bTop to item 2 of (position of bottomElem)
+    set bWidth to item 1 of (size of bottomElem)
+    set bHeight to item 2 of (size of bottomElem)
+    set wLeft to item 1 of (position of popupWindow)
+    set wTop to item 2 of (position of popupWindow)
+    set wWidth to item 1 of (size of popupWindow)
+    set wHeight to item 2 of (size of popupWindow)
+    if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= (wTop + wHeight + 4) then
+      set bottomPlace to "inside"
+    end if
+  end tell
+end tell
+return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace
+APPLESCRIPT
+}
+
+run_popup_reply() {
+  log "open via Ask Cookie…"
+  open_via_ask
+  sleep 0.6
+  log "send long reply"
+  send_chat
+  local ready=0
+  local attempt
+  for attempt in $(seq 1 80); do
+    cookie_turn_value > /tmp/cookie-drive-mac-chat.txt || true
+    if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+ok = "END-OF-REPLY-m1-popup" in text and "Einstein is best known for" in text
+sys.exit(0 if ok else 1)
+PY
+    then
+      sleep 0.25
+      continue
+    fi
+    if popup_reply_metrics > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if python3 - <<'PY'
+import pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-metrics.txt").read_text()
+vals = {}
+for line in text.splitlines():
+    parts = line.split(" ", 1)
+    if len(parts) == 2:
+        vals[parts[0]] = parts[1].strip()
+need = ["replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom"]
+if any(key not in vals for key in need):
+    print("missing " + ", ".join(key for key in need if key not in vals))
+    sys.exit(1)
+reply_height = float(vals["replyHeight"])
+dot_width = float(vals["dotWidth"])
+input_height = float(vals["inputHeight"])
+window_height = float(vals["windowHeight"])
+ok = (
+    reply_height > 40
+    and window_height > 400
+    and vals["bottom"] == "inside"
+    and 4 < dot_width < 40
+    and input_height < 48
+)
+if not ok:
+    print(text.strip())
+    sys.exit(1)
+print("metrics ok")
+PY
+      then
+        ready=1
+        break
+      fi
+    fi
+    sleep 0.25
+  done
+  if [[ "$ready" != "1" ]]; then
+    log "chat value"
+    cat /tmp/cookie-drive-mac-chat.txt 2>/dev/null || true
+    log "metrics"
+    cat /tmp/cookie-drive-mac-metrics.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
+    dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
+    cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
+    fail "popup reply did not wrap, follow the bottom, and show one on-device dot"
+  fi
+  dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || fail "popup accessibility read failed"
+  local shell_log="$COOKIE_DATA_DIR/logs/cookie-shell.log"
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=" | grep -F "END-OF-REPLY-m1-popup" | grep -F "Einstein is best known for" >/dev/null; then
+    log "shell log"
+    cat "$shell_log" 2>/dev/null || true
+    fail "chat.done log is missing the full accumulated reply"
+  fi
+  screencapture -x /tmp/cookie-drive-mac-popup.png
+  if [[ ! -s /tmp/cookie-drive-mac-popup.png ]]; then
+    fail "screencapture wrote no file"
+  fi
+  if [[ -n "$evidence" ]]; then
+    mkdir -p "$evidence"
+    {
+      printf '%s\n' "drive-mac popup-reply --runtime fake"
+      printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
+      printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+      printf '%s\n' "resolvedPort=${PORT}"
+      printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND:-}"
+    } > "$evidence/command.txt"
+    cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
+    cp /tmp/cookie-drive-mac-ax.txt "$evidence/ax.txt"
+    cp /tmp/cookie-drive-mac-chat.txt "$evidence/chat.txt"
+    cp /tmp/cookie-drive-mac-metrics.txt "$evidence/metrics.txt"
+    cp /tmp/cookie-drive-mac-popup.png "$evidence/popup.png"
+    cp "$shell_log" "$evidence/cookie-shell.log"
+    if [[ ! -s "$evidence/chat.txt" || ! -s "$evidence/popup.png" || ! -s "$evidence/metrics.txt" ]]; then
+      fail "evidence is missing chat.txt, metrics.txt, or popup.png"
+    fi
+  fi
+  log "metrics"
+  cat /tmp/cookie-drive-mac-metrics.txt
+  log "popup-reply ok"
+  log "Mac proof is pending. Leave the sub-features planned until verify-evidence/m1-popup-reply exists."
+}
+
 close_popup() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
@@ -670,6 +844,11 @@ if missing:
     sys.exit(1)
 print("menu strings ok")
 PY
+fi
+
+if [[ "$feature" == "popup-reply" ]]; then
+  run_popup_reply
+  exit 0
 fi
 
 drive_popup=0

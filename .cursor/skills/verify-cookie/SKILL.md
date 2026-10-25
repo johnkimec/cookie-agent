@@ -189,6 +189,7 @@ Run cleanup after a failed drive too, so a core is not left running. Then confir
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
 .cursor/skills/verify-cookie/bin/drive-mac all
 .cursor/skills/verify-cookie/bin/drive-mac chat --runtime real --evidence verify-evidence/m0-mac-real
+.cursor/skills/verify-cookie/bin/drive-mac popup-reply --evidence verify-evidence/m1-popup-reply
 .cursor/skills/verify-cookie/bin/drive-core cleanup
 ```
 

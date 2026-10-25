@@ -29,6 +29,11 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
     private var terminationStarted = false
+    /// True only while `ingestDelta` is on the stack. The session still applies
+    /// the chunk immediately so Stop sees the first delta and its message id.
+    private var holdUIPublish = false
+    private var uiCoalescer = ReplyUICoalescer()
+    private var flushItem: DispatchWorkItem?
 
     var menuGlyphState: MenuGlyph {
         menuGlyph(
@@ -246,6 +251,11 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func publishTurns() {
+        if holdUIPublish { return }
+        publishTurnsNow()
+    }
+
+    private func publishTurnsNow() {
         let apply = { [weak self] in
             guard let self else { return }
             let snap = self.turns.snapshot
@@ -273,13 +283,35 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                     self.turns.noteRuntime(status.state)
                 }
             case .delta(let delta):
+                self.holdUIPublish = true
                 self.turns.ingestDelta(delta)
+                self.holdUIPublish = false
+                if self.uiCoalescer.noteDelta() {
+                    self.scheduleReplyFlush()
+                }
             case .done(let done):
+                self.flushItem?.cancel()
+                self.flushItem = nil
+                self.uiCoalescer.noteDone()
+                self.holdUIPublish = false
                 self.turns.ingestDone(done)
+                let accumulated = ReplyStream.cookieText(in: self.conversation)
+                self.log(ReplyStream.doneLog(messageId: done.messageId, accumulated: accumulated))
             case .rpcError, .decodeFailed:
                 self.onLayout?()
             }
         }
+    }
+
+    private func scheduleReplyFlush() {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.flushItem = nil
+            guard self.uiCoalescer.noteFlush() else { return }
+            self.publishTurnsNow()
+        }
+        flushItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + ReplyStream.flushInterval, execute: item)
     }
 
     private func markCoreReady() {

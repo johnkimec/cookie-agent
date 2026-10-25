@@ -19,6 +19,9 @@ public enum CookieAX {
     public static func turnYou(_ index: Int) -> String { "cookie.turn.you.\(index)" }
     public static func turnCookie(_ index: Int) -> String { "cookie.turn.cookie.\(index)" }
     public static func badge(_ index: Int) -> String { "cookie.badge.on-device.\(index)" }
+    /// One on-device indicator in the input row. Not a pill on each reply.
+    public static let onDeviceIndicator = "cookie.badge.on-device"
+    public static let transcriptBottom = "cookie.popup.transcript-bottom"
 }
 
 public enum CookieCopy {
