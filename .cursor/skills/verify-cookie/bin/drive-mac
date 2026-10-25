@@ -382,24 +382,38 @@ trim_osascript() {
 }
 
 # Key codes go to the frontmost process. Refuse unless that unix id is ours.
+# popup-hotkey is the exception: a third argument "hotkey" is option-space
+# for a copy that already registered the global hotkey. That app is
+# .accessory and is not frontmost. Every other send still requires it.
 send_key_code() {
   local code="$1"
   local modifier="${2:-}"
+  local hotkey="${3:-}"
   [[ "$code" =~ ^[0-9]+$ ]] || fail "refusing keystroke: code is not an integer"
   if [[ -n "$modifier" && "$modifier" != "option" ]]; then
     fail "refusing keystroke: modifier is not option"
   fi
-  COOKIE_KEY_CODE="$code" COOKIE_KEY_OPTION="$modifier" osascript_run <<'APPLESCRIPT'
+  if [[ -n "$hotkey" && "$hotkey" != "hotkey" ]]; then
+    fail "refusing keystroke: hotkey flag is not hotkey"
+  fi
+  if [[ "$hotkey" == "hotkey" && ( "$modifier" != "option" || "$code" != "49" ) ]]; then
+    fail "refusing keystroke: hotkey send is option-space only"
+  fi
+  COOKIE_KEY_CODE="$code" COOKIE_KEY_OPTION="$modifier" COOKIE_KEY_HOTKEY="$hotkey" osascript_run <<'APPLESCRIPT'
 set drivePid to (system attribute "COOKIE_DRIVE_PID") as integer
 set keyCode to (system attribute "COOKIE_KEY_CODE") as integer
 set expectedName to system attribute "COOKIE_DRIVE_PROCESS_NAME"
 set expectedBundle to system attribute "COOKIE_DRIVE_BUNDLE_ID"
+set hotkeySend to system attribute "COOKIE_KEY_HOTKEY"
+if hotkeySend is missing value then set hotkeySend to ""
 tell application "System Events"
   set frontProc to first process whose frontmost is true
   set frontPid to unix id of frontProc
-  if frontPid is not drivePid then error "refusing keystroke: frontmost unix id " & frontPid & " is not drive pid " & drivePid
-  if name of frontProc is not expectedName then error "refusing keystroke: frontmost process is not the launched executable"
-  if bundle identifier of frontProc is not expectedBundle then error "refusing keystroke: frontmost bundle id is not the launched app"
+  if hotkeySend is not "hotkey" then
+    if frontPid is not drivePid then error "refusing keystroke: frontmost unix id " & frontPid & " is not drive pid " & drivePid
+    if name of frontProc is not expectedName then error "refusing keystroke: frontmost process is not the launched executable"
+    if bundle identifier of frontProc is not expectedBundle then error "refusing keystroke: frontmost bundle id is not the launched app"
+  end if
   set mods to {}
   if (system attribute "COOKIE_KEY_OPTION") is "option" then set end of mods to option down
   key code keyCode using mods

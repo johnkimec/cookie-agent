@@ -335,10 +335,27 @@ recipe_popup_option_click() {
 }
 
 recipe_popup_hotkey() {
+  local others
+  others="$(cookieagent_comm_pids | tr '\n' ' ')"
+  if [[ -n "${others// /}" ]]; then
+    log "popup-hotkey skipped: a CookieAgent is running (pid ${others}); not sending option-space"
+    {
+      printf '%s\n' "popup-hotkey skipped"
+      printf '%s\n' "reason=a CookieAgent is running"
+      printf '%s\n' "pids=${others}"
+      printf '%s\n' "signaled=none"
+    } >"$evidence/popup-hotkey-skip.txt"
+    printf '%s\n' "popup-hotkey=skipped" >>"$evidence/command.txt"
+    log "skipped"
+    exit 3
+  fi
   use_fake_core
   focused_launch
+  if ! hotkey_registered; then
+    fail "RegisterEventHotKey failed; not sending option-space"
+  fi
   if [[ "$(popup_is_open)" == "yes" ]]; then
-    fail "popup was already open before ⌥Space"
+    fail "popup was already open before option-space"
   fi
   toggle_hotkey yes "open"
   sleep 0.45
@@ -349,11 +366,34 @@ recipe_popup_hotkey() {
   quit_focused
 }
 
+hotkey_registered() {
+  local file hit=0
+  if [[ ! -f "$evidence/app-stderr.txt" ]]; then
+    note "popup-hotkey has no stderr log"
+    return 1
+  fi
+  for file in "$evidence/app-stderr.txt" "$COOKIE_DATA_DIR/logs/cookie-shell.log"; do
+    [[ -f "$file" ]] || continue
+    if grep -F "RegisterEventHotKey failed" "$file" >/dev/null; then
+      hit=1
+      note "RegisterEventHotKey failed in $file"
+      grep -F "RegisterEventHotKey failed" "$file" | while IFS= read -r line; do
+        note "$line"
+      done
+    fi
+  done
+  if [[ "$hit" == "1" ]]; then
+    return 1
+  fi
+  note "RegisterEventHotKey registered"
+  return 0
+}
+
 toggle_hotkey() {
   local want="$1"
   local why="$2"
   local attempt state
-  send_key_code 49 option
+  send_key_code 49 option hotkey
   for attempt in $(seq 1 20); do
     state="$(popup_is_open)"
     if [[ "$state" == "$want" ]]; then
@@ -738,7 +778,7 @@ recipe_status_offline_chat() {
   assert_no_egress "$APP_PID"
   note "status-offline-chat on-device reply, status stayed $STATUS_UP_QWEN"
   quit_focused
-  pid="$STUB_PID"
+  local pid="$STUB_PID"
   if ! kill -0 "$pid" 2>/dev/null; then
     fail "quit stopped the stub this app did not launch"
   fi
