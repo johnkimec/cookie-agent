@@ -63,6 +63,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieAX.popupInput, "cookie.popup.input")
         XCTAssertEqual(CookieAX.popupMascot, "cookie.popup.mascot")
         XCTAssertEqual(CookieAX.popupSend, "cookie.popup.send")
+        XCTAssertEqual(CookieAX.popupStop, "cookie.popup.stop")
         XCTAssertEqual(CookieAX.popupRefusal, "cookie.popup.refusal")
         XCTAssertEqual(CookieAX.popupLoading, "cookie.popup.loading")
         XCTAssertEqual(CookieAX.turnYou(0), "cookie.turn.you.0")
@@ -75,6 +76,18 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieCopy.coreNotFound, "🐾 Cookie · core not found")
         XCTAssertEqual(CookieCopy.pnpmNotFound, "🐾 Cookie · pnpm not found")
         XCTAssertEqual(CookieCopy.commandNotFound, "🐾 Cookie · core can't start")
+        XCTAssertEqual(CookieCopy.stop, "Stop")
+        let streaming = popupSendControl(runtime: .up, replyInFlight: true)
+        XCTAssertEqual(streaming.title, CookieCopy.stop)
+        XCTAssertEqual(streaming.identifier, CookieAX.popupStop)
+        XCTAssertTrue(streaming.enabled)
+        XCTAssertTrue(streaming.stopsReply)
+        let idle = popupSendControl(runtime: .loading, replyInFlight: false)
+        XCTAssertEqual(idle.title, "⏎")
+        XCTAssertEqual(idle.identifier, CookieAX.popupSend)
+        XCTAssertFalse(idle.enabled)
+        XCTAssertFalse(idle.stopsReply)
+        XCTAssertTrue(popupSendControl(runtime: .loading, replyInFlight: true).enabled)
         XCTAssertEqual(ShellLaunchFailure.coreNotFound.statusLine, CookieCopy.coreNotFound)
         XCTAssertEqual(ShellLaunchFailure.pnpmNotFound.statusLine, CookieCopy.pnpmNotFound)
         XCTAssertEqual(PopupLayout.width, 560)
@@ -144,6 +157,34 @@ final class ConversationTests: XCTestCase {
         chat.draft = ""
         chat.recallLastUserText()
         XCTAssertEqual(chat.draft, "hello")
+    }
+
+    func testSettleKeepsPartialReply() {
+        var chat = PopupConversation(draft: "hello")
+        XCTAssertEqual(chat.prepareSend(runtime: .up), .send(text: "hello"))
+        chat.noteAck(messageID: "msg-1")
+        chat.applyDelta(ChatDeltaParams(
+            conversationId: "conv-1",
+            messageId: "msg-1",
+            index: 0,
+            text: "I'm here. "
+        ))
+        chat.settleInFlightReply()
+        XCTAssertFalse(chat.replyInFlight)
+        XCTAssertEqual(chat.turns.map(\.role), [.you, .cookie])
+        XCTAssertEqual(chat.turns[1].text, "I'm here. ")
+        XCTAssertFalse(chat.turns[1].streaming)
+        XCTAssertEqual(chat.turns[1].badge, CookieCopy.onDevice)
+        chat.settleInFlightReply()
+        XCTAssertEqual(chat.turns[1].text, "I'm here. ")
+        chat.applyDone(ChatDoneParams(
+            conversationId: "conv-1",
+            messageId: "msg-1",
+            finishReason: .cancelled,
+            usage: Usage(inputTokens: 0, outputTokens: 0)
+        ))
+        XCTAssertEqual(chat.turns[1].text, "I'm here. ")
+        XCTAssertFalse(chat.replyInFlight)
     }
 
     func testRollbackRestoresDraft() {
