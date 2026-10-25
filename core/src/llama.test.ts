@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { RERANK_MAX_TOKENS, RERANK_RESPONSE_FORMAT } from "./memory/rerank.ts";
 import {
   createLlamaServerProvider,
   readLlamaPort,
@@ -168,6 +169,41 @@ describe("llama-server provider", () => {
       enable_thinking: true,
     });
     expect(body?.reasoning_effort).toBeUndefined();
+  });
+
+  it("sends rerank as json_schema indices with a short max_tokens", async () => {
+    const stub = await startLlamaStub(0);
+    closers.push(stub.close);
+    const provider = createLlamaServerProvider({ port: stub.port });
+    const stream = provider.streamChat({
+      system: "Reply with JSON only.",
+      messages: [{ role: "user", content: "rank these" }],
+      abortSignal: new AbortController().signal,
+      maxOutputTokens: RERANK_MAX_TOKENS,
+      responseFormat: RERANK_RESPONSE_FORMAT,
+    });
+    try {
+      for await (const _part of stream.textDeltas) {
+        // The stub does not return the schema. The request body is enough.
+      }
+      await stream.completion;
+    } catch {
+      // Structured output may reject the stub's plain text.
+    }
+    const body = stub.chats[0]?.body;
+    expect(body?.max_tokens).toBe(RERANK_MAX_TOKENS);
+    expect(body?.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: {
+        name: "rerank",
+        schema: {
+          required: ["indices"],
+        },
+      },
+    });
+    expect(body?.chat_template_kwargs).toMatchObject({
+      enable_thinking: false,
+    });
   });
 });
 
