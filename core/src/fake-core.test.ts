@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { TYPE_STRIP_NODE_ARGS } from "./node-launch.ts";
 import { protocolErrors } from "./protocol/errors.ts";
 import {
   countWords,
@@ -27,19 +28,15 @@ class CoreClient {
   private readonly waiters: Array<(message: unknown) => void> = [];
 
   constructor(deltaMs: string) {
-    this.child = spawn(
-      process.execPath,
-      ["--experimental-strip-types", fakeCore],
-      {
-        cwd: coreDir,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          COOKIE_FAKE_DELTA_MS: deltaMs,
-          COOKIE_LLAMA_PORT: "18080",
-        },
+    this.child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, fakeCore], {
+      cwd: coreDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        COOKIE_FAKE_DELTA_MS: deltaMs,
+        COOKIE_LLAMA_PORT: "18080",
       },
-    );
+    });
     if (this.child.stdout === null || this.child.stdin === null) {
       throw new Error("stdio was not piped");
     }

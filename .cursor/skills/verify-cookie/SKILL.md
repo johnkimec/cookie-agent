@@ -13,7 +13,7 @@ Keep this map honest with `/maintain-verification-skill` when the shell or the r
 
 There is no long-running server. Each drive starts its own core and that process exits on `shutdown`. `--core real` also starts a stub on port `18080` for that drive and stops it when the drive returns.
 
-From the repository root, with Node 22 and pnpm 10:
+From the repository root, with Node 22.6 or newer and pnpm 10. `.nvmrc` is `22` (current Node 22). `engines` is `>=22.6`, which is the first release that can strip TypeScript. CI installs the `.nvmrc` line. Node 22.13 prints a type-stripping `ExperimentalWarning` on stderr; the launch flags below hide that warning and nothing else.
 
 ```bash
 pnpm install
@@ -109,7 +109,7 @@ A drive writes these files into `--evidence`:
 | --- | --- |
 | `command.txt` | The `drive-core` invocation plus `COOKIE_DATA_DIR`, `COOKIE_LLAMA_PORT`, and `COOKIE_FAKE_DELTA_MS`. |
 | `transcript.jsonl` | One JSON object per line: `seq`, `direction` (`client` or `server`), and `message` (the raw JSON-RPC value). |
-| `stderr.txt` | The core's stderr. Empty on success. |
+| `stderr.txt` | The core's stderr. Empty on success. Node 22.13's `ExperimentalWarning: Type Stripping is an experimental feature and might change at any time` is stderr and fails the drive. Launch flags pass `--disable-warning=ExperimentalWarning` so this file stays empty. Any other stderr still fails, except the runtime-restart drive's stream error. |
 | `summary.txt` | The same text the command printed. |
 
 Doctor output is not one of those files. Record it beside them:
@@ -140,7 +140,7 @@ Run cleanup after a failed drive too, so a core is not left running. Then confir
 
 ## Helpers
 
-`.cursor/skills/verify-cookie/bin/drive-core` is executable. It runs `node --experimental-strip-types core/src/verify-drive.ts` from the repository root.
+`.cursor/skills/verify-cookie/bin/drive-core` is executable. It runs `node --experimental-strip-types --disable-warning=ExperimentalWarning core/src/verify-drive.ts` from the repository root. The same two flags are on `pnpm core` and `pnpm fake-core`. The Swift app's default command is `pnpm --filter @cookie-agent/core fake-core`, so that script covers the app without a change under `app/`. Do not replace the flag with `--no-warnings`.
 
 ```bash
 .cursor/skills/verify-cookie/bin/drive-core doctor

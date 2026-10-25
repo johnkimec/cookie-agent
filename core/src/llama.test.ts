@@ -112,6 +112,33 @@ describe("llama-server provider", () => {
     expect(stub.chats.some((chat) => chat.aborted)).toBe(true);
   });
 
+  it("sends enable_thinking false on every request when thinking is off", async () => {
+    expect(readThinking({})).toBe(false);
+    const stub = await startLlamaStub(0);
+    closers.push(stub.close);
+    const provider = createLlamaServerProvider({
+      port: stub.port,
+      thinking: readThinking({}),
+    });
+    for (const text of ["first", "second"]) {
+      const stream = provider.streamChat({
+        system: "Be brief.",
+        messages: [{ role: "user", content: text }],
+        abortSignal: new AbortController().signal,
+      });
+      for await (const _part of stream.textDeltas) {
+        // Drain so the request body is recorded.
+      }
+      await stream.completion;
+    }
+    expect(stub.chats).toHaveLength(2);
+    for (const chat of stub.chats) {
+      expect(chat.body.chat_template_kwargs).toMatchObject({
+        enable_thinking: false,
+      });
+    }
+  });
+
   it("reads COOKIE_THINKING and sends it on the chat request", async () => {
     expect(readThinking({})).toBe(false);
     expect(readThinking({ COOKIE_THINKING: "" })).toBe(false);
