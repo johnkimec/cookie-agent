@@ -35,6 +35,16 @@ import {
 export const RECALL_BAR = 8;
 
 /**
+ * `--fake` passes when an expected id is inside this prefix and no
+ * distractor is ranked above it. The cutoff is fixed. It is not an env knob.
+ */
+export const FAKE_RETRIEVAL_TOP = 8;
+
+/** Reflect JSON `parseReflectExtraction` accepts with no facts. */
+export const EMPTY_REFLECT_REPLY =
+  '{"journal":"","summary":"","facts":[],"profile":[]}';
+
+/**
  * `--real` does not dial John's servers. Ports come from flags or env.
  */
 export const REAL_PORTS_REQUIRED =
@@ -90,6 +100,9 @@ interface Script {
 }
 
 export function scriptedAnswer(messages: unknown, script: Script): string {
+  if (isReflectPrompt(messages)) {
+    return EMPTY_REFLECT_REPLY;
+  }
   if (script.text !== null) {
     return script.text;
   }
@@ -255,6 +268,35 @@ export function storedTurnId(
   return null;
 }
 
+/**
+ * True when some expected id is in the top {@link FAKE_RETRIEVAL_TOP}
+ * and every distractor is absent or ranked below that id.
+ */
+export function retrievalHit(
+  ids: readonly string[],
+  expected: readonly string[],
+  distractors: readonly string[],
+): boolean {
+  const top = ids.slice(0, FAKE_RETRIEVAL_TOP);
+  let best = -1;
+  for (const id of expected) {
+    const at = top.indexOf(id);
+    if (at >= 0 && (best < 0 || at < best)) {
+      best = at;
+    }
+  }
+  if (best < 0) {
+    return false;
+  }
+  for (const id of distractors) {
+    const at = top.indexOf(id);
+    if (at >= 0 && at < best) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function evalExitCode(report: EvalReport): number {
   if (report.egressViolation || report.plumbingError) {
     return 1;
@@ -304,11 +346,12 @@ export async function runMemoryEval(
     await servers.close();
   }
 
-  const passed = results.filter((result) => result.pass).length;
+  const counted = results.filter((result) => result.countsTowardDenominator);
+  const passed = counted.filter((result) => result.pass).length;
   const report: EvalReport = {
     mode: options.mode,
     passed,
-    total: results.length,
+    total: counted.length,
     bar: RECALL_BAR,
     egressViolation,
     plumbingError,
@@ -416,7 +459,10 @@ function scriptedOrReal(
   script: Script,
   realPort: number,
 ): string | Promise<string> {
-  if (script.text !== null && !isReflectPrompt(messages)) {
+  if (isReflectPrompt(messages)) {
+    return EMPTY_REFLECT_REPLY;
+  }
+  if (script.text !== null) {
     return script.text;
   }
   return completeAtTemperatureZero(realPort, body ?? { messages });
@@ -452,6 +498,7 @@ async function runTask(
       clockFile,
       traceFile,
       egressLog,
+      lexicalOnly: options.mode === "fake",
     }),
     clockFile,
   );
@@ -498,21 +545,30 @@ async function runTask(
       owned.splice(at, 1);
     }
   }
-  const answerPass =
-    error === null && egress === null && answerMatches(task, answer);
+  const clean = error === null && egress === null;
+  const answerPass = clean && answerMatches(task, answer);
+  const ranked = retrievalHit(
+    ids,
+    task.expectedIds ?? [],
+    task.distractorIds ?? [],
+  );
+  const realOnly = task.realOnly === true && options.mode === "fake";
   let knownBlocked = false;
-  let pass = answerPass;
+  let pass = options.mode === "fake" ? clean && ranked : answerPass;
+  if (realOnly) {
+    pass = false;
+  }
   if (task.id === FORGET_TASK_ID) {
     if (forgotten === null) {
       knownBlocked = true;
       pass = false;
     } else {
       const debtId = storedTurnId(task.sessions, DEBT_TURN_NEEDLE);
-      pass =
-        answerPass &&
+      const forgot =
         forgotten !== undefined &&
         debtId !== null &&
         forgotten.includes(debtId);
+      pass = pass && forgot;
     }
   }
   return {
@@ -520,7 +576,7 @@ async function runTask(
     pass,
     knownBlocked,
     knownBlockedReason: knownBlocked ? KNOWN_BLOCKED_REASON : null,
-    countsTowardDenominator: true,
+    countsTowardDenominator: !realOnly,
     ids,
     answer,
     error,
@@ -545,8 +601,8 @@ async function replaySession(
     }
     const next = session.turns[index + 1];
     // Both modes replay the fixture assistant line through the stub.
-    // Reflect and the final question leave `script.text` null, so --real
-    // forwards those completions at temperature 0.
+    // A reflect prompt gets empty JSON. The final question leaves
+    // `script.text` null, so --real forwards it at temperature 0.
     // TODO(#18): script 06's forget as a memory.forget tool call. The
     // assistant line above does not call the tool.
     script.text = next?.role === "assistant" ? next.content : "";
@@ -586,6 +642,8 @@ export function coreEvalEnv(input: {
   clockFile: string;
   traceFile: string;
   egressLog: string;
+  /** `--fake` ignores vectors so the rank is BM25. */
+  lexicalOnly?: boolean;
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.COOKIE_RERANK;
@@ -600,6 +658,9 @@ export function coreEvalEnv(input: {
   env.COOKIE_LOOPBACK_ONLY = "1";
   env.COOKIE_REFLECT_IDLE_MS = "0";
   env.COOKIE_INDEX_BEFORE_DONE = "1";
+  if (input.lexicalOnly === true) {
+    env.COOKIE_RRF_VECTOR = "0";
+  }
   return env;
 }
 
@@ -695,15 +756,20 @@ function formatReport(report: EvalReport, setupError: string | null): string {
     `mode ${report.mode}`,
     `score ${report.passed}/${report.total}`,
     `bar ${report.bar}/10`,
-    "denominator 10 (tasks 03-12)",
-    "06-forget-debt-to-daniel counts in the 10. It is known-blocked when forgottenTurnIds() is missing, and it is not skipped.",
+    report.mode === "fake"
+      ? "denominator excludes 04-knee-squat-swap (real-only). The gate is the top 8, fixed."
+      : "denominator 10 (tasks 03-12)",
+    "06-forget-debt-to-daniel counts in the denominator. It is known-blocked when forgottenTurnIds() is missing, and it is not skipped.",
   ];
   if (setupError !== null) {
     lines.push(`error ${setupError}`);
   }
   for (const task of report.tasks) {
     const flag = task.knownBlocked ? " known-blocked" : "";
-    lines.push(`${task.pass ? "PASS" : "FAIL"} ${task.id}${flag}`);
+    const label = task.countsTowardDenominator
+      ? `${task.pass ? "PASS" : "FAIL"} ${task.id}${flag}`
+      : `REAL-ONLY ${task.id}`;
+    lines.push(label);
     lines.push(
       `  ids: ${task.ids.length === 0 ? "(none)" : task.ids.join(", ")}`,
     );

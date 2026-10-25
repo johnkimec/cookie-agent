@@ -18,8 +18,10 @@ import {
   completeAtTemperatureZero,
   coreEvalEnv,
   evalExitCode,
+  FAKE_RETRIEVAL_TOP,
   REAL_PORTS_REQUIRED,
   resolveRealPorts,
+  retrievalHit,
   runMemoryEval,
   scriptedAnswer,
   storedTurnId,
@@ -45,6 +47,12 @@ describe("memory recall runner", () => {
       { role: "user", content: "What token did I store?" },
     ];
     expect(scriptedAnswer(messages, { text: "Stored." })).toBe("Stored.");
+    expect(
+      scriptedAnswer(
+        [{ role: "system", content: "You extract memory for Cookie" }],
+        { text: "Stored." },
+      ),
+    ).toBe('{"journal":"","summary":"","facts":[],"profile":[]}');
     expect(scriptedAnswer(messages, { text: null })).toContain("plum-token");
     expect(
       scriptedAnswer([{ role: "user", content: "hi" }], { text: null }),
@@ -82,6 +90,27 @@ describe("memory recall runner", () => {
     expect(env.COOKIE_CLOCK_FILE).toBe("/tmp/clock");
     expect(env.COOKIE_RETRIEVAL_TRACE).toBe("/tmp/trace");
     expect(env.COOKIE_RERANK).toBeUndefined();
+    const lexical = coreEvalEnv({
+      dataDir: "/tmp/cookie-recall-test",
+      llamaPort: 9,
+      embedPort: 10,
+      clockFile: "/tmp/clock",
+      traceFile: "/tmp/trace",
+      egressLog: "/tmp/egress",
+      lexicalOnly: true,
+    });
+    expect(lexical.COOKIE_RRF_VECTOR).toBe("0");
+  });
+
+  it("keeps an expected id in the top 8 only when no distractor ranks above it", () => {
+    const expected = ["fact"];
+    const distractors = ["old"];
+    expect(retrievalHit(["fact", "old"], expected, distractors)).toBe(true);
+    expect(retrievalHit(["old", "fact"], expected, distractors)).toBe(false);
+    expect(retrievalHit(["noise", "fact"], expected, distractors)).toBe(true);
+    const buried = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "fact"];
+    expect(retrievalHit(buried, expected, [])).toBe(false);
+    expect(FAKE_RETRIEVAL_TOP).toBe(8);
   });
 
   it("replays a task through chat.send and reflects between sessions", async () => {
@@ -97,6 +126,8 @@ describe("memory recall runner", () => {
         id: "90-plum",
         question: "What token did I store?",
         expectedFact: "plum-token",
+        expectedIds: ["ses-a-1-user"],
+        distractorIds: [],
         mustNotContain: [],
         sessions: [
           {

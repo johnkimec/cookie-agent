@@ -2,6 +2,8 @@
   "id": "03-digikey-part-number",
   "question": "What was the Digi-Key part number for the shift register I ordered?",
   "expectedFact": "296-1600-1-ND",
+  "expectedIds": ["ses-2026-10-07-0110-popup-1-user"],
+  "distractorIds": [],
   "tests": "Exact code: an arbitrary part number only lexical (BM25) recall can return verbatim.",
   "mustNotContain": [],
   "setup": "S1 order (2 part numbers), S2 gym, S3 parcel arrived; ask in S4",

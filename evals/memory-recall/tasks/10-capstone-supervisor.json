@@ -2,6 +2,11 @@
   "id": "10-capstone-supervisor",
   "question": "Who's supervising my capstone?",
   "expectedFact": "Kovacs",
+  "expectedIds": [
+    "ses-2026-09-30-1900-popup-1-user",
+    "ses-2026-09-30-1900-popup-2-assistant"
+  ],
+  "distractorIds": ["ses-2026-10-08-2210-popup-1-user"],
   "tests": "Person and role: recall a person's name from their role.",
   "mustNotContain": [
     "Jordan Park"

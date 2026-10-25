@@ -2,6 +2,8 @@
   "id": "06-forget-debt-to-daniel",
   "question": "Do I owe anyone money, or is anything of mine lent out?",
   "expectedFact": "Priya",
+  "expectedIds": ["ses-2026-10-04-0215-popup-3-user"],
+  "distractorIds": ["ses-2026-10-04-0215-popup-1-user"],
   "tests": "Forget: a fact John asked Cookie to forget must be absent; an unrelated fact from the same day must survive.",
   "mustNotContain": [
     "$40",
