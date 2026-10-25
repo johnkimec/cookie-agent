@@ -209,6 +209,13 @@ describe("stdio core", () => {
     expect(stderr).toContain("COOKIE_RRF_VECTOR");
   });
 
+  it("exits on a bad COOKIE_EMBED_TIMEOUT_MS without speaking protocol", async () => {
+    const client = new StdioClient({ COOKIE_EMBED_TIMEOUT_MS: "nope" });
+    expect(await client.exitCode()).toBe(1);
+    const stderr = await client.stderrText();
+    expect(stderr).toContain("COOKIE_EMBED_TIMEOUT_MS");
+  });
+
   it("exits on a bad COOKIE_RERANK without speaking protocol", async () => {
     const client = new StdioClient({ COOKIE_RERANK: "yes" });
     expect(await client.exitCode()).toBe(1);

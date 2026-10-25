@@ -3,9 +3,12 @@ import { estimateTokens } from "./chunk.ts";
 import {
   DEFAULT_RERANK_TIMEOUT_MS,
   ModelReranker,
-  parseRerankIds,
+  parseRerankIndices,
+  RERANK_MAX_TOKENS,
   RERANK_PREVIEW_CHARS,
+  RERANK_RESPONSE_FORMAT,
   readRerankConfig,
+  rerankPrompt,
   rerankPromptTokens,
 } from "./rerank.ts";
 import type { Memory } from "./types.ts";
@@ -15,11 +18,12 @@ function memory(id: string, text: string): Memory {
 }
 
 describe("rerank config", () => {
-  it("runs unless COOKIE_RERANK is 0, and times out at 1500 ms", () => {
+  it("stays off unless COOKIE_RERANK is 1, and times out at 1500 ms", () => {
     expect(readRerankConfig({})).toEqual({
-      enabled: true,
+      enabled: false,
       timeoutMs: DEFAULT_RERANK_TIMEOUT_MS,
     });
+    expect(readRerankConfig({ COOKIE_RERANK: "1" }).enabled).toBe(true);
     expect(readRerankConfig({ COOKIE_RERANK: "0" }).enabled).toBe(false);
     expect(
       readRerankConfig({ COOKIE_RERANK_TIMEOUT_MS: "400" }).timeoutMs,
@@ -29,9 +33,12 @@ describe("rerank config", () => {
     );
   });
 
-  it("reads ids from a JSON object and ignores prose", () => {
-    expect(parseRerankIds('sure {"ids":["b","a"]}')).toEqual(["b", "a"]);
-    expect(parseRerankIds("remembered")).toEqual([]);
+  it("reads indices and drops invalid or duplicate ones", () => {
+    expect(parseRerankIndices('sure {"indices":[1,1,9,-1,0,"x"]}', 2)).toEqual([
+      1, 0,
+    ]);
+    expect(parseRerankIndices("remembered", 2)).toEqual([]);
+    expect(parseRerankIndices('{"ids":["b"]}', 2)).toEqual([]);
   });
 
   it("keeps fused order when the completion aborts", async () => {
@@ -50,18 +57,28 @@ describe("rerank config", () => {
     expect(ranked.map((row) => row.id)).toEqual(["a", "b"]);
   });
 
-  it("orders by the ids the model returns", async () => {
+  it("orders by indices and ignores ids in the prompt", async () => {
     const candidates = [memory("a", "alpha"), memory("b", "beta")];
     const reranker = new ModelReranker({
       enabled: true,
       timeoutMs: 1000,
-      complete: async () => '{"ids":["b"]}',
+      complete: async (prompt) => {
+        expect(prompt).not.toContain("id=");
+        expect(prompt).toContain("0. alpha");
+        return '{"indices":[1,1,4]}';
+      },
     });
     const ranked = await reranker.rerank("picnic", candidates);
     expect(ranked.map((row) => row.id)).toEqual(["b"]);
+    expect(RERANK_PREVIEW_CHARS).toBe(100);
+    expect(RERANK_MAX_TOKENS).toBe(32);
+    expect(RERANK_RESPONSE_FORMAT.schema).toMatchObject({
+      required: ["indices"],
+    });
+    expect(rerankPrompt("picnic", candidates)).toContain("indices");
   });
 
-  it("counts a 200-character preview far under a full 512-token chunk", () => {
+  it("counts a 100-character preview far under a full 512-token chunk", () => {
     const query = "What did I say about the ECE midterm?";
     const preview = Array.from({ length: 20 }, (_, index) =>
       memory(`c${index}`, "m".repeat(RERANK_PREVIEW_CHARS)),

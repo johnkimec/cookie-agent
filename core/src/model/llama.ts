@@ -31,6 +31,7 @@ export function createLlamaServerProvider(
     name: "llama-server",
     baseURL: `http://${PRODUCT_HOST}:${port}/v1`,
     includeUsage: true,
+    supportsStructuredOutputs: true,
     fetch: doFetch,
     transformRequestBody: (body) => withThinking(body, thinking),
   });

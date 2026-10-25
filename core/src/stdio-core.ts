@@ -8,13 +8,20 @@ import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { ChatLog } from "./memory/chat-log.ts";
 import { cachedProbe } from "./memory/embed-config.ts";
-import { HttpEmbedder, readEmbedPort } from "./memory/http-embedder.ts";
+import {
+  DEFAULT_EMBED_TIMEOUT_MS,
+  HttpEmbedder,
+  readEmbedPort,
+  readQueryEmbedTimeoutMs,
+} from "./memory/http-embedder.ts";
 import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
 import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
 import {
   completeText,
   ModelReranker,
+  RERANK_MAX_TOKENS,
+  RERANK_RESPONSE_FORMAT,
   readRerankConfig,
 } from "./memory/rerank.ts";
 import { SqliteMemoryStore } from "./memory/sqlite-store.ts";
@@ -40,27 +47,41 @@ export function startStdioCore(
     const weights = readRrfWeights(env);
     const rerankConfig = readRerankConfig(env);
     const store = SqliteMemoryStore.open(memoryDatabasePath(env));
-    const embedder = new HttpEmbedder({ port: embedPort });
+    const queryEmbedder = new HttpEmbedder({
+      port: embedPort,
+      timeoutMs: readQueryEmbedTimeoutMs(env),
+    });
+    const indexEmbedder = new HttpEmbedder({
+      port: embedPort,
+      timeoutMs: DEFAULT_EMBED_TIMEOUT_MS,
+    });
     const vectors = new SqliteVecIndex(store.database());
-    const embedUp = cachedProbe(async () => (await embedder.health()) === "up");
+    const embedUp = cachedProbe(
+      async () => (await queryEmbedder.health()) === "up",
+    );
     const indexer = new ContentIndexer({
       db: store.database(),
-      embedder,
+      embedder: indexEmbedder,
       vectors,
       available: embedUp,
     });
     provider = createLlamaServerProvider({ port, thinking });
     const reranker = new ModelReranker({
-      complete: (prompt, signal) => completeText(provider, prompt, signal),
+      complete: (prompt, signal) =>
+        completeText(provider, prompt, signal, {
+          maxOutputTokens: RERANK_MAX_TOKENS,
+          responseFormat: RERANK_RESPONSE_FORMAT,
+        }),
       timeoutMs: rerankConfig.timeoutMs,
       enabled: rerankConfig.enabled,
     });
     const retriever = new HybridRetriever({
       db: store.database(),
       vectors,
-      embedder,
+      embedder: queryEmbedder,
       weights,
       available: embedUp,
+      store,
       rerank: (query, candidates) => reranker.rerank(query, candidates),
     });
     history = new ChatLog(store, indexer, retriever);

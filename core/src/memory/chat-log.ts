@@ -1,6 +1,7 @@
 import type { ModelMessage } from "ai";
 import {
   LOCAL_RECENT_TURN_TOKEN_BUDGET,
+  LOCAL_RETRIEVED_TOKEN_BUDGET,
   recentWithinBudget,
   renderRetrieved,
 } from "../context.ts";
@@ -8,6 +9,7 @@ import type { ChatTurnCommit, ConversationHistory } from "../memory.ts";
 import type { ContentIndexer } from "./index-content.ts";
 import type { Retrieve } from "./retrieve.ts";
 import type { SqliteMemoryStore } from "./sqlite-store.ts";
+import type { TurnRecord } from "./types.ts";
 
 /** Recent turns loaded into one prompt, then cut to the local token budget. */
 const HISTORY_TURN_LIMIT = 10_000;
@@ -45,8 +47,9 @@ export class ChatLog implements ConversationHistory {
   ): Promise<ModelMessage[]> {
     const session = this.store.beginConversation(conversationId);
     const messages: ModelMessage[] = [];
+    let prior: TurnRecord[] = [];
     if (session.endedAt === null) {
-      const prior = recentWithinBudget(
+      prior = recentWithinBudget(
         this.store.recentTurns(conversationId, HISTORY_TURN_LIMIT),
         LOCAL_RECENT_TURN_TOKEN_BUDGET,
       );
@@ -58,8 +61,10 @@ export class ChatLog implements ConversationHistory {
       }
     }
     const memories =
-      signal?.aborted === true ? [] : await this.safeRetrieve(userText);
-    const block = renderRetrieved(memories);
+      signal?.aborted === true ? [] : await this.safeRetrieve(userText, signal);
+    const block = renderRetrieved(memories, LOCAL_RETRIEVED_TOKEN_BUDGET, {
+      omitTurnIds: new Set(prior.map((turn) => turn.id)),
+    });
     if (block.length > 0) {
       messages.push({ role: "user", content: block });
     }
@@ -67,13 +72,13 @@ export class ChatLog implements ConversationHistory {
     return messages;
   }
 
-  private async safeRetrieve(query: string) {
+  private async safeRetrieve(query: string, signal?: AbortSignal) {
     const retriever = this.retriever;
-    if (retriever === null || query.trim() === "") {
+    if (retriever === null || query.trim() === "" || signal?.aborted === true) {
       return [];
     }
     try {
-      return await retriever.retrieve(query);
+      return await retriever.retrieve(query, signal);
     } catch {
       return [];
     }

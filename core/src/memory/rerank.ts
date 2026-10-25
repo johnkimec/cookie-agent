@@ -6,10 +6,37 @@ export const RERANK_CANDIDATES = 20;
 
 export const RERANK_KEEP = 8;
 
-/** Characters of each memory shown to the reranker. Full text stays in the prompt. */
-export const RERANK_PREVIEW_CHARS = 200;
+/**
+ * Characters of each memory shown to the reranker.
+ * 100 measured about 1.0 s on the Mac. Full text stays in the chat prompt.
+ */
+export const RERANK_PREVIEW_CHARS = 100;
+
+/** Short JSON of indices. Eight small integers fit. */
+export const RERANK_MAX_TOKENS = 32;
 
 export const DEFAULT_RERANK_TIMEOUT_MS = 1500;
+
+/**
+ * Indices, not memory ids. Qwen mangled UUIDs. The schema is
+ * `response_format: json_schema` on the llama request.
+ */
+export const RERANK_RESPONSE_FORMAT = {
+  type: "json" as const,
+  name: "rerank",
+  description: "Candidate indices that help, best first.",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["indices"],
+    properties: {
+      indices: {
+        type: "array",
+        items: { type: "integer" },
+      },
+    },
+  },
+};
 
 export interface RerankConfig {
   enabled: boolean;
@@ -17,18 +44,19 @@ export interface RerankConfig {
 }
 
 /**
- * `COOKIE_RERANK=0` skips the model. Unset and `1` run it.
- * `COOKIE_RERANK_TIMEOUT_MS` defaults to 1500. A timeout keeps fused order.
+ * Rerank is off unless `COOKIE_RERANK=1`. On the Mac it timed out 8 of 8
+ * runs and the warm first token was 2.16 s. `COOKIE_RERANK_TIMEOUT_MS`
+ * defaults to 1500. A timeout keeps fused order.
  */
 export function readRerankConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): RerankConfig {
   const raw = env.COOKIE_RERANK;
-  let enabled = true;
-  if (raw === undefined || raw === "" || raw === "1") {
-    enabled = true;
-  } else if (raw === "0") {
+  let enabled = false;
+  if (raw === undefined || raw === "" || raw === "0") {
     enabled = false;
+  } else if (raw === "1") {
+    enabled = true;
   } else {
     throw new Error("COOKIE_RERANK must be 0 or 1");
   }
@@ -50,12 +78,12 @@ export function rerankPrompt(
     const preview = memory.text
       .replace(/\s+/g, " ")
       .slice(0, RERANK_PREVIEW_CHARS);
-    return `${index + 1}. id=${memory.id} ${preview}`;
+    return `${index}. ${preview}`;
   });
   return [
     "Choose the memories that help answer the question.",
-    'Reply with JSON only: {"ids":["..."]} with at most 8 ids, best first.',
-    "Omit ids that do not help.",
+    'Reply with JSON only: {"indices":[0,2]} using the numbers shown,',
+    "best first, at most 8. Omit numbers that do not help.",
     "",
     `Question: ${query}`,
     "",
@@ -63,31 +91,52 @@ export function rerankPrompt(
   ].join("\n");
 }
 
-export function parseRerankIds(text: string): string[] {
+/**
+ * Integers in range, first occurrence only.
+ * Anything else is dropped. An empty list means keep fused order.
+ */
+export function parseRerankIndices(text: string, count: number): number[] {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) {
+  if (start < 0 || end <= start || count <= 0) {
     return [];
   }
   try {
     const body = JSON.parse(text.slice(start, end + 1)) as unknown;
-    if (typeof body !== "object" || body === null || !("ids" in body)) {
+    if (typeof body !== "object" || body === null || !("indices" in body)) {
       return [];
     }
-    const ids = body.ids;
-    if (!Array.isArray(ids)) {
+    const indices = body.indices;
+    if (!Array.isArray(indices)) {
       return [];
     }
-    return ids.filter(
-      (id): id is string => typeof id === "string" && id.length > 0,
-    );
+    const picked: number[] = [];
+    const seen = new Set<number>();
+    for (const value of indices) {
+      if (typeof value !== "number" || !Number.isInteger(value)) {
+        continue;
+      }
+      if (value < 0 || value >= count || seen.has(value)) {
+        continue;
+      }
+      seen.add(value);
+      picked.push(value);
+      if (picked.length === RERANK_KEEP) {
+        break;
+      }
+    }
+    return picked;
   } catch {
     return [];
   }
 }
 
 export interface Reranker {
-  rerank(query: string, candidates: readonly Memory[]): Promise<Memory[]>;
+  rerank(
+    query: string,
+    candidates: readonly Memory[],
+    signal?: AbortSignal,
+  ): Promise<Memory[]>;
 }
 
 export interface ModelRerankerOptions {
@@ -118,18 +167,19 @@ export class ModelReranker implements Reranker {
   async rerank(
     query: string,
     candidates: readonly Memory[],
+    signal?: AbortSignal,
   ): Promise<Memory[]> {
     const top = candidates.slice(0, RERANK_CANDIDATES);
-    if (!this.enabled || top.length <= 1) {
+    if (!this.enabled || top.length <= 1 || signal?.aborted === true) {
       return top.slice(0, RERANK_KEEP);
     }
     const prompt = rerankPrompt(query, top);
+    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const limit =
+      signal === undefined ? timeout : AbortSignal.any([timeout, signal]);
     try {
-      const text = await this.complete(
-        prompt,
-        AbortSignal.timeout(this.timeoutMs),
-      );
-      return orderByIds(top, parseRerankIds(text));
+      const text = await this.complete(prompt, limit);
+      return orderByIndices(top, parseRerankIndices(text, top.length));
     } catch {
       return top.slice(0, RERANK_KEEP);
     }
@@ -151,11 +201,17 @@ export async function completeText(
   provider: ModelProvider,
   prompt: string,
   signal: AbortSignal,
+  options: {
+    maxOutputTokens?: number;
+    responseFormat?: typeof RERANK_RESPONSE_FORMAT;
+  } = {},
 ): Promise<string> {
   const stream = provider.streamChat({
     system: "Reply with JSON only.",
     messages: [{ role: "user", content: prompt }],
     abortSignal: signal,
+    maxOutputTokens: options.maxOutputTokens,
+    responseFormat: options.responseFormat,
   });
   const done = stream.completion.then(
     (value) => ({ ok: true as const, value }),
@@ -177,18 +233,17 @@ export async function completeText(
   return text;
 }
 
-function orderByIds(
+function orderByIndices(
   memories: readonly Memory[],
-  ids: readonly string[],
+  indices: readonly number[],
 ): Memory[] {
-  if (ids.length === 0) {
+  if (indices.length === 0) {
     return memories.slice(0, RERANK_KEEP);
   }
-  const byId = new Map(memories.map((memory) => [memory.id, memory]));
   const picked: Memory[] = [];
-  for (const id of ids) {
-    const memory = byId.get(id);
-    if (memory === undefined || picked.some((row) => row.id === id)) {
+  for (const index of indices) {
+    const memory = memories[index];
+    if (memory === undefined) {
       continue;
     }
     picked.push(memory);
