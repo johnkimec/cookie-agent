@@ -59,6 +59,9 @@ Preconditions:
 - One in-flight reply. A second `chat.send` before `chat.done` is an error, not a second stream. The popup's Return during that reply sends `chat.cancel`, not a second `chat.send`.
 - While a reply is arriving, Escape stops it and leaves the panel open. Escape closes the panel only when nothing is streaming. A second stop does not send a second `chat.cancel`. Clicking outside still closes without cancelling.
 - A new conversation is a new `conversationId` on `chat.send`. The core treats that id as the session. Closing the popup does not by itself start one. The next send does, once the popup has been closed for the draft window. ⌘K starts one immediately. `COOKIE_DRAFT_TTL_SECONDS` can only shorten that window.
+- A cancel result is applied on the main queue after buffered `chat.delta` chunks. Settling first drops the tail, because `applyDelta` no-ops once the reply is no longer in flight.
+- Display math may span lines (`\[` then a later `\]`). That whole block becomes `$$`. A fence, or a missing `\]`, leaves the characters as written.
+- `package-app.sh` copies `iosMath_iosMath.bundle`, `HighlightSwift_HighlightSwift.bundle`, and `SwiftStreamingMarkdown_SwiftStreamingMarkdown.bundle` into `Contents/Resources`. The markdown `.xcassets` still compile with `actool`.
 - Do not mark the popup sub-features verified from this transcript. The transcript never opened a window.
 - `drive-core drive` without `--evidence <dir>` prints its usage and exits 2.
 - `drive-mac chat --runtime real` needs a new `mktemp -d /tmp/cookie-m0.XXXXXX` and a shell with no leftover `COOKIE_*` variables on every run. A reused data directory carries the last run's pid files.

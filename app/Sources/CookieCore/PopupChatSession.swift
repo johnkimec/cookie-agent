@@ -73,6 +73,10 @@ public final class PopupChatSession: @unchecked Sendable {
     public var onChange: @Sendable () -> Void = {}
     public var onSendFailure: @Sendable (PopupSendFailure) -> Void = { _ in }
     public var onCancelFailure: @Sendable (String) -> Void = { _ in }
+    /// Runs on the main queue before a cancel result settles the reply.
+    /// The shell delivers buffered `chat.delta` here. `applyDelta` drops a
+    /// tail once the reply is no longer in flight.
+    public var onBeforeCancelSettle: @Sendable () -> Void = {}
 
     private let lock = NSLock()
     private var state: PopupChatState
@@ -269,10 +273,7 @@ public final class PopupChatSession: @unchecked Sendable {
                         conversationId: conversationID,
                         messageId: messageID
                     )
-                    self.mutate { state in
-                        state.noteCancelResult(messageID: messageID)
-                        return .none
-                    }
+                    self.settleCancelOnMain(messageID: messageID)
                 } catch {
                     self.mutate { state in
                         state.noteCancelFailed(messageID: messageID)
@@ -281,6 +282,24 @@ public final class PopupChatSession: @unchecked Sendable {
                     self.onCancelFailure(String(describing: error))
                 }
             }
+        }
+    }
+
+    /// Deltas and `chat.done` are applied on the main queue. A cancel result
+    /// that settles from the request task drops a tail still sitting in the
+    /// shell's buffer. Flush that buffer, then settle, both on main.
+    private func settleCancelOnMain(messageID: String) {
+        let work = {
+            self.onBeforeCancelSettle()
+            self.mutate { state in
+                state.noteCancelResult(messageID: messageID)
+                return .none
+            }
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.sync(execute: work)
         }
     }
 

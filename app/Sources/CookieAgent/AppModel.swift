@@ -79,6 +79,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self?.log("cancel: \(description)")
             }
         }
+        session.onBeforeCancelSettle = { [weak self] in
+            self?.deliverBufferedReplyBeforeSettle()
+        }
     }
 
     func start() {
@@ -294,10 +297,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                     self.scheduleReplyFlush()
                 }
             case .done(let done):
-                self.flushItem?.cancel()
-                self.flushItem = nil
-                self.uiCoalescer.noteDone()
-                self.deliverBufferedDeltas()
+                self.deliverBufferedReplyBeforeSettle()
                 self.turns.ingestDone(done)
                 let accumulated = ReplyStream.cookieText(in: self.conversation)
                 self.log(ReplyStream.doneLog(messageId: done.messageId, accumulated: accumulated))
@@ -305,6 +305,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self.onLayout?()
             }
         }
+    }
+
+    /// Apply every buffered delta while the reply is still in flight.
+    /// `chat.done` and a cancel result both call this before they settle.
+    private func deliverBufferedReplyBeforeSettle() {
+        flushItem?.cancel()
+        flushItem = nil
+        uiCoalescer.noteDone()
+        deliverBufferedDeltas()
     }
 
     private func deliverBufferedDeltas() {

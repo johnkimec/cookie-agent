@@ -194,6 +194,11 @@ final class AskTextView: NSTextView {
 
 /// AppKit label so System Events can read `AXIdentifier`. A SwiftUI `Text`
 /// modifier did not show up in the window's accessibility tree.
+///
+/// Loading and refusal lines still use this view. Cookie turns do not: those
+/// are `Text` and `MarkdownView`. A wrapping label whose
+/// `preferredMaxLayoutWidth` stays 0 reports a one-line intrinsic height, so
+/// the proposed width is written onto the field.
 struct IdentifiedText: NSViewRepresentable {
     var text: String
     var identifier: String
@@ -201,8 +206,8 @@ struct IdentifiedText: NSViewRepresentable {
     var font: NSFont
     var textColor: NSColor
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(wrappingLabelWithString: text)
+    func makeNSView(context: Context) -> WrappingLabel {
+        let field = WrappingLabel(wrappingLabelWithString: text)
         field.isEditable = false
         field.isSelectable = true
         field.isBezeled = false
@@ -219,7 +224,7 @@ struct IdentifiedText: NSViewRepresentable {
         return field
     }
 
-    func updateNSView(_ field: NSTextField, context: Context) {
+    func updateNSView(_ field: WrappingLabel, context: Context) {
         if field.stringValue != text {
             field.stringValue = text
         }
@@ -228,6 +233,27 @@ struct IdentifiedText: NSViewRepresentable {
         field.setAccessibilityIdentifier(identifier)
         field.setAccessibilityLabel(label)
         field.setAccessibilityValue(text)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: WrappingLabel, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+        if nsView.preferredMaxLayoutWidth != width {
+            nsView.preferredMaxLayoutWidth = width
+            nsView.invalidateIntrinsicContentSize()
+        }
+        return CGSize(width: width, height: nsView.intrinsicContentSize.height)
+    }
+}
+
+/// Sets `preferredMaxLayoutWidth` from the width SwiftUI actually gave the label.
+private final class WrappingLabel: NSTextField {
+    override func layout() {
+        let width = bounds.width
+        if width > 1, abs(preferredMaxLayoutWidth - width) > 0.5 {
+            preferredMaxLayoutWidth = width
+            invalidateIntrinsicContentSize()
+        }
+        super.layout()
     }
 }
 
