@@ -6,7 +6,10 @@ This is the build plan for M1. It adds no scope to [cookie-agent.md](./cookie-ag
 
 ## Progress
 
-Draft. Open: John's picks on D1–D5 and the open questions at the end.
+Approved by John on 2026-10-25. He accepted the recommendations in "John's answers", including D1 (`better-sqlite3` 12.11.1; see the D1 update and `D-2026-10-25-02`).
+
+- Step 0 is merged: PR #11, `d3cdd97` (better-sqlite3 spike and memory contracts).
+- Step 1A (SQLite store, append-only turns, FTS5, session boundaries, replace `ConversationMemory`) is in progress. The app owns the popup and its 10-minute draft TTL. It mints a new `conversationId` for a new chat (⌘K or ⌘N) and after the popup has been closed for 10 minutes. The core ends the previous session when that id changes. It does not run a window timer. Protocol 0.1 is unchanged.
 
 ## Goal
 
@@ -62,13 +65,15 @@ Not M1 scope in the design doc, but it runs alongside because it is Swift-side a
 
 ## Protocol
 
-**No protocol change is planned.** M1 stays on `0.1`:
+**No protocol version bump is planned.** M1 stays on `0.1`:
 
 - The DB path reaches the core through `COOKIE_DATA_DIR`, which the shell already sets on spawn.
 - The embedding server is a dependency the core degrades around (BM25-only), not a status the UI shows. `runtime.status` keeps describing the chat model.
 - The Stop control uses the existing `chat.cancel`.
 
 If John wants any memory UI in M1 (Q6), that needs `memory.list` / `memory.forget` methods. That would be protocol `0.2`, with a schema change, golden examples, and Swift Codable types, landed contract-first before either side builds against it.
+
+Step 1A does not change protocol 0.1. `protocol/` matches main. A new chat, and a popup that has been closed for 10 minutes, are both a new `conversationId` on the existing `chat.send`. The app mints that id. The core ends the previous open session when the id changes and does not time the window. `shutdown` does not end the session.
 
 ## Decisions for John
 
@@ -230,3 +235,5 @@ Still open: John's top popup issues for the polish sub-track.
 
 - 2026-10-25 — Created from the design doc's M1 row after M0 finished (main `e5570a8`).
 - 2026-10-25 — D1 switched to `better-sqlite3` 12.11.1 after the `node:sqlite` spike on Node 22.13.0 failed FTS5 (`no such module: fts5`). Logged as `D-2026-10-25-02`.
+- 2026-10-25 — Progress updated after Step 0 merged (PR #11, `d3cdd97`). Step 1A is in progress. New-chat session end uses `chat.send` `conversationId`. `session.window` is proposed for the 10-minute closed window and is not a decision-log entry.
+- 2026-10-25 — The `session.window` proposal is dropped. Protocol 0.1 stays unchanged in M1. The app owns the 10-minute popup TTL and mints a new `conversationId` for a new chat and after the popup has been closed for 10 minutes. The core ends the previous session on that id and does not run a window timer. This supersedes the `session.window` sentence in the Progress update above.
