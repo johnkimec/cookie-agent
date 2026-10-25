@@ -9,9 +9,9 @@ import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { ChatLog } from "./memory/chat-log.ts";
 import { cachedProbe } from "./memory/embed-config.ts";
 import {
-  DEFAULT_EMBED_TIMEOUT_MS,
   HttpEmbedder,
   readEmbedPort,
+  readIndexEmbedTimeoutMs,
   readQueryEmbedTimeoutMs,
 } from "./memory/http-embedder.ts";
 import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
@@ -53,7 +53,7 @@ export function startStdioCore(
     });
     const indexEmbedder = new HttpEmbedder({
       port: embedPort,
-      timeoutMs: DEFAULT_EMBED_TIMEOUT_MS,
+      timeoutMs: readIndexEmbedTimeoutMs(env),
     });
     const vectors = new SqliteVecIndex(store.database());
     const embedUp = cachedProbe(
@@ -82,7 +82,8 @@ export function startStdioCore(
       weights,
       available: embedUp,
       store,
-      rerank: (query, candidates) => reranker.rerank(query, candidates),
+      rerank: (query, candidates, signal) =>
+        reranker.rerank(query, candidates, signal),
     });
     history = new ChatLog(store, indexer, retriever);
   } catch (error) {

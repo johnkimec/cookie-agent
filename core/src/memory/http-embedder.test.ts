@@ -13,6 +13,7 @@ import {
   QUERY_PREFIX,
   readEmbedPort,
   readEmbedTimeoutMs,
+  readIndexEmbedTimeoutMs,
   readQueryEmbedTimeoutMs,
 } from "./http-embedder.ts";
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
@@ -47,8 +48,27 @@ describe("embed port", () => {
     expect(readQueryEmbedTimeoutMs({ COOKIE_EMBED_TIMEOUT_MS: "250" })).toBe(
       250,
     );
+    expect(
+      readQueryEmbedTimeoutMs({
+        COOKIE_EMBED_QUERY_TIMEOUT_MS: "120",
+        COOKIE_EMBED_TIMEOUT_MS: "250",
+      }),
+    ).toBe(120);
+    expect(readIndexEmbedTimeoutMs({})).toBe(DEFAULT_EMBED_TIMEOUT_MS);
+    expect(
+      readIndexEmbedTimeoutMs({ COOKIE_EMBED_INDEX_TIMEOUT_MS: "1500" }),
+    ).toBe(1500);
+    expect(readIndexEmbedTimeoutMs({ COOKIE_EMBED_TIMEOUT_MS: "50" })).toBe(
+      DEFAULT_EMBED_TIMEOUT_MS,
+    );
     expect(readEmbedTimeoutMs({})).toBe(DEFAULT_EMBED_TIMEOUT_MS);
     expect(DEFAULT_QUERY_EMBED_TIMEOUT_MS).toBe(400);
+    expect(() =>
+      readQueryEmbedTimeoutMs({ COOKIE_EMBED_QUERY_TIMEOUT_MS: "nope" }),
+    ).toThrow(/COOKIE_EMBED_QUERY_TIMEOUT_MS/);
+    expect(() =>
+      readIndexEmbedTimeoutMs({ COOKIE_EMBED_INDEX_TIMEOUT_MS: "nope" }),
+    ).toThrow(/COOKIE_EMBED_INDEX_TIMEOUT_MS/);
   });
 });
 

@@ -12,8 +12,11 @@ export const RERANK_KEEP = 8;
  */
 export const RERANK_PREVIEW_CHARS = 100;
 
-/** Short JSON of indices. Eight small integers fit. */
-export const RERANK_MAX_TOKENS = 32;
+/**
+ * Short JSON of indices. 32 cut off a full 8-index answer on the Mac
+ * (1 of 9 runs). 48 fits `{"indices":[0,1,2,3,4,5,6,7]}` with margin.
+ */
+export const RERANK_MAX_TOKENS = 48;
 
 export const DEFAULT_RERANK_TIMEOUT_MS = 1500;
 
@@ -33,6 +36,7 @@ export const RERANK_RESPONSE_FORMAT = {
       indices: {
         type: "array",
         items: { type: "integer" },
+        maxItems: RERANK_KEEP,
       },
     },
   },

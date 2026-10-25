@@ -37,6 +37,13 @@ export type Memory = {
   id: string;
   text: string;
   source: MemorySource;
+  /** Unix milliseconds. The retrieved block shows this as a local date. */
+  createdAt?: number;
+  /**
+   * Chunk text, or the BM25 token, that this hit matched.
+   * A long `text` is previewed around this instead of from the start.
+   */
+  matchText?: string;
 };
 
 export type VectorTable = "vec_facts" | "vec_chunks";

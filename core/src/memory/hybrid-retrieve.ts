@@ -75,6 +75,7 @@ interface FactRow {
   text: string;
   superseded_by: string | null;
   valid_until: number | null;
+  created_at: number;
 }
 
 /**
@@ -112,19 +113,21 @@ export class HybridRetriever {
     this.store = options.store ?? null;
   }
 
-  readonly retrieve: Retrieve = async (query, signal) => {
+  readonly retrieve: Retrieve = async (query, signal, omitTurnIds) => {
     if (isAborted(signal)) {
       return [];
     }
     const match = ftsOrQuery(query);
     const now = this.now();
     const forgotten = readForgottenTurnIds(this.store);
+    const omit = omitTurnIds ?? new Set<string>();
     const facts = match === "" ? [] : this.bm25Facts(match, now);
-    const turns = match === "" ? [] : this.bm25Turns(match, forgotten);
+    const turns =
+      match === "" ? [] : this.bm25Turns(match, forgotten, omit, query);
     const summaries = match === "" ? [] : this.bm25Summaries(query, forgotten);
     const byId = new Map<string, Memory>();
     for (const memory of [...facts, ...turns, ...summaries]) {
-      byId.set(memory.id, memory);
+      remember(byId, memory);
     }
     let vectorUp = false;
     try {
@@ -161,17 +164,20 @@ export class HybridRetriever {
           return [];
         }
         try {
-          vectorChunks = await this.vectorChunks(embedding, forgotten);
+          vectorChunks = await this.vectorChunks(embedding, forgotten, omit);
         } catch {
           vectorChunks = [];
         }
       }
     }
-    const chunkHits = collapseChunkHits(vectorChunks, forgotten);
+    const chunkHits = collapseChunkHits(vectorChunks, forgotten, (turnId) =>
+      this.turnBody(turnId),
+    );
     for (const memory of [...vectorFacts, ...chunkHits]) {
-      if (!byId.has(memory.id)) {
-        byId.set(memory.id, memory);
+      if (omit.has(memory.id)) {
+        continue;
       }
+      remember(byId, memory);
     }
     const bm25Weight = vectorUp
       ? this.weights.bm25
@@ -192,7 +198,7 @@ export class HybridRetriever {
     const candidates: Memory[] = [];
     for (const row of fused) {
       const memory = byId.get(row.id);
-      if (memory !== undefined) {
+      if (memory !== undefined && !omit.has(memory.id)) {
         candidates.push(memory);
       }
     }
@@ -202,7 +208,9 @@ export class HybridRetriever {
     let ranked = candidates.slice(0, this.limit);
     if (this.rerank !== undefined) {
       try {
-        ranked = await this.rerank(query, candidates, signal);
+        ranked = (await this.rerank(query, candidates, signal)).filter(
+          (memory) => !omit.has(memory.id),
+        );
       } catch {
         ranked = candidates.slice(0, this.limit);
       }
@@ -213,7 +221,7 @@ export class HybridRetriever {
   private bm25Facts(match: string, now: number): Memory[] {
     const rows = this.db
       .prepare(
-        `SELECT f.id, f.text, f.superseded_by, f.valid_until
+        `SELECT f.id, f.text, f.superseded_by, f.valid_until, f.created_at
          FROM facts_fts
          JOIN facts f ON f.rowid = facts_fts.rowid
          WHERE facts_fts MATCH ?
@@ -223,27 +231,46 @@ export class HybridRetriever {
          LIMIT ?`,
       )
       .all(match, now, this.pool) as FactRow[];
-    return rows.map((row) => memoryFrom(row.id, row.text, "fact"));
+    return rows.map((row) =>
+      memoryFrom(row.id, row.text, "fact", row.created_at),
+    );
   }
 
-  private bm25Turns(match: string, forgotten: ReadonlySet<string>): Memory[] {
-    const hidden = forgotten.size > 0;
+  private bm25Turns(
+    match: string,
+    forgotten: ReadonlySet<string>,
+    omit: ReadonlySet<string>,
+    query: string,
+  ): Memory[] {
+    const hidden = [...forgotten, ...omit];
     const rows = this.db
       .prepare(
-        `SELECT t.id AS id, t.content AS text
+        `SELECT t.id AS id, t.content AS text, t.created_at AS created_at
          FROM turns_fts
          JOIN turns t ON t.rowid = turns_fts.rowid
          WHERE turns_fts MATCH ?
-           ${hidden ? "AND t.id NOT IN (SELECT value FROM json_each(?))" : ""}
+           ${
+             hidden.length > 0
+               ? "AND t.id NOT IN (SELECT value FROM json_each(?))"
+               : ""
+           }
          ORDER BY bm25(turns_fts), t.created_at, t.id
          LIMIT ?`,
       )
       .all(
-        ...(hidden
-          ? [match, JSON.stringify([...forgotten]), this.pool]
+        ...(hidden.length > 0
+          ? [match, JSON.stringify(hidden), this.pool]
           : [match, this.pool]),
-      ) as Array<{ id: string; text: string }>;
-    return rows.map((row) => memoryFrom(row.id, row.text, "turn"));
+      ) as Array<{ id: string; text: string; created_at: number }>;
+    return rows.map((row) =>
+      memoryFrom(
+        row.id,
+        row.text,
+        "turn",
+        row.created_at,
+        matchSpan(row.text, query),
+      ),
+    );
   }
 
   /**
@@ -262,8 +289,10 @@ export class HybridRetriever {
       return [];
     }
     const rows = this.db
-      .prepare("SELECT id, summary FROM sessions WHERE summary IS NOT NULL")
-      .all() as Array<{ id: string; summary: string }>;
+      .prepare(
+        "SELECT id, summary, started_at FROM sessions WHERE summary IS NOT NULL",
+      )
+      .all() as Array<{ id: string; summary: string; started_at: number }>;
     const out: Memory[] = [];
     for (const row of rows) {
       const hay = row.summary.toLowerCase();
@@ -273,7 +302,15 @@ export class HybridRetriever {
       if (!matches || sessionHasForgottenTurn(this.db, row.id, forgotten)) {
         continue;
       }
-      out.push(memoryFrom(`summary:${row.id}`, row.summary, "chunk"));
+      out.push(
+        memoryFrom(
+          `summary:${row.id}`,
+          row.summary,
+          "chunk",
+          row.started_at,
+          matchSpan(row.summary, query),
+        ),
+      );
       if (out.length === this.pool) {
         break;
       }
@@ -288,13 +325,14 @@ export class HybridRetriever {
     const hits = await this.knnUntil(embedding, "vec_facts", (id) => {
       const row = this.db
         .prepare(
-          "SELECT id, text, superseded_by, valid_until FROM facts WHERE id = ?",
+          `SELECT id, text, superseded_by, valid_until, created_at
+           FROM facts WHERE id = ?`,
         )
         .get(id) as FactRow | undefined;
       if (row === undefined || !liveFact(row, now)) {
         return null;
       }
-      return memoryFrom(row.id, row.text, "fact");
+      return memoryFrom(row.id, row.text, "fact", row.created_at);
     });
     return hits;
   }
@@ -302,6 +340,7 @@ export class HybridRetriever {
   private async vectorChunks(
     embedding: Float32Array,
     forgotten: ReadonlySet<string>,
+    omit: ReadonlySet<string>,
   ): Promise<Memory[]> {
     return this.knnUntil(embedding, "vec_chunks", (id) => {
       const row = this.db
@@ -310,11 +349,25 @@ export class HybridRetriever {
       if (row === undefined || row.text.trim() === "") {
         return null;
       }
+      const turnId = turnIdFromChunkId(row.chunk_id);
+      if (turnId !== null && (omit.has(turnId) || forgotten.has(turnId))) {
+        return null;
+      }
       if (chunkDerivedFromForgotten(this.db, id, forgotten)) {
         return null;
       }
       return memoryFrom(row.chunk_id, row.text, "chunk");
     });
+  }
+
+  private turnBody(turnId: string): { text: string; createdAt: number } | null {
+    const row = this.db
+      .prepare("SELECT content, created_at FROM turns WHERE id = ?")
+      .get(turnId) as { content: string; created_at: number } | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    return { text: row.content, createdAt: row.created_at };
   }
 
   /**
@@ -422,6 +475,8 @@ export function turnIdFromChunkId(chunkId: string): string | null {
 export function collapseChunkHits(
   memories: readonly Memory[],
   forgotten: ReadonlySet<string> = new Set(),
+  turnOf: (turnId: string) => { text: string; createdAt: number } | null = () =>
+    null,
 ): Memory[] {
   const out: Memory[] = [];
   const seen = new Set<string>();
@@ -436,7 +491,16 @@ export function collapseChunkHits(
       out.push(memory);
       continue;
     }
-    out.push({ id: turnId, text: memory.text, source: "turn" });
+    const turn = turnOf(turnId);
+    const text =
+      turn !== null && turn.text.length > 0 ? turn.text : memory.text;
+    out.push({
+      id: turnId,
+      text,
+      source: "turn",
+      createdAt: turn?.createdAt ?? memory.createdAt,
+      matchText: text === memory.text ? memory.matchText : memory.text,
+    });
   }
   return out;
 }
@@ -632,8 +696,63 @@ function liveFact(row: FactRow, now: number): boolean {
   return true;
 }
 
-function memoryFrom(id: string, text: string, source: MemorySource): Memory {
-  return { id, text, source };
+function memoryFrom(
+  id: string,
+  text: string,
+  source: MemorySource,
+  createdAt?: number,
+  matchText?: string,
+): Memory {
+  const memory: Memory = { id, text, source };
+  if (createdAt !== undefined) {
+    memory.createdAt = createdAt;
+  }
+  if (matchText !== undefined && matchText.length > 0 && matchText !== text) {
+    memory.matchText = matchText;
+  }
+  return memory;
+}
+
+function remember(byId: Map<string, Memory>, memory: Memory): void {
+  const existing = byId.get(memory.id);
+  if (existing === undefined) {
+    byId.set(memory.id, { ...memory });
+    return;
+  }
+  if (
+    memory.matchText !== undefined &&
+    (existing.matchText === undefined ||
+      memory.matchText.length > existing.matchText.length)
+  ) {
+    existing.matchText = memory.matchText;
+  }
+  if (memory.text.length > existing.text.length) {
+    existing.text = memory.text;
+  }
+  if (existing.createdAt === undefined && memory.createdAt !== undefined) {
+    existing.createdAt = memory.createdAt;
+  }
+}
+
+/** Exact slice of `text` for the earliest query token, used to center a preview. */
+function matchSpan(text: string, query: string): string | undefined {
+  const tokens = query
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((token) => token.length > 0);
+  let best = -1;
+  let span = "";
+  for (const token of tokens) {
+    const at = text.toLowerCase().indexOf(token.toLowerCase());
+    if (at < 0) {
+      continue;
+    }
+    if (best >= 0 && at >= best) {
+      continue;
+    }
+    best = at;
+    span = text.slice(at, at + token.length);
+  }
+  return span.length > 0 ? span : undefined;
 }
 
 function dedupeText(memories: readonly Memory[]): Memory[] {

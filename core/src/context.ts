@@ -1,5 +1,7 @@
-import { estimateTokens } from "./memory/chunk.ts";
+import { CHARS_PER_TOKEN, estimateTokens } from "./memory/chunk.ts";
 import type { Memory, TurnRecord } from "./memory/types.ts";
+
+const ELLIPSIS = "…";
 
 /** Design-doc local budget for retrieved memories. */
 export const LOCAL_RETRIEVED_TOKEN_BUDGET = 1000;
@@ -75,10 +77,7 @@ export function renderRetrieved(
     if (room <= 0) {
       break;
     }
-    let line = `- [${memory.source}] ${memory.text}`;
-    if (estimateTokens(line) > room) {
-      line = fitTokens(line, room);
-    }
+    const line = retrievedLine(memory, room);
     const cost = Math.max(1, estimateTokens(line));
     if (tokens + cost > budget) {
       break;
@@ -90,6 +89,98 @@ export function renderRetrieved(
     return "";
   }
   return `${header}\n${lines.join("\n")}`;
+}
+
+/**
+ * One retrieved line, capped at `room` estimated tokens.
+ * The local calendar day is prefixed when `createdAt` is set.
+ * Long text is centered on `matchText`, with ellipses on cut edges.
+ */
+export function retrievedLine(memory: Memory, room: number): string {
+  const day = formatLocalDay(memory.createdAt);
+  const label =
+    day === null ? `[${memory.source}]` : `[${day}] [${memory.source}]`;
+  const prefix = `- ${label} `;
+  const maxChars = Math.max(0, room) * CHARS_PER_TOKEN;
+  if (prefix.length >= maxChars) {
+    return fitTokens(prefix, room);
+  }
+  const body = previewAround(
+    memory.text,
+    memory.matchText,
+    maxChars - prefix.length,
+  );
+  return `${prefix}${body}`;
+}
+
+/** Local `YYYY-MM-DD`. Uses local date fields, not the UTC date. */
+export function formatLocalDay(createdAt: number | undefined): string | null {
+  if (createdAt === undefined || !Number.isFinite(createdAt)) {
+    return null;
+  }
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const year = String(date.getFullYear()).padStart(4, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * A window of at most `maxChars` centered on `matchText` inside `text`.
+ * Cut edges get an ellipsis. A missing match stays at the start.
+ */
+export function previewAround(
+  text: string,
+  matchText: string | undefined,
+  maxChars: number,
+): string {
+  if (maxChars <= 0) {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+  const at = matchIndex(text, matchText);
+  if (at < 0) {
+    return cutEdge(text.slice(0, maxChars), false, true);
+  }
+  const needle = matchText ?? "";
+  const focus = Math.min(needle.length, Math.max(0, text.length - at));
+  const center = at + Math.floor(focus / 2);
+  let start = Math.max(0, center - Math.floor(maxChars / 2));
+  let end = start + maxChars;
+  if (end > text.length) {
+    end = text.length;
+    start = Math.max(0, end - maxChars);
+  }
+  return cutEdge(text.slice(start, end), start > 0, end < text.length);
+}
+
+function matchIndex(text: string, matchText: string | undefined): number {
+  const needle = matchText?.trim() ?? "";
+  if (needle.length === 0) {
+    return -1;
+  }
+  const exact = text.indexOf(needle);
+  if (exact >= 0) {
+    return exact;
+  }
+  const head = needle.slice(0, 40);
+  return text.indexOf(head);
+}
+
+function cutEdge(slice: string, lead: boolean, tail: boolean): string {
+  let out = slice;
+  if (lead && out.length > 0) {
+    out = ELLIPSIS + out.slice(1);
+  }
+  if (tail && out.length > 0) {
+    out = out.slice(0, -1) + ELLIPSIS;
+  }
+  return out;
 }
 
 export function fitTokens(text: string, maxTokens: number): string {

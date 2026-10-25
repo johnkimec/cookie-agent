@@ -71,11 +71,29 @@ describe("rerank config", () => {
     const ranked = await reranker.rerank("picnic", candidates);
     expect(ranked.map((row) => row.id)).toEqual(["b"]);
     expect(RERANK_PREVIEW_CHARS).toBe(100);
-    expect(RERANK_MAX_TOKENS).toBe(32);
+    expect(RERANK_MAX_TOKENS).toBe(48);
     expect(RERANK_RESPONSE_FORMAT.schema).toMatchObject({
       required: ["indices"],
+      properties: { indices: { maxItems: 8 } },
     });
     expect(rerankPrompt("picnic", candidates)).toContain("indices");
+  });
+
+  it("parses a full 8-index answer", async () => {
+    const indices = [7, 6, 5, 4, 3, 2, 1, 0];
+    expect(parseRerankIndices(JSON.stringify({ indices }), 8)).toEqual(indices);
+    const candidates = Array.from({ length: 8 }, (_, index) =>
+      memory(`m${index}`, `text ${index}`),
+    );
+    const reranker = new ModelReranker({
+      enabled: true,
+      timeoutMs: 1000,
+      complete: async () => JSON.stringify({ indices }),
+    });
+    const ranked = await reranker.rerank("picnic", candidates);
+    expect(ranked.map((row) => row.id)).toEqual(
+      indices.map((index) => `m${index}`),
+    );
   });
 
   it("counts a 100-character preview far under a full 512-token chunk", () => {

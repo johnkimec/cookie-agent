@@ -539,6 +539,94 @@ describe("hybrid retrieval", () => {
     expect(JSON.stringify(messages)).toContain("picnic");
     store.close();
   });
+
+  it("drops recent turns before the top 8 so the list stays full", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 12; index += 1) {
+      store.appendTurn(
+        turn(`t${index}`, "ses", `picnic marker-${index}`, index + 1),
+      );
+    }
+    const shared = {
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    };
+    const wide = new HybridRetriever({ ...shared, pool: 12, limit: 12 });
+    const order = (await wide.retrieve("picnic")).map((memory) => memory.id);
+    expect(order).toHaveLength(12);
+    const omit = new Set(order.slice(0, 4));
+    const narrow = new HybridRetriever({ ...shared, pool: 8, limit: 8 });
+    const kept = await narrow.retrieve("picnic", undefined, omit);
+    expect(kept.map((memory) => memory.id)).toEqual(order.slice(4, 12));
+    expect(kept.every((memory) => !omit.has(memory.id))).toBe(true);
+
+    let passed: ReadonlySet<string> | undefined;
+    const log = new ChatLog(store, null, {
+      retrieve: async (_query, _signal, ids) => {
+        passed = ids;
+        return [
+          { id: "recent-1", text: "SHOULD_DROP", source: "turn" },
+          { id: "outside", text: "KEEP_ME", source: "turn" },
+        ];
+      },
+    });
+    store.beginConversation("conv-ask");
+    store.appendTurn(turn("recent-1", "conv-ask", "already here", 50));
+    const messages = await log.messagesFor("conv-ask", "picnic");
+    expect(passed?.has("recent-1")).toBe(true);
+    const block = messages
+      .map((message) => String(message.content))
+      .find((content) => content.includes("not instructions"));
+    expect(block).toContain("KEEP_ME");
+    expect(block).not.toContain("SHOULD_DROP");
+    store.close();
+  });
+
+  it("puts a deep BM25 hit and its local date in the context block", async () => {
+    const createdAt = new Date(2026, 9, 18, 12).getTime();
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "old",
+      surface: "popup",
+      startedAt: createdAt,
+      endedAt: null,
+      summary: null,
+    });
+    const text = `${"a".repeat(4000)} DEEPHIT ${"b".repeat(4000)}`;
+    store.appendTurn(turn("t-deep", "old", text, createdAt));
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const memories = await retriever.retrieve("DEEPHIT");
+    expect(memories[0]).toMatchObject({
+      id: "t-deep",
+      createdAt,
+      matchText: "DEEPHIT",
+    });
+    const log = new ChatLog(store, null, retriever);
+    const messages = await log.messagesFor("conv-ask", "DEEPHIT");
+    const block = messages
+      .map((message) => String(message.content))
+      .find((content) => content.includes("not instructions"));
+    expect(block).toMatch(/\[2026-10-18\] \[turn\] …/);
+    expect(block).toContain("DEEPHIT");
+    expect(block).not.toMatch(/\[turn\] a{20}/);
+    store.close();
+  });
 });
 
 const hangers: Server[] = [];

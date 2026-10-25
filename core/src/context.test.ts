@@ -69,4 +69,37 @@ describe("context budgets", () => {
       expect(line.length).toBeLessThanOrEqual(shareChars);
     }
   });
+
+  it("shows the local date and centers a long turn on the match", () => {
+    const createdAt = new Date(2026, 9, 18, 12).getTime();
+    const text = `${"a".repeat(4000)} DEEPHIT ${"b".repeat(4000)}`;
+    const block = renderRetrieved(
+      [
+        {
+          id: "t-deep",
+          source: "turn",
+          text,
+          matchText: "DEEPHIT",
+          createdAt,
+        },
+        {
+          id: "fact-1",
+          source: "fact",
+          text: "office hours moved",
+          createdAt,
+        },
+      ],
+      LOCAL_RETRIEVED_TOKEN_BUDGET,
+    );
+    const line = block.split("\n").find((row) => row.includes("DEEPHIT"));
+    expect(line).toContain("[2026-10-18] [turn]");
+    expect(line).toContain("…");
+    expect(line?.startsWith("- [2026-10-18] [turn] …")).toBe(true);
+    expect(line).not.toMatch(/\[turn\] a{20}/);
+    expect(block).toContain("[2026-10-18] [fact] office hours moved");
+    const shareChars = Math.floor(LOCAL_RETRIEVED_TOKEN_BUDGET * 0.25) * 4;
+    for (const row of block.split("\n").slice(1)) {
+      expect(row.length).toBeLessThanOrEqual(shareChars);
+    }
+  });
 });
