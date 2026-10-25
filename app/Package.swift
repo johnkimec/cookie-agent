@@ -42,6 +42,10 @@ let package = Package(
         .testTarget(
             name: "CookieCoreTests",
             dependencies: ["CookieCore", "CookieProtocol"]
+        ),
+        .testTarget(
+            name: "CookieAgentTests",
+            dependencies: ["CookieAgent", "CookieCore", "CookieProtocol"]
         )
     ]
 )

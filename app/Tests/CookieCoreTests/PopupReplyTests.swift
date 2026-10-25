@@ -626,8 +626,8 @@ private func laidOutTurnHeight(_ text: String) -> CGFloat {
             .frame(width: 64, alignment: .leading)
         Text(text)
             .font(.body)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
     .padding(16)
     .frame(width: PopupLayout.width, alignment: .topLeading)
@@ -696,5 +696,40 @@ final class PopupSizingTests: XCTestCase {
         XCTAssertEqual(PopupLayout.transcriptBottomInset, 8)
         XCTAssertEqual(PopupLayout.inputRowVerticalPadding, 12)
         XCTAssertLessThanOrEqual(PopupLayout.transcriptBottomInset + 1, 16)
+    }
+
+    func testOneLineInputRowStaysCollapsed() {
+        XCTAssertEqual(
+            PopupMetrics.inputRowHeight(draft: "", showsNotice: false),
+            PopupLayout.collapsedHeight
+        )
+        XCTAssertEqual(
+            PopupMetrics.inputRowHeight(draft: "hello", showsNotice: false),
+            PopupLayout.collapsedHeight
+        )
+        XCTAssertEqual(
+            PopupMetrics.inputRowHeight(draft: "", showsNotice: true),
+            PopupLayout.collapsedHeight
+        )
+        XCTAssertLessThanOrEqual(PopupLayout.collapsedHeight, 72)
+        let eight = Array(repeating: "line", count: 8).joined(separator: "\n")
+        XCTAssertGreaterThan(
+            PopupMetrics.inputRowHeight(draft: eight, showsNotice: false),
+            PopupLayout.collapsedHeight
+        )
+    }
+
+    @MainActor
+    func testSentinelReplyWrapsAtThePopupWidth() {
+        let line = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
+        let one = laidOutTurnHeight("Hi")
+        let wrapped = laidOutTurnHeight(line)
+        XCTAssertGreaterThan(one, 0)
+        XCTAssertGreaterThan(
+            wrapped,
+            one + 8,
+            "the one-line sentinel wraps inside the popup column"
+        )
+        XCTAssertLessThan(wrapped, 120)
     }
 }

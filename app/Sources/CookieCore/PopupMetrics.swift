@@ -29,6 +29,17 @@ public enum PopupMetrics {
         return CGFloat(lines) * inputLineHeight
     }
 
+    /// Height of the mascot row. A one-line draft, with or without the
+    /// loading line, is the collapsed row. Further draft lines grow the
+    /// field. The panel's extra height does not.
+    public static func inputRowHeight(draft: String, showsNotice: Bool) -> CGFloat {
+        let notice: CGFloat = showsNotice ? 20 : 0
+        return max(
+            PopupLayout.collapsedHeight,
+            16 + clampedInputHeight(lineCount: inputLineCount(draft)) + notice
+        )
+    }
+
     /// Panel height for the turns now on screen. Empty is the input row.
     /// A measured transcript height replaces the line estimate. The result
     /// never passes `PopupLayout.maxHeight`. The extra point is the divider
@@ -39,12 +50,7 @@ public enum PopupMetrics {
         showsNotice: Bool,
         measuredTranscript: CGFloat? = nil
     ) -> CGFloat {
-        let draftLines = inputLineCount(draft)
-        let notice: CGFloat = showsNotice ? 20 : 0
-        let input = max(
-            PopupLayout.collapsedHeight,
-            16 + clampedInputHeight(lineCount: draftLines) + notice
-        )
+        let input = inputRowHeight(draft: draft, showsNotice: showsNotice)
         guard !turnTexts.isEmpty else { return min(PopupLayout.maxHeight, input) }
         let transcript: CGFloat
         if let measuredTranscript, measuredTranscript > 1 {

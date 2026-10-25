@@ -259,6 +259,14 @@ private struct TranscriptFrameKey: PreferenceKey {
     }
 }
 
+struct InputRowHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct ViewportHeightKey: PreferenceKey {
     static var defaultValue: CGFloat { 0 }
 
@@ -346,6 +354,8 @@ struct PopupRoot: View {
             }
             .frame(maxHeight: .infinity)
         }
+        .frame(maxHeight: .infinity)
+        .layoutPriority(1)
     }
 
     private func follow(_ proxy: ScrollViewProxy, frame: TranscriptFrame, viewport: CGFloat) {
@@ -359,6 +369,12 @@ struct PopupRoot: View {
         if shouldScroll {
             proxy.scrollTo(CookieAX.transcriptBottom, anchor: .bottom)
         }
+    }
+
+    private var inputRowCap: CGFloat {
+        let showsNotice = popupLoadingLine(runtime: model.runtime.state) != nil
+            || model.conversation.refusalLine(runtime: model.runtime.state) != nil
+        return PopupMetrics.inputRowHeight(draft: model.conversation.draft, showsNotice: showsNotice)
     }
 
     private var inputRow: some View {
@@ -409,11 +425,18 @@ struct PopupRoot: View {
             ) {
                 model.submit()
             }
+            .fixedSize()
             .help(control.stopsReply ? CookieCopy.stop : CookieCopy.ask)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, PopupLayout.inputRowVerticalPadding)
-        .frame(minHeight: PopupLayout.collapsedHeight)
+        .frame(minHeight: PopupLayout.collapsedHeight, maxHeight: inputRowCap)
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            GeometryReader { geo in
+                Color.clear.preference(key: InputRowHeightKey.self, value: geo.size.height)
+            }
+        }
     }
 
     /// One status dot for the whole popup. The existing on-device string is
@@ -448,7 +471,6 @@ struct TurnRow: View {
                 .frame(width: 64, alignment: .leading)
             reply
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
                 .background {
                     IdentifiedBox(
                         identifier: identifier,
@@ -463,14 +485,21 @@ struct TurnRow: View {
     private var reply: some View {
         switch turn.role {
         case .you:
+            // fixedSize stays inside the width frame. Outside it, the ideal
+            // height is the unwrapped line and the column clips the tail.
             Text(turn.text)
                 .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         case .cookie:
+            // Same width order for markdown. ParagraphView.sizeThatFits
+            // returns nil for an infinite width, and the paragraph then
+            // stays one line. Inline LaTeX is an attachment in that
+            // paragraph, so it wraps with the text once the width is finite.
             MarkdownView(text: prepareReplyMarkdown(turn.text))
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

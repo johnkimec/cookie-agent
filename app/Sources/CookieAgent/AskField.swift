@@ -263,6 +263,18 @@ struct IdentifiedButton: NSViewRepresentable {
     var enabled: Bool = true
     var action: () -> Void
 
+    /// The button's title size. Without this, SwiftUI treats the control as
+    /// flexible and it takes half the row: on the Mac it measured 227×137
+    /// inside the 160 pt long-reply row, and 227 pt wide even when empty.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView button: NSButton, context: Context) -> CGSize? {
+        let intrinsic = button.intrinsicContentSize
+        let width: CGFloat = intrinsic.width > 1 && intrinsic.width < 10_000 ? intrinsic.width : 28
+        let height: CGFloat = intrinsic.height > 1 && intrinsic.height < 10_000
+            ? intrinsic.height
+            : PopupMetrics.inputLineHeight
+        return CGSize(width: width.rounded(.up), height: height.rounded(.up))
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(action: action)
     }
@@ -274,6 +286,10 @@ struct IdentifiedButton: NSViewRepresentable {
         button.isBordered = false
         button.font = .systemFont(ofSize: NSFont.systemFontSize)
         button.isEnabled = enabled
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .vertical)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .vertical)
         button.setAccessibilityElement(true)
         button.setAccessibilityIdentifier(identifier)
         button.setAccessibilityLabel(title)

@@ -892,9 +892,140 @@ end tell
 APPLESCRIPT
 }
 
+popup_panel_metrics() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set mascotElem to missing value
+    repeat with elem in nodes
+      if my axid(elem) is "cookie.popup.mascot" then set mascotElem to elem
+    end repeat
+    if mascotElem is missing value then error "missing cookie.popup.mascot"
+    set windowHeight to item 2 of (get size of popupWindow)
+    set wTop to item 2 of (get position of popupWindow)
+    set mascotTop to item 2 of (get position of mascotElem)
+    set mascotHeight to item 2 of (get size of mascotElem)
+    set mascotMid to mascotTop + (mascotHeight / 2)
+    set rowHeight to (wTop + windowHeight - mascotMid) * 2
+    return "windowHeight " & windowHeight & linefeed & "rowHeight " & rowHeight
+  end tell
+end tell
+APPLESCRIPT
+}
+
+cookie_identified_value() {
+  local turn_id="$1"
+  [[ "$turn_id" =~ ^cookie\.turn\.cookie\.[0-9]+$ ]] || return 2
+  local script
+  script="$(cat <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+on coerceToString(rawValue)
+  if rawValue is missing value then return ""
+  set oldDelims to AppleScript's text item delimiters
+  try
+    if class of rawValue is list then
+      set AppleScript's text item delimiters to " "
+      set joined to rawValue as string
+      set AppleScript's text item delimiters to oldDelims
+      return joined
+    end if
+    set AppleScript's text item delimiters to oldDelims
+    return rawValue as string
+  on error
+    set AppleScript's text item delimiters to oldDelims
+    return ""
+  end try
+end coerceToString
+
+on axtext(elem)
+  set rawValue to missing value
+  set rawName to missing value
+  set rawDescription to missing value
+  tell application "System Events"
+    try
+      set rawValue to value of elem
+    end try
+    try
+      set rawName to name of elem
+    end try
+    try
+      set rawDescription to description of elem
+    end try
+  end tell
+  set fromValue to my coerceToString(rawValue)
+  if fromValue is not "" and fromValue is not "cookie" then return fromValue
+  set fromName to my coerceToString(rawName)
+  if fromName is not "" and fromName is not "cookie" then return fromName
+  set fromDescription to my coerceToString(rawDescription)
+  if fromDescription is not "" and fromDescription is not "cookie" then return fromDescription
+  return ""
+end axtext
+
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  tell cookieProc
+    set popupWindow to missing value
+    repeat with candidate in windows
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then return "missing-window"
+    set nodes to entire contents of popupWindow
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is "__TURN_ID__" then
+        set theValue to my axtext(elem)
+        if theValue is not "" and theValue is not "cookie" then
+          return theId & tab & theValue
+        end if
+      end if
+    end repeat
+    return "waiting"
+  end tell
+end tell
+APPLESCRIPT
+)"
+  script="${script//__TURN_ID__/$turn_id}"
+  printf '%s\n' "$script" | osascript_run
+}
+
 popup_reply_metrics() {
   local pad="$1"
+  local turn_id="$2"
   [[ "$pad" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 2
+  [[ "$turn_id" =~ ^cookie\.turn\.cookie\.[0-9]+$ ]] || return 2
   local script
   script="$(cat <<'APPLESCRIPT'
 on axid(elem)
@@ -934,18 +1065,20 @@ tell application "System Events"
     repeat with elem in nodes
       set theId to my axid(elem)
       if theId is "cookie.badge.on-device.0" then error "per-message badge cookie.badge.on-device.0 is still present"
-      if theId is "cookie.turn.cookie.0" and replyElem is missing value then set replyElem to elem
+      if theId is "__TURN_ID__" and replyElem is missing value then set replyElem to elem
       if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
       if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
       if theId is "cookie.popup.transcript-bottom" and bottomElem is missing value then set bottomElem to elem
       if theId is "cookie.popup.mascot" and mascotElem is missing value then set mascotElem to elem
     end repeat
-    if replyElem is missing value then error "missing cookie.turn.cookie.0"
+    if replyElem is missing value then error "missing __TURN_ID__"
     if dotElem is missing value then error "missing cookie.badge.on-device"
     if inputElem is missing value then error "missing cookie.popup.input"
     if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
     if mascotElem is missing value then error "missing cookie.popup.mascot"
+    set replyLeft to item 1 of (get position of replyElem)
     set replyHeight to item 2 of (get size of replyElem)
+    set replyWidth to item 1 of (get size of replyElem)
     set dotWidth to item 1 of (get size of dotElem)
     set inputHeight to item 2 of (get size of inputElem)
     set windowHeight to item 2 of (get size of popupWindow)
@@ -960,6 +1093,9 @@ tell application "System Events"
     set replyBottom to (item 2 of (get position of replyElem)) + replyHeight
     set rowPad to __ROW_PAD__
     set mascotTop to item 2 of (get position of mascotElem)
+    set mascotHeight to item 2 of (get size of mascotElem)
+    set mascotMid to mascotTop + (mascotHeight / 2)
+    set rowHeight to (wTop + wHeight - mascotMid) * 2
     set rowTop to mascotTop - rowPad
     set gap to rowTop - replyBottom
     if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= (wTop + wHeight + 4) then
@@ -967,10 +1103,11 @@ tell application "System Events"
     end if
   end tell
 end tell
-return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap
+return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
 APPLESCRIPT
 )"
   script="${script//__ROW_PAD__/$pad}"
+  script="${script//__TURN_ID__/$turn_id}"
   printf '%s\n' "$script" | osascript_run
 }
 
@@ -1009,7 +1146,7 @@ for window in info {
     let width = number(bounds["Width"]) ?? 0
     let height = number(bounds["Height"]) ?? 0
     let area = width * height
-    if width < 200 || height < 100 || area <= bestArea { continue }
+    if width < 200 || height < 40 || area <= bestArea { continue }
     bestArea = area
     bestID = Int(windowID)
 }
@@ -1032,6 +1169,65 @@ SWIFT
   fi
 }
 
+# mode is "short" or "long". The second argument is the metrics file.
+popup_reply_metrics_ok() {
+  local mode="$1"
+  local file="$2"
+  POPUP_METRICS_MODE="$mode" python3 - "$file" <<'PY'
+import os, pathlib, sys
+vals = {}
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    parts = line.split(" ", 1)
+    if len(parts) == 2:
+        vals[parts[0]] = parts[1].strip()
+need = [
+    "replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom", "gap",
+    "rowHeight", "replyLeft", "replyWidth", "windowLeft", "windowWidth",
+]
+missing = [key for key in need if key not in vals]
+if missing:
+    print("missing " + ", ".join(missing))
+    sys.exit(1)
+reply_height = float(vals["replyHeight"])
+dot_width = float(vals["dotWidth"])
+input_height = float(vals["inputHeight"])
+window_height = float(vals["windowHeight"])
+gap = float(vals["gap"])
+row_height = float(vals["rowHeight"])
+reply_left = float(vals["replyLeft"])
+reply_width = float(vals["replyWidth"])
+window_left = float(vals["windowLeft"])
+window_width = float(vals["windowWidth"])
+max_height = float(os.environ["POPUP_MAX_HEIGHT"])
+mode = os.environ["POPUP_METRICS_MODE"]
+frame_inside = (
+    reply_left + 1 >= window_left
+    and reply_left + reply_width <= window_left + window_width + 4
+)
+ok = (
+    56 <= row_height <= 72
+    and vals["bottom"] == "inside"
+    and 4 < dot_width < 40
+    and input_height < 48
+    and 0 <= gap <= 16
+    and frame_inside
+)
+if mode == "long":
+    ok = ok and reply_height > 40 and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
+elif mode == "short":
+    ok = ok and reply_height > 30 and 40 < window_height < max_height
+else:
+    print("unknown mode " + mode)
+    sys.exit(1)
+if not ok:
+    print(mode)
+    for key in need:
+        print(key, vals[key])
+    sys.exit(1)
+print(mode + " metrics ok")
+PY
+}
+
 run_popup_reply() {
   local max_height row_pad
   max_height="$(popup_layout_constant maxHeight)" || fail "PopupLayout.maxHeight is missing"
@@ -1041,12 +1237,26 @@ run_popup_reply() {
   open_via_ask
   sleep 0.6
   log "measure empty popup"
-  local empty_height=""
+  local empty_height="" empty_row=""
   local attempt
   for attempt in $(seq 1 40); do
-    if empty_height="$(popup_window_height 2>/tmp/cookie-drive-mac-empty.err)"; then
-      empty_height="$(printf '%s' "$empty_height" | tr -d '[:space:]')"
-      if python3 -c 'import sys; h=float(sys.argv[1]); raise SystemExit(0 if h < 80 else 1)' "$empty_height"; then
+    if popup_panel_metrics > /tmp/cookie-drive-mac-empty-metrics.txt 2>/tmp/cookie-drive-mac-empty.err; then
+      if python3 - <<'PY'
+import pathlib, sys
+vals = {}
+for line in pathlib.Path("/tmp/cookie-drive-mac-empty-metrics.txt").read_text().splitlines():
+    parts = line.split(" ", 1)
+    if len(parts) == 2:
+        vals[parts[0]] = parts[1].strip()
+if "windowHeight" not in vals or "rowHeight" not in vals:
+    sys.exit(1)
+window_height = float(vals["windowHeight"])
+row_height = float(vals["rowHeight"])
+sys.exit(0 if window_height < 80 and 56 <= row_height <= 72 else 1)
+PY
+      then
+        empty_height="$(awk '$1 == "windowHeight" { print $2 }' /tmp/cookie-drive-mac-empty-metrics.txt)"
+        empty_row="$(awk '$1 == "rowHeight" { print $2 }' /tmp/cookie-drive-mac-empty-metrics.txt)"
         break
       fi
     fi
@@ -1056,57 +1266,62 @@ run_popup_reply() {
   if [[ -z "$empty_height" ]]; then
     log "empty popup"
     cat /tmp/cookie-drive-mac-empty.err 2>/dev/null || true
-    fail "empty popup is not under 80 pt"
+    cat /tmp/cookie-drive-mac-empty-metrics.txt 2>/dev/null || true
+    fail "empty popup is not under 80 pt or the input row is over 72 pt"
   fi
-  log "empty height $empty_height"
-  log "send long reply"
+  log "empty height $empty_height row $empty_row"
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-empty.png
+  log "send short reply"
   send_chat
   local ready=0
   for attempt in $(seq 1 80); do
-    cookie_turn_value > /tmp/cookie-drive-mac-chat.txt || true
+    cookie_identified_value cookie.turn.cookie.0 > /tmp/cookie-drive-mac-short-chat.txt || true
+    if ! python3 - /tmp/cookie-drive-mac-short-chat.txt <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+full = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
+sys.exit(0 if full in text and "Line 01" not in text else 1)
+PY
+    then
+      sleep 0.25
+      continue
+    fi
+    if popup_reply_metrics "$row_pad" cookie.turn.cookie.0 > /tmp/cookie-drive-mac-short-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if popup_reply_metrics_ok short /tmp/cookie-drive-mac-short-metrics.txt; then
+        ready=1
+        break
+      fi
+    fi
+    sleep 0.25
+  done
+  if [[ "$ready" != "1" ]]; then
+    log "short chat"
+    cat /tmp/cookie-drive-mac-short-chat.txt 2>/dev/null || true
+    log "short metrics"
+    cat /tmp/cookie-drive-mac-short-metrics.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
+    dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
+    cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
+    fail "short reply missed the wrap, the input-row height, or the gap"
+  fi
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-short.png
+  log "send long reply"
+  send_chat
+  ready=0
+  for attempt in $(seq 1 80); do
+    cookie_identified_value cookie.turn.cookie.1 > /tmp/cookie-drive-mac-chat.txt || true
     if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
-ok = "END-OF-REPLY-m1-popup" in text and "Einstein is best known for" in text
+ok = "END-OF-REPLY-m1-popup" in text and "Einstein is best known for" in text and "Line 24" in text
 sys.exit(0 if ok else 1)
 PY
     then
       sleep 0.25
       continue
     fi
-    if popup_reply_metrics "$row_pad" > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
-      if python3 - <<'PY'
-import os, pathlib, sys
-text = pathlib.Path("/tmp/cookie-drive-mac-metrics.txt").read_text()
-vals = {}
-for line in text.splitlines():
-    parts = line.split(" ", 1)
-    if len(parts) == 2:
-        vals[parts[0]] = parts[1].strip()
-need = ["replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom", "gap"]
-if any(key not in vals for key in need):
-    print("missing " + ", ".join(key for key in need if key not in vals))
-    sys.exit(1)
-reply_height = float(vals["replyHeight"])
-dot_width = float(vals["dotWidth"])
-input_height = float(vals["inputHeight"])
-window_height = float(vals["windowHeight"])
-gap = float(vals["gap"])
-max_height = float(os.environ["POPUP_MAX_HEIGHT"])
-ok = (
-    reply_height > 40
-    and abs(window_height - max_height) <= 1
-    and vals["bottom"] == "inside"
-    and 4 < dot_width < 40
-    and input_height < 48
-    and 0 <= gap <= 16
-)
-if not ok:
-    print(text.strip())
-    sys.exit(1)
-print("metrics ok")
-PY
-      then
+    if popup_reply_metrics "$row_pad" cookie.turn.cookie.1 > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if popup_reply_metrics_ok long /tmp/cookie-drive-mac-metrics.txt; then
         ready=1
         break
       fi
@@ -1123,18 +1338,41 @@ PY
     cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
     fail "popup reply missed the height cap, the input-row gap, or the bottom marker"
   fi
-  printf 'emptyHeight %s\n' "$empty_height" >> /tmp/cookie-drive-mac-metrics.txt
+  {
+    printf 'emptyHeight %s\n' "$empty_height"
+    printf 'emptyRowHeight %s\n' "$empty_row"
+    printf '%s\n' "--- short"
+    cat /tmp/cookie-drive-mac-short-metrics.txt
+    printf '%s\n' "--- long"
+    cat /tmp/cookie-drive-mac-metrics.txt
+  } > /tmp/cookie-drive-mac-metrics-all.txt
+  mv /tmp/cookie-drive-mac-metrics-all.txt /tmp/cookie-drive-mac-metrics.txt
   dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || fail "popup accessibility read failed"
   local shell_log="$COOKIE_DATA_DIR/logs/cookie-shell.log"
-  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=" | grep -F "END-OF-REPLY-m1-popup" | grep -F "Einstein is best known for" >/dev/null; then
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=Einstein is best known for relativity. END-OF-REPLY-m1-popup" >/dev/null; then
+    log "shell log"
+    cat "$shell_log" 2>/dev/null || true
+    fail "chat.done log is missing the short reply"
+  fi
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=" | grep -F "Line 24" | grep -F "END-OF-REPLY-m1-popup" >/dev/null; then
     log "shell log"
     cat "$shell_log" 2>/dev/null || true
     fail "chat.done log is missing the full accumulated reply"
   fi
-  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup.png
-  if [[ ! -s /tmp/cookie-drive-mac-popup.png ]]; then
-    fail "screencapture wrote no file"
-  fi
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-long.png
+  cp /tmp/cookie-drive-mac-popup-long.png /tmp/cookie-drive-mac-popup.png
+  for shot in popup-empty popup-short popup-long popup; do
+    if [[ ! -s "/tmp/cookie-drive-mac-${shot}.png" ]]; then
+      fail "screencapture wrote no ${shot}.png"
+    fi
+  done
+  {
+    printf '%s\n' "--- short"
+    cat /tmp/cookie-drive-mac-short-chat.txt
+    printf '%s\n' "--- long"
+    cat /tmp/cookie-drive-mac-chat.txt
+  } > /tmp/cookie-drive-mac-chat-all.txt
+  mv /tmp/cookie-drive-mac-chat-all.txt /tmp/cookie-drive-mac-chat.txt
   if [[ -n "$evidence" ]]; then
     mkdir -p "$evidence"
     {
@@ -1148,10 +1386,13 @@ PY
     cp /tmp/cookie-drive-mac-ax.txt "$evidence/ax.txt"
     cp /tmp/cookie-drive-mac-chat.txt "$evidence/chat.txt"
     cp /tmp/cookie-drive-mac-metrics.txt "$evidence/metrics.txt"
+    cp /tmp/cookie-drive-mac-popup-empty.png "$evidence/popup-empty.png"
+    cp /tmp/cookie-drive-mac-popup-short.png "$evidence/popup-short.png"
+    cp /tmp/cookie-drive-mac-popup-long.png "$evidence/popup-long.png"
     cp /tmp/cookie-drive-mac-popup.png "$evidence/popup.png"
     cp "$shell_log" "$evidence/cookie-shell.log"
-    if [[ ! -s "$evidence/chat.txt" || ! -s "$evidence/popup.png" || ! -s "$evidence/metrics.txt" ]]; then
-      fail "evidence is missing chat.txt, metrics.txt, or popup.png"
+    if [[ ! -s "$evidence/chat.txt" || ! -s "$evidence/popup-long.png" || ! -s "$evidence/metrics.txt" ]]; then
+      fail "evidence is missing chat.txt, metrics.txt, or popup-long.png"
     fi
   fi
   log "metrics"

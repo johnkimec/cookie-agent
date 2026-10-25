@@ -13,6 +13,12 @@ if (!reply.includes("END-OF-REPLY-m1-popup") || !reply.includes("Einstein is bes
   process.exit(1);
 }
 
+const shortReply = "Einstein is best known for relativity. END-OF-REPLY-m1-popup";
+if (!shortReply.includes("END-OF-REPLY-m1-popup") || !shortReply.includes("Einstein is best known for")) {
+  process.stderr.write("popup short reply is missing the sentinel\n");
+  process.exit(1);
+}
+
 const chunks = [];
 for (let index = 0; index < reply.length; index += 48) {
   const text = reply.slice(index, index + 48);
@@ -30,6 +36,8 @@ if (chunks.join("") !== reply) {
 function emit(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
+
+let sendCount = 0;
 
 const input = createInterface({ input: process.stdin });
 input.on("line", (line) => {
@@ -75,17 +83,20 @@ input.on("line", (line) => {
     return;
   }
   if (method === "chat.send") {
+    sendCount += 1;
+    const messageId = `msg-${sendCount}`;
+    const pieces = sendCount === 1 ? [shortReply] : chunks;
     const conversationId = message.params?.conversationId ?? "conv-1";
     emit({
       jsonrpc: "2.0",
       id: message.id,
-      result: { conversationId, messageId: "msg-1" },
+      result: { conversationId, messageId },
     });
-    chunks.forEach((text, index) => {
+    pieces.forEach((text, index) => {
       emit({
         jsonrpc: "2.0",
         method: "chat.delta",
-        params: { conversationId, messageId: "msg-1", index, text },
+        params: { conversationId, messageId, index, text },
       });
     });
     emit({
@@ -93,9 +104,9 @@ input.on("line", (line) => {
       method: "chat.done",
       params: {
         conversationId,
-        messageId: "msg-1",
+        messageId,
         finishReason: "stop",
-        usage: { inputTokens: 1, outputTokens: chunks.length },
+        usage: { inputTokens: 1, outputTokens: pieces.length },
       },
     });
     return;
