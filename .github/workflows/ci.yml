@@ -92,7 +92,7 @@ jobs:
         run: node core/scripts/check-type-strip-stderr.mjs
 
   sqlite-spike:
-    name: node:sqlite spike (Node 22.13, ${{ matrix.os }})
+    name: better-sqlite3 spike (Node 22.13, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -115,8 +115,27 @@ jobs:
           node-version: 22.13.0
           cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Install dependencies from the prebuild
+        run: |
+          bindir="${{ runner.temp }}/no-toolchain/bin"
+          log="${{ runner.temp }}/pnpm-install.log"
+          mkdir -p "$bindir"
+          for tool in gcc g++ cc c++ clang clang++ make node-gyp node-gyp-build cmake; do
+            printf '%s\n' '#!/bin/sh' 'echo "TOOLCHAIN_INVOKED $0 $*" >&2' 'exit 1' > "$bindir/$tool"
+            chmod +x "$bindir/$tool"
+          done
+          export PATH="$bindir:$PATH"
+          set +e
+          pnpm install --frozen-lockfile > "$log" 2>&1
+          code=$?
+          cat "$log"
+          set -e
+          test "$code" -eq 0
+          if grep -q TOOLCHAIN_INVOKED "$log"; then
+            echo "a compiler or node-gyp ran during install" >&2
+            exit 1
+          fi
+          grep -q "prebuild-install || node-gyp rebuild --release" "$log"
 
       - name: Require runner architecture
         run: |
@@ -129,5 +148,5 @@ jobs:
             test "${{ runner.arch }}" = "X64"
           fi
 
-      - name: Spike node:sqlite
+      - name: Spike better-sqlite3
         run: pnpm spike-sqlite

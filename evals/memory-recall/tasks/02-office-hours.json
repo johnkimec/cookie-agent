@@ -1,0 +1,41 @@
+{
+  "id": "02-office-hours",
+  "question": "When did I say Professor Shah holds office hours?",
+  "expectedFact": "Professor Shah holds office hours on Tuesday at 3pm",
+  "sessions": [
+    {
+      "id": "ses-2026-10-14-menubar",
+      "startedAt": "2026-10-14T19:30:00Z",
+      "surface": "menubar",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Professor Shah holds office hours on Tuesday at 3pm.",
+          "createdAt": "2026-10-14T19:30:05Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Noted. Professor Shah holds office hours on Tuesday at 3pm.",
+          "createdAt": "2026-10-14T19:30:11Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-20-popup",
+      "startedAt": "2026-10-20T16:05:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Add milk to the grocery list.",
+          "createdAt": "2026-10-20T16:05:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Milk is on the grocery list.",
+          "createdAt": "2026-10-20T16:05:08Z"
+        }
+      ]
+    }
+  ]
+}

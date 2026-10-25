@@ -81,6 +81,8 @@ Each one changes what a later task builds. Options, then my recommendation. John
 
 Recommendation: 1, if the spike in Step 0 passes on macOS and on Linux CI. It probably means raising `engines` from `>=22.6`. The existing `--disable-warning=ExperimentalWarning` flag already covers its warning.
 
+**Update (2026-10-25).** The Node 22.13.0 spike failed FTS5 on `node:sqlite` (SQLite 3.47.2, `no such module: fts5`) on Linux and on macOS arm64. Evidence is GitHub Actions run [40217048358](https://github.com/johnkimec/cookie-agent/actions/runs/40217048358) and the archived script `core/scripts/spike-node-sqlite.mjs`. John, relayed by the principal engineer, picked option 2. The core uses `better-sqlite3` 12.11.1 (prebuild for Node ABI 127). Release 13.x's bundled prebuild segfaults on Node 22.13.0 at `new Database()`. `engines` stays `>=22.6`. Logged as `D-2026-10-25-02`. This supersedes the D1 pick in John's answers below.
+
 ### D2: Embedding model and how it runs
 
 The design doc says "under 1 GB, served by the same runtime, 768 dimensions" but names no model. llama-server serves one model per process.
@@ -144,7 +146,7 @@ Contract first, then parallel work, then one integration run on the Mac. One tas
 
 ### Step 0: contract and spike (one PR, Sergey with Engineer 1)
 
-- Spike: on Node 22.13 (Mac) and CI's Node 22, confirm `node:sqlite` opens WAL, has FTS5, and can load sqlite-vec. Record the result as a lesson.
+- Spike: Node 22.13 `node:sqlite` failed FTS5 (see the D1 update). The replacement spike is `better-sqlite3` 12.11.1 on Node 22.13 (Mac and CI): WAL, FTS5 including `bm25()`, sqlite-vec via `loadExtension`, and a prebuild install with no compile. Record the result as a lesson.
 - Land the SQL migration `001` matching the design doc schema, the TypeScript interfaces above with fakes, `features/memory.md` (all `planned`), and the eval task format with two sample tasks.
 - **Depends on:** D1, D5, and this doc merged.
 - **Verify:** CI green. Migration test opens a temp DB and lists the tables. The spike output is in the PR.
@@ -189,7 +191,7 @@ M1 is the memory and retrieval milestone, so these come up at implementation tim
 | Risk | Mitigation |
 | --- | --- |
 | Reranking the top 20 with Qwen adds several thousand fresh tokens and blows the 2 s first-token goal | Measure in Step 2D. If it's over, I bring John options (smaller rerank set, rerank only when fusion is unsure) instead of quietly dropping it. |
-| `node:sqlite` or sqlite-vec doesn't work on Node 22.13 | Step 0 spike runs before anything builds on it. Fallbacks: D1 option 2, and the brute-force cosine path the design doc already requires. |
+| `node:sqlite` lacks FTS5 on Node 22.13 | Happened. D1 is now `better-sqlite3` 12.11.1. The brute-force cosine path still covers a sqlite-vec failure. |
 | Reflect writes wrong facts | Every fact keeps `source_turn` and confidence, contradictions supersede, and derived tables are rebuildable. |
 | Local tool calls in D3 are unreliable | Schema validation and one local repair, as in the design doc's escalation path. Recall does not depend on the tool. |
 
@@ -209,7 +211,7 @@ M1 is the memory and retrieval milestone, so these come up at implementation tim
 
 John approved every recommendation as written:
 
-- **D1:** `node:sqlite`, as long as the step 0 spike confirms it supports WAL, FTS5 and loading sqlite-vec.
+- **D1:** `better-sqlite3` 12.11.1. The `node:sqlite` spike on Node 22.13.0 failed FTS5. See the D1 update above and `D-2026-10-25-02`. The original pick was `node:sqlite` if that spike passed.
 - **D2:** a second `llama-server --embeddings` process.
 - **D3:** "remember" and "forget" are `memory.*` tools.
 - **D4:** the reflect job waits until chat is idle.
@@ -227,3 +229,4 @@ Still open: John's top popup issues for the polish sub-track.
 ## Change history
 
 - 2026-10-25 — Created from the design doc's M1 row after M0 finished (main `e5570a8`).
+- 2026-10-25 — D1 switched to `better-sqlite3` 12.11.1 after the `node:sqlite` spike on Node 22.13.0 failed FTS5 (`no such module: fts5`). Logged as `D-2026-10-25-02`.
