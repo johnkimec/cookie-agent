@@ -5,7 +5,8 @@ import Foundation
 /// Textual (gonzalezreal/textual) is the preferred renderer, and it understands
 /// `$...$` and `$$...$$` math. Textual 0.5.0 requires macOS 15. This app's
 /// deployment target is macOS 14, so the popup uses SwiftStreamingMarkdown 0.7.0
-/// instead. That library already renders `\( ... \)` and `$$ ... $$`. This
+/// (commit 5f7c04e; a version pin cannot resolve because that tag depends on
+/// revision pins). That library already renders `\( ... \)` and `$$ ... $$`. This
 /// function only rewrites a complete `\[ ... \]` into `$$ ... $$`, and it leaves
 /// `\( ... \)` alone. An unclosed delimiter is left as the model wrote it.
 /// Fenced code is not rewritten.
