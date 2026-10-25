@@ -6,9 +6,11 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { TYPE_STRIP_NODE_ARGS } from "../node-launch.ts";
@@ -158,5 +160,30 @@ describe("memory dump", () => {
     expect(logged.join("")).toContain("usage: pnpm memory dump");
     expect(written.join("")).toContain("ECE midterm is Friday");
     expectUnchanged(dir, before);
+  });
+
+  it("dumps through a symlinked path", async () => {
+    const dir = tempDir();
+    const path = userTurn(dir);
+    const linkDir = tempDir();
+    const link = join(linkDir, "dump-cli.ts");
+    symlinkSync(fileURLToPath(new URL("./dump-cli.ts", import.meta.url)), link);
+    const child = spawn(
+      process.execPath,
+      [...TYPE_STRIP_NODE_ARGS, link, "dump", "--db", path],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const [code] = (await once(child, "exit")) as [number | null];
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("ECE midterm is Friday");
   });
 });

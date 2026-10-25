@@ -8,17 +8,21 @@
  * directory when that variable is unset.
  */
 
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { dumpMemory } from "./dump.ts";
 import { memoryDatabasePath } from "./path.ts";
 
 function isDirectRun(): boolean {
   const entry = process.argv[1];
-  if (entry === undefined) {
+  if (entry === undefined || entry === "") {
     return false;
   }
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
 }
 
 export function runMemoryDump(argv: string[]): number {
