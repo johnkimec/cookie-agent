@@ -17,6 +17,7 @@ rm -rf "$DEST"
 mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/CookieAgent"
 cp "$ROOT/app/Support/Info.plist" "$DEST/Contents/Info.plist"
+plutil -insert CookieRepoRoot -string "$ROOT" "$DEST/Contents/Info.plist"
 chmod +x "$DEST/Contents/MacOS/CookieAgent"
 codesign --force --sign - "$DEST"
 plutil -lint "$DEST/Contents/Info.plist" >/dev/null

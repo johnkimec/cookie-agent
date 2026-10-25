@@ -11,6 +11,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var runtime = RuntimeStatus(state: .down, modelId: nil)
     @Published var popupOpen = false
     @Published var conversation = PopupConversation()
+    @Published var launchFailure: ShellLaunchFailure?
 
     let localOnly = true
     let conversationID = "conv-\(UUID().uuidString)"
@@ -20,8 +21,13 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     private var supervisor: CoreSupervisor?
     private var transport: ProcessTransport?
+    private var runtimeSupervisor: RuntimeSupervisor?
     private var eventsTask: Task<Void, Never>?
+    private var runtimeEventsTask: Task<Void, Never>?
+    private var coreReady = false
+    private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
+    private var terminationStarted = false
 
     var menuGlyphState: MenuGlyph {
         menuGlyph(
@@ -44,24 +50,44 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     var statusText: String {
-        CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
+        if let launchFailure {
+            return launchFailure.statusLine
+        }
+        return CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
     }
 
     func start() {
+        let plistRoot = Bundle.main.object(forInfoDictionaryKey: "CookieRepoRoot") as? String
         let launch = CoreLaunch.resolve(
             environment: ProcessInfo.processInfo.environment,
             currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
-            temporaryDirectory: FileManager.default.temporaryDirectory,
-            pid: ProcessInfo.processInfo.processIdentifier
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            plistRepoRoot: plistRoot,
+            bundleURL: Bundle.main.bundleURL
         )
         do {
             try launch.prepareDataDirectory()
         } catch {
             log("data dir: \(error)")
         }
+        let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
+        let inherited = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
+        let portText = parseLlamaPort(launch.environment["COOKIE_LLAMA_PORT"]).map(String.init) ?? "invalid"
+        let command = ([launch.executable] + launch.arguments).joined(separator: " ")
         log(
-            "dataDir=\(launch.environment["COOKIE_DATA_DIR"] ?? "") port=\(launch.environment["COOKIE_LLAMA_PORT"] ?? "") core=\(launch.arguments.joined(separator: " ")) cwd=\(launch.workingDirectory.path)"
+            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) core=\(command) cwd=\(launch.workingDirectory.path) coreRoot=\(launch.coreRootReady) commandReady=\(launch.commandReady) path=\(launch.environment["PATH"] ?? "")"
         )
+        guard launch.coreRootReady, launch.commandReady else {
+            if !launch.coreRootReady {
+                launchFailure = .coreNotFound
+            } else if (launch.executable as NSString).lastPathComponent == "pnpm" {
+                launchFailure = .pnpmNotFound
+            } else {
+                launchFailure = .commandNotFound
+            }
+            log("core launch failed status=\(statusText)")
+            return
+        }
         let transport = ProcessTransport(launch: launch)
         let supervisor = CoreSupervisor(transport: transport)
         self.transport = transport
@@ -72,19 +98,74 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self?.handle(event)
             }
         }
+        if launch.supervisesRuntime {
+            let providedData = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
+            let runtimeLaunch = RuntimeLaunch.resolve(
+                environment: launch.environment,
+                homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+                dataDirectory: launch.environment["COOKIE_DATA_DIR"] ?? "",
+                recordsStablePid: !providedData
+            )
+            let runtime = RuntimeSupervisor.live(launch: runtimeLaunch)
+            self.runtimeSupervisor = runtime
+            self.runtime = RuntimeStatus(state: .loading, modelId: runtimeLaunch.modelId)
+            log(
+                "llama=\(runtimeLaunch.executable) \(runtimeLaunch.arguments.joined(separator: " ")) log=\(runtimeLaunch.logFile) pid=\(runtimeLaunch.pidFile)"
+            )
+            let runtimeEvents = runtime.events
+            runtimeEventsTask = Task { [weak self] in
+                for await status in runtimeEvents {
+                    self?.applySupervisorStatus(status)
+                }
+            }
+            Task {
+                await runtime.start()
+            }
+        }
         Task { [weak self] in
             do {
                 try await supervisor.start()
                 _ = try await supervisor.initialize()
+                self?.markCoreReady()
             } catch {
                 self?.log("core: \(error)")
             }
         }
     }
 
+    /// `applicationShouldTerminate` calls this and replies only after the
+    /// owned server has exited. A second call (willTerminate) does not
+    /// start another shutdown.
+    ///
+    /// The reply is scheduled on the main run loop in the modal-panel mode.
+    /// `DispatchQueue.main.async` does not run while `terminate` is still
+    /// inside the main-queue block that entered `.terminateLater`. Shutdown
+    /// itself is detached so it cannot resume on the main actor and wait
+    /// for that same queue.
+    func prepareTermination() {
+        if terminationStarted { return }
+        terminationStarted = true
+        let reply = TerminationReply()
+        Task.detached { [weak self] in
+            await self?.shutdownForExit()
+            reply.send(reason: "stopped")
+        }
+        TerminationHop.performDuringTerminate(after: TerminationHop.replyBackstopSeconds) {
+            reply.send(reason: "backstop")
+        }
+    }
+
     func stopCore() {
-        transport?.stop()
-        eventsTask?.cancel()
+        if terminationStarted { return }
+        terminationStarted = true
+        let gate = ExitGate()
+        // Detached so this wait on the main thread cannot stall the task
+        // if the caller is the main actor.
+        Task.detached { [weak self] in
+            await self?.shutdownForExit()
+            gate.signal()
+        }
+        gate.wait()
     }
 
     func togglePopup() {
@@ -138,8 +219,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 let ack = try await supervisor.sendChat(conversationId: conversationID, text: body)
                 self?.noteAck(ack.messageId)
             } catch {
-                self?.log("send: \(error)")
-                self?.rollback(body)
+                self?.handleSendFailure(error, restoring: body)
             }
         }
     }
@@ -152,13 +232,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     func quit() {
-        Task { [weak self] in
-            try? await self?.supervisor?.shutdown()
-            self?.transport?.stop()
-            DispatchQueue.main.async {
-                NSApp.terminate(nil)
-            }
-        }
+        NSApp.terminate(nil)
+    }
+
+    private func shutdownForExit() async {
+        try? await supervisor?.shutdown()
+        transport?.stop()
+        eventsTask?.cancel()
+        runtimeEventsTask?.cancel()
+        await runtimeSupervisor?.stop()
     }
 
     private func noteAck(_ messageID: String) {
@@ -186,9 +268,11 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             var next = self.conversation
             switch event {
             case .runtime(let status):
-                next.noteRuntime(status.state)
-                self.conversation = next
-                self.runtime = status
+                if self.runtimeSupervisor == nil {
+                    next.noteRuntime(status.state)
+                    self.conversation = next
+                    self.runtime = status
+                }
             case .delta(let delta):
                 next.applyDelta(delta)
                 self.conversation = next
@@ -202,8 +286,121 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
+    private func markCoreReady() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.coreReady = true
+            self.flushPush()
+        }
+    }
+
+    private func applySupervisorStatus(_ status: RuntimeStatus) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            var next = self.conversation
+            next.noteRuntime(status.state)
+            self.conversation = next
+            self.runtime = status
+            self.pendingPush = status
+            self.onLayout?()
+            self.flushPush()
+        }
+    }
+
+    private func flushPush() {
+        guard coreReady, let status = pendingPush, let supervisor else { return }
+        pendingPush = nil
+        Task {
+            do {
+                try await supervisor.pushRuntime(status)
+            } catch {
+                self.log("runtime push: \(error)")
+            }
+        }
+    }
+
+    private func handleSendFailure(_ error: Error, restoring text: String) {
+        let code: Int?
+        if let core = error as? CoreError, case .rpc(let body) = core {
+            code = body.code
+        } else {
+            code = nil
+        }
+        let description = String(describing: error)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch presentChatSendFailure(code: code, runtime: self.runtime.state) {
+            case .stillLoading:
+                var next = self.conversation
+                next.rollbackSend(restoredText: text)
+                next.refusal = nil
+                self.conversation = next
+                if self.runtime.state != .loading {
+                    self.runtime = RuntimeStatus(
+                        state: .loading,
+                        modelId: self.runtime.modelId ?? defaultModelID
+                    )
+                }
+                self.onLayout?()
+                self.confirmRuntime()
+            case .notReady:
+                var next = self.conversation
+                next.rollbackSend(restoredText: text)
+                next.refusal = .notReady
+                self.conversation = next
+                self.onLayout?()
+            case .failed:
+                self.log("send: \(description)")
+                self.rollback(text)
+            }
+        }
+    }
+
+    private func confirmRuntime() {
+        guard let runtimeSupervisor else { return }
+        Task { [weak self] in
+            let status = await runtimeSupervisor.confirm()
+            self?.applySupervisorStatus(status)
+        }
+    }
+
     private func log(_ message: String) {
-        let line = "cookie-shell: \(message)\n"
-        FileHandle.standardError.write(Data(line.utf8))
+        logShell(message)
+    }
+}
+
+/// Replies to `.terminateLater` once. Both shutdown and the backstop call it.
+private final class TerminationReply: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent = false
+
+    func send(reason: String) {
+        guard mark() else { return }
+        logShell("termination reply \(reason)")
+        TerminationHop.performDuringTerminate {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+    }
+
+    private func mark() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if sent { return false }
+        sent = true
+        return true
+    }
+}
+
+/// `DispatchSemaphore` is not `Sendable`. Quit waits on the main thread
+/// while the runtime actor stops the server.
+private final class ExitGate: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    func signal() {
+        semaphore.signal()
+    }
+
+    func wait() {
+        _ = semaphore.wait(timeout: .now() + 15)
     }
 }

@@ -9,24 +9,46 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
-feature="${1:-all}"
-if [[ "$feature" == "--evidence" ]]; then
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--evidence dir]" >&2
+usage() {
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
-fi
+}
 
+feature="all"
+runtime="fake"
 evidence=""
-if [[ "${2:-}" == "--evidence" ]]; then
-  evidence="${3:-}"
-fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    menu-bar-icon|hotkey-popup|chat|all)
+      feature="$1"
+      ;;
+    --runtime)
+      [[ $# -ge 2 ]] || usage
+      runtime="$2"
+      shift
+      if [[ "$runtime" != "fake" && "$runtime" != "real" ]]; then
+        usage
+      fi
+      ;;
+    --evidence)
+      [[ $# -ge 2 ]] || usage
+      evidence="$2"
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+  shift
+done
 
 port="${COOKIE_LLAMA_PORT:-}"
 data="${COOKIE_DATA_DIR:-}"
-if [[ "$port" != "18080" ]]; then
+if [[ "$runtime" == "fake" && "$port" != "18080" ]]; then
   printf '%s\n' "not-ok" "COOKIE_LLAMA_PORT must be 18080"
   exit 1
 fi
-if [[ -z "$data" || "$data" == *"Application Support/Cookie"* ]]; then
+if [[ -z "$data" || "$data" == *"Application Support"* ]]; then
   printf '%s\n' "not-ok" "COOKIE_DATA_DIR must be a fresh temp directory, not Application Support"
   exit 1
 fi
@@ -40,9 +62,13 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 export COOKIE_DATA_DIR="$data"
-export COOKIE_LLAMA_PORT=18080
 export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
-export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+if [[ "$runtime" == "real" ]]; then
+  unset COOKIE_CORE_COMMAND
+else
+  export COOKIE_LLAMA_PORT=18080
+  export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+fi
 
 log() { printf '%s\n' "$*"; }
 
@@ -50,6 +76,14 @@ APP_PID=""
 cleanup() {
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill "$APP_PID" 2>/dev/null || true
+    local attempt
+    for attempt in $(seq 1 40); do
+      kill -0 "$APP_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    if kill -0 "$APP_PID" 2>/dev/null; then
+      kill -9 "$APP_PID" 2>/dev/null || true
+    fi
     wait "$APP_PID" 2>/dev/null || true
   fi
 }
@@ -67,6 +101,103 @@ fail() {
   log "not-ok"
   printf '%s\n' "$*" >&2
   exit 1
+}
+
+resolved_port() {
+  if [[ "$runtime" == "fake" ]]; then
+    printf '%s\n' "18080"
+    return
+  fi
+  if [[ -z "${COOKIE_LLAMA_PORT:-}" ]]; then
+    printf '%s\n' "8080"
+  else
+    printf '%s\n' "$COOKIE_LLAMA_PORT"
+  fi
+}
+
+PORT="$(resolved_port)"
+
+port_listening() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+PORT_BEFORE=0
+if port_listening "$PORT"; then
+  PORT_BEFORE=1
+fi
+
+llama_server_pids() {
+  ps -ax -o pid=,command= | awk '
+    /llama-server/ && $0 !~ /awk/ && $0 !~ /drive-mac/ { print $1 }
+  '
+}
+
+llama_server_count() {
+  llama_server_pids | wc -l | tr -d ' '
+}
+
+pid_file_pid() {
+  local file="$COOKIE_DATA_DIR/logs/llama-server.pid"
+  [[ -f "$file" ]] || return 0
+  awk 'NF >= 1 { print $1; exit }' "$file"
+}
+
+pid_alive() {
+  [[ -n "${1:-}" ]] || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
+pid_is_llama() {
+  local pid="$1"
+  pid_alive "$pid" || return 1
+  ps -p "$pid" -o command= | awk '/llama-server/ { found=1 } END { exit found ? 0 : 1 }'
+}
+
+# cwd of a core child (pnpm or node), not llama-server. Bash 3.2: no associative arrays.
+core_child_cwd() {
+  local app_pid="$1"
+  local queue="$app_pid"
+  local seen=" $app_pid "
+  while [[ -n "$queue" ]]; do
+    local current="${queue%% *}"
+    if [[ "$queue" == "$current" ]]; then
+      queue=""
+    else
+      queue="${queue#* }"
+    fi
+    local children child
+    children="$(pgrep -P "$current" 2>/dev/null || true)"
+    for child in $children; do
+      case "$seen" in
+        *" $child "*) continue ;;
+      esac
+      seen="$seen$child "
+      if [[ -z "$queue" ]]; then
+        queue="$child"
+      else
+        queue="$queue $child"
+      fi
+      local cmd cwd
+      cmd="$(ps -p "$child" -o command= 2>/dev/null || true)"
+      case "$cmd" in
+        *llama-server*) continue ;;
+      esac
+      case "$cmd" in
+        *pnpm*|*@cookie-agent/core*|*fake-core.ts*|*src/index.ts*)
+          cwd="$(lsof -a -p "$child" -d cwd -Fn 2>/dev/null | awk '/^n/ { sub(/^n/, ""); print; exit }' || true)"
+          if [[ -n "$cwd" ]]; then
+            printf '%s\n' "$cwd"
+            return 0
+          fi
+          ;;
+      esac
+    done
+  done
+  return 1
+}
+
+open_support_dir() {
+  printf '%s\n' "$HOME/Library/Application Support/com.johnkimec.cookie-agent"
 }
 
 # System Events names the process after the executable, CookieAgent,
@@ -472,16 +603,43 @@ end tell
 APPLESCRIPT
 }
 
+wait_for_menu() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+wait_for_runtime_up() {
+  local attempt
+  for attempt in $(seq 1 120); do
+    if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+      if python3 - <<'PY'
+import pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-menu.txt").read_text()
+if "fake-local" in text or "starting model" in text or "model offline" in text:
+    sys.exit(1)
+required = ["Ask Cookie…", "Local-only mode", "Quit Cookie", "🐾 Cookie · on-device · "]
+missing = [item for item in required if item not in text]
+if missing:
+    sys.exit(1)
+sys.exit(0)
+PY
+      then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 log "wait for menu bar"
-ready=""
-for _ in $(seq 1 30); do
-  if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
-    ready=1
-    break
-  fi
-  sleep 0.5
-done
-if [[ -z "$ready" ]]; then
+if ! wait_for_menu; then
   log "not-ok"
   log "menu bar did not appear"
   cat /tmp/cookie-drive-mac-menu.err || true
@@ -490,7 +648,19 @@ fi
 log "menu"
 cat /tmp/cookie-drive-mac-menu.txt
 
-python3 - <<'PY' || fail "menu strings"
+if [[ "$runtime" == "real" ]]; then
+  log "wait for runtime up"
+  if ! wait_for_runtime_up; then
+    log "not-ok"
+    log "runtime did not reach up within 120s"
+    cat /tmp/cookie-drive-mac-menu.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-menu.err 2>/dev/null || true
+    exit 1
+  fi
+  log "runtime up"
+  cat /tmp/cookie-drive-mac-menu.txt
+else
+  python3 - <<'PY' || fail "menu strings"
 import pathlib, sys
 text = pathlib.Path("/tmp/cookie-drive-mac-menu.txt").read_text()
 required = ["Ask Cookie…", "Local-only mode", "Quit Cookie", "🐾 Cookie · on-device · fake-local"]
@@ -500,13 +670,14 @@ if missing:
     sys.exit(1)
 print("menu strings ok")
 PY
+fi
 
 drive_popup=0
 drive_chat=0
-if [[ "$feature" == "hotkey-popup" || "$feature" == "chat" || "$feature" == "all" ]]; then
+if [[ "$feature" == "hotkey-popup" || "$feature" == "chat" || "$feature" == "all" || "$runtime" == "real" ]]; then
   drive_popup=1
 fi
-if [[ "$feature" == "chat" || "$feature" == "all" ]]; then
+if [[ "$feature" == "chat" || "$feature" == "all" || "$runtime" == "real" ]]; then
   drive_chat=1
 fi
 
@@ -533,14 +704,20 @@ if [[ "$drive_chat" == "1" ]]; then
   log "send chat"
   send_chat
   turn_line=""
-  for _ in $(seq 1 40); do
+  chat_tries=40
+  chat_sleep=0.25
+  if [[ "$runtime" == "real" ]]; then
+    chat_tries=120
+    chat_sleep=1
+  fi
+  for _ in $(seq 1 "$chat_tries"); do
     turn_line="$(cookie_turn_value || true)"
     case "$turn_line" in
       cookie.turn.cookie.*)
         break
         ;;
     esac
-    sleep 0.25
+    sleep "$chat_sleep"
   done
   if [[ "$turn_line" != cookie.turn.cookie.* ]]; then
     dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
@@ -550,6 +727,20 @@ if [[ "$drive_chat" == "1" ]]; then
   fi
   log "chat $turn_line"
   printf '%s\n' "$turn_line" > /tmp/cookie-drive-mac-chat.txt
+  python3 - "$turn_line" "$runtime" <<'PY' || fail "reply text"
+import sys
+line, runtime = sys.argv[1], sys.argv[2]
+fake = "I'm here. This reply is from the fake core, with no model loaded."
+stub = "Hello. This reply is from the local stub, on device."
+text = line.split("\t", 1)[1].strip() if "\t" in line else ""
+if not text or text == "cookie":
+    print("empty reply")
+    sys.exit(1)
+if runtime == "real" and (text == fake or text == stub or fake in text or stub in text):
+    print("canned reply")
+    sys.exit(1)
+print("reply ok")
+PY
   shot="/tmp/cookie-drive-mac-popup.png"
   screencapture -x "$shot"
   if [[ ! -s "$shot" ]]; then
@@ -561,9 +752,11 @@ fi
 if [[ -n "$evidence" ]]; then
   mkdir -p "$evidence"
   {
-    printf '%s\n' "drive-mac $feature"
+    printf '%s\n' "drive-mac $feature --runtime $runtime"
     printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
-    printf '%s\n' "COOKIE_LLAMA_PORT=$COOKIE_LLAMA_PORT"
+    printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+    printf '%s\n' "resolvedPort=${PORT}"
+    printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND:-}"
   } > "$evidence/command.txt"
   cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
   if [[ -f /tmp/cookie-drive-mac-ax.txt ]]; then
@@ -601,7 +794,52 @@ if [[ "$feature" == "menu-bar-icon" || "$feature" == "hotkey-popup" || "$feature
   log "option-click opened popup"
 fi
 
-log "quit via menu"
+relaunch_app() {
+  "$BIN" &
+  APP_PID=$!
+  if ! wait_for_menu; then
+    fail "menu bar did not return after relaunch"
+  fi
+  if [[ "$runtime" == "real" ]]; then
+    if ! wait_for_runtime_up; then
+      fail "runtime did not return after relaunch"
+    fi
+  fi
+}
+
+# kill -9 skips applicationShouldTerminate, so a server we launched is
+# orphaned until the next launch reaps it. Fake mode has no llama-server.
+orphan_reap_check() {
+  local old_pid count
+  old_pid="$(pid_file_pid || true)"
+  log "orphan-reap kill -9 ${APP_PID} pidfile=${old_pid:-none}"
+  kill -9 "$APP_PID" 2>/dev/null || true
+  wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+  sleep 0.5
+  relaunch_app
+  count="$(llama_server_count)"
+  log "orphan-reap llama-server count ${count}"
+  if [[ "$count" -gt 1 ]]; then
+    fail "orphan reap left ${count} llama-server processes: $(llama_server_pids | tr '\n' ' ')"
+  fi
+  if [[ "$runtime" == "fake" && "$count" != "0" ]]; then
+    fail "fake runtime has llama-server after relaunch"
+  fi
+  if [[ -n "$old_pid" ]] && pid_is_llama "$old_pid"; then
+    if [[ "$count" != "1" ]]; then
+      fail "old llama-server ${old_pid} still alive with ${count} servers"
+    fi
+    log "orphan-reap reused ${old_pid}"
+  else
+    log "orphan-reap old server gone"
+  fi
+}
+
+orphan_reap_check
+
+owned_before_quit="$(pid_file_pid || true)"
+log "quit via menu pid=${owned_before_quit:-none} port=${PORT}"
 osascript_run <<'APPLESCRIPT'
 tell application "System Events"
   if not (exists process "CookieAgent") then error "CookieAgent is not running"
@@ -619,6 +857,253 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
+
+quit_exited=0
+for _ in $(seq 1 60); do
+  if ! kill -0 "$APP_PID" 2>/dev/null; then
+    quit_exited=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$quit_exited" != "1" ]]; then
+  fail "app still running after Quit Cookie"
+fi
+wait "$APP_PID" 2>/dev/null || true
+APP_PID=""
+
+owned_pid="$(pid_file_pid || true)"
+if [[ -n "${owned_before_quit:-}" ]]; then
+  if pid_is_llama "$owned_before_quit"; then
+    fail "llama-server ${owned_before_quit} still alive after quit"
+  fi
+  if port_listening "$PORT"; then
+    fail "port ${PORT} still listening after quit"
+  fi
+  if [[ -n "$owned_pid" ]]; then
+    fail "pid file remains after quit (${owned_pid})"
+  fi
+  log "quit reaped ${owned_before_quit} port ${PORT} clear"
+else
+  if [[ "$PORT_BEFORE" == "0" ]]; then
+    if port_listening "$PORT"; then
+      fail "port ${PORT} is listening after quit"
+    fi
+  elif ! port_listening "$PORT"; then
+    fail "quit stopped a server this app did not launch on port ${PORT}"
+  fi
+  log "quit left port ${PORT} listener state unchanged"
+fi
+
+cookie_agent_pids() {
+  pgrep -x CookieAgent 2>/dev/null || true
+}
+
+# Quit can still be reaping when the next step starts. Bash 3.2: no arrays.
+wait_for_no_cookie_agent() {
+  local attempt
+  for attempt in $(seq 1 40); do
+    if [[ -z "$(cookie_agent_pids)" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+log_cookie_processes() {
+  log "ps pid ppid lstart command:"
+  ps -ax -o pid,ppid,lstart,command | awk 'NR==1 || ((/CookieAgent/ || /llama-server/) && $0 !~ /awk/)' || true
+}
+
+shell_log_bytes() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    printf '%s\n' "0"
+    return
+  fi
+  wc -c < "$file" | tr -d ' '
+}
+
+dump_shell_log_since() {
+  local file="$1" mark="$2"
+  log "shell log since byte ${mark}:"
+  if [[ ! -f "$file" ]]; then
+    log "(no $file)"
+    return
+  fi
+  tail -c +$((mark + 1)) "$file" || true
+}
+
+# Finder and `open` pass no COOKIE_* variables and a minimal PATH.
+# LaunchServices does not keep this shell's environment. env -i is the
+# same shape John gets from `open -n`.
+open_clean_check() {
+  if ! wait_for_no_cookie_agent; then
+    log_cookie_processes
+    fail "CookieAgent still running before open launch"
+  fi
+  local support port_before shell_log log_mark
+  support="$(open_support_dir)"
+  shell_log="$support/logs/cookie-shell.log"
+  log_mark="$(shell_log_bytes "$shell_log")"
+  port_before=0
+  if port_listening 8080; then
+    port_before=1
+  fi
+  local before
+  before="$(cookie_agent_pids)"
+  log "open -n clean env support=$support existing=${before:-none}"
+  env -i \
+    HOME="$HOME" \
+    USER="${USER:-$(id -un)}" \
+    LOGNAME="${USER:-$(id -un)}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    /usr/bin/open -n "$APP"
+  local attempt pid current fresh="" count=0
+  for attempt in $(seq 1 40); do
+    current="$(cookie_agent_pids)"
+    fresh=""
+    count=0
+    for pid in $current; do
+      case " $before " in
+        *" $pid "*) ;;
+        *)
+          fresh="$fresh $pid"
+          count=$((count + 1))
+          ;;
+      esac
+    done
+    if [[ "$count" -eq 1 ]]; then
+      break
+    fi
+    if [[ "$count" -gt 1 ]]; then
+      log_cookie_processes
+      fail "open started more than one CookieAgent:$fresh"
+    fi
+    fresh=""
+    sleep 0.25
+  done
+  if [[ "$count" -ne 1 ]]; then
+    log_cookie_processes
+    fail "open did not start CookieAgent"
+  fi
+  APP_PID="${fresh# }"
+  log "open pid=$APP_PID"
+  local ready=0
+  for attempt in $(seq 1 40); do
+    if [[ -f "$shell_log" ]] && tail -c +$((log_mark + 1)) "$shell_log" 2>/dev/null | grep -E "signals installed pid=${APP_PID}([^0-9]|$)" >/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "$ready" != "1" ]]; then
+    dump_shell_log_since "$shell_log" "$log_mark"
+    fail "signals installed line did not appear for pid $APP_PID"
+  fi
+  local recorded=""
+  if [[ -f "$support/logs/cookie-agent.pid" ]]; then
+    recorded="$(awk 'NF >= 1 { print $1; exit }' "$support/logs/cookie-agent.pid")"
+  fi
+  if [[ "$recorded" != "$APP_PID" ]]; then
+    fail "cookie-agent.pid is ${recorded:-missing}, open pid is $APP_PID"
+  fi
+  log "signals installed pid=$APP_PID"
+  local cwd="" menu_text=""
+  for attempt in $(seq 1 40); do
+    if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+      menu_text="$(cat /tmp/cookie-drive-mac-menu.txt || true)"
+      case "$menu_text" in
+        *"core not found"*|*"pnpm not found"*|*"core can't start"*)
+          fail "open launch menu: $menu_text"
+          ;;
+      esac
+    fi
+    cwd="$(core_child_cwd "$APP_PID" || true)"
+    if [[ -n "$cwd" && -f "$cwd/core/package.json" ]]; then
+      break
+    fi
+    cwd=""
+    sleep 0.5
+  done
+  if [[ -z "$cwd" ]]; then
+    fail "core did not start from a directory with core/package.json"
+  fi
+  local expected actual
+  expected="$(cd "$ROOT" && pwd -P)"
+  actual="$(cd "$cwd" && pwd -P)"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "core cwd $actual is not $expected"
+  fi
+  log "open core cwd=$actual"
+  if [[ "$runtime" == "real" ]]; then
+    if ! wait_for_runtime_up; then
+      fail "open launch runtime did not reach up"
+    fi
+    log "open runtime up"
+  fi
+  # read_menu leaves the status item in event-tracking mode if the closing
+  # click does not land. Escape returns the run loop to the default mode
+  # before SIGTERM. The app also accepts the hop in that tracking mode.
+  osascript_run -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 || true
+  sleep 0.3
+  local pidfile owned=""
+  pidfile="$support/logs/llama-server.pid"
+  if [[ -f "$pidfile" ]]; then
+    owned="$(awk 'NF >= 1 { print $1; exit }' "$pidfile")"
+  fi
+  local term_port="8080"
+  if [[ -f "$support/logs/llama-server.log" ]]; then
+    local parsed
+    parsed="$(awk 'match($0, /--port [0-9]+/) { print substr($0, RSTART+7, RLENGTH-7); exit }' "$support/logs/llama-server.log" || true)"
+    if [[ -n "$parsed" ]]; then
+      term_port="$parsed"
+    fi
+  fi
+  local signal_mark
+  signal_mark="$(shell_log_bytes "$shell_log")"
+  log_cookie_processes
+  log "SIGTERM target pid=$APP_PID pidfile=${owned:-none} port=$term_port"
+  kill -TERM "$APP_PID" || true
+  local exited=0
+  for attempt in $(seq 1 40); do
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      exited=1
+      break
+    fi
+    sleep 0.5
+  done
+  dump_shell_log_since "$shell_log" "$signal_mark"
+  if [[ "$exited" != "1" ]]; then
+    log_cookie_processes
+    fail "CookieAgent still running after SIGTERM"
+  fi
+  wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+  if [[ -n "$owned" ]]; then
+    if pid_is_llama "$owned"; then
+      fail "llama-server ${owned} still alive after SIGTERM"
+    fi
+    if port_listening "$term_port"; then
+      fail "port ${term_port} still listening after SIGTERM"
+    fi
+    log "SIGTERM reaped ${owned} port ${term_port} clear"
+  elif [[ "$port_before" == "0" ]]; then
+    if port_listening 8080; then
+      fail "port 8080 is listening after SIGTERM"
+    fi
+    log "SIGTERM left port 8080 clear"
+  else
+    if ! port_listening 8080; then
+      fail "SIGTERM stopped a server this app did not launch on port 8080"
+    fi
+    log "SIGTERM left an existing port 8080 listener"
+  fi
+}
+
+open_clean_check
 
 log "ok"
 log "Mac proof is pending until this transcript is saved under verify-evidence/ and the feature files are updated."

@@ -153,7 +153,9 @@ final class PopupController: NSObject, @unchecked Sendable {
     private func preferredHeight() -> CGFloat {
         let turns = model.conversation.turns
         let draftLines = min(5, max(1, model.conversation.draft.components(separatedBy: "\n").count))
-        let notice: CGFloat = model.conversation.refusalLine(runtime: model.runtime.state) == nil ? 0 : 20
+        let showsNotice = popupLoadingLine(runtime: model.runtime.state) != nil
+            || model.conversation.refusalLine(runtime: model.runtime.state) != nil
+        let notice: CGFloat = showsNotice ? 20 : 0
         let input = max(PopupLayout.collapsedHeight, 28 + CGFloat(draftLines) * 22 + notice)
         guard !turns.isEmpty else { return min(PopupLayout.maxHeight, input) }
         var lines = 0
@@ -288,7 +290,15 @@ struct PopupRoot: View {
                 )
                 .accessibilityLabel(CookieCopy.ask)
                 .frame(maxWidth: .infinity, minHeight: PopupLayout.mascot, maxHeight: 120)
-                if let notice = model.conversation.refusalLine(runtime: model.runtime.state) {
+                if let loading = popupLoadingLine(runtime: model.runtime.state) {
+                    IdentifiedText(
+                        text: loading,
+                        identifier: CookieAX.popupLoading,
+                        label: loading,
+                        font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                        textColor: .secondaryLabelColor
+                    )
+                } else if let notice = model.conversation.refusalLine(runtime: model.runtime.state) {
                     IdentifiedText(
                         text: notice,
                         identifier: CookieAX.popupRefusal,
@@ -298,7 +308,11 @@ struct PopupRoot: View {
                     )
                 }
             }
-            IdentifiedButton(title: "⏎", identifier: CookieAX.popupSend) {
+            IdentifiedButton(
+                title: "⏎",
+                identifier: CookieAX.popupSend,
+                enabled: sendEnabled(runtime: model.runtime.state)
+            ) {
                 model.submit()
             }
             .help(CookieCopy.ask)
