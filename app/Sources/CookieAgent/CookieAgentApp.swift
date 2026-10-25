@@ -26,6 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popup: PopupController?
     private var hotkey: HotkeyCenter?
     private var signalSources: [DispatchSourceSignal] = []
+    /// Not the main queue. `terminate` called from a main-queue block never
+    /// returns while `.terminateLater` is waiting, so that queue cannot drain.
+    private let signalQueue = DispatchQueue(label: "com.johnkimec.cookie-agent.signals")
 
     override init() {
         super.init()
@@ -34,12 +37,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// `pkill -TERM` must take the same path as Quit. Ignore the signal
     /// first, or the default action kills the process before the source runs.
+    /// The source hops to the main run loop, not `DispatchQueue.main`.
     private func installQuitSignals() {
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
             source.setEventHandler {
-                DispatchQueue.main.async {
+                TerminationHop.perform {
                     NSApp.terminate(nil)
                 }
             }

@@ -381,6 +381,55 @@ final class LaunchTests: XCTestCase {
     }
 }
 
+final class TerminationHopTests: XCTestCase {
+    func testReplyBackstopOutlastsReap() {
+        let reap =
+            TerminationHop.coreShutdownSeconds
+            + runtimeStopGraceSeconds
+            + TerminationHop.sigkillWaitSeconds
+        XCTAssertEqual(TerminationHop.replyBackstopSeconds, 15)
+        XCTAssertGreaterThan(TerminationHop.replyBackstopSeconds, reap)
+        XCTAssertEqual(TerminationHop.replyModes, [.common, .modalPanel])
+    }
+
+    /// A signal source calls this from a background queue. The block has to
+    /// run on the main run loop.
+    func testSignalHopRunsFromABackgroundQueue() {
+        let hopped = expectation(description: "main run loop")
+        DispatchQueue.global(qos: .userInitiated).async {
+            TerminationHop.perform {
+                hopped.fulfill()
+            }
+        }
+        wait(for: [hopped], timeout: 2)
+    }
+
+    /// `.terminateLater` spins `.modalPanel` inside the main-queue block that
+    /// called `terminate`. A reply on that queue does not run. A run-loop
+    /// block in `.modalPanel` does.
+    func testReplyRunsInModalLoopWhileMainQueueIsBlocked() {
+        let finished = expectation(description: "modal spin finished")
+        DispatchQueue.main.async {
+            var viaRunLoop = false
+            var viaMainQueue = false
+            TerminationHop.performDuringTerminate {
+                viaRunLoop = true
+            }
+            DispatchQueue.main.async {
+                viaMainQueue = true
+            }
+            let deadline = Date().addingTimeInterval(1)
+            while !viaRunLoop && Date() < deadline {
+                RunLoop.current.run(mode: .modalPanel, before: Date().addingTimeInterval(0.05))
+            }
+            XCTAssertTrue(viaRunLoop)
+            XCTAssertFalse(viaMainQueue)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 3)
+    }
+}
+
 final class RuntimeLaunchTests: XCTestCase {
     func testDefaultArgumentsAndStablePid() {
         let launch = RuntimeLaunch.resolve(

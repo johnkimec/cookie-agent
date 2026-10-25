@@ -136,14 +136,22 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     /// `applicationShouldTerminate` calls this and replies only after the
     /// owned server has exited. A second call (willTerminate) does not
     /// start another shutdown.
+    ///
+    /// The reply is scheduled on the main run loop in the modal-panel mode.
+    /// `DispatchQueue.main.async` does not run while `terminate` is still
+    /// inside the main-queue block that entered `.terminateLater`. Shutdown
+    /// itself is detached so it cannot resume on the main actor and wait
+    /// for that same queue.
     func prepareTermination() {
         if terminationStarted { return }
         terminationStarted = true
-        Task { [weak self] in
+        let reply = TerminationReply()
+        Task.detached { [weak self] in
             await self?.shutdownForExit()
-            DispatchQueue.main.async {
-                NSApp.reply(toApplicationShouldTerminate: true)
-            }
+            reply.send(reason: "stopped")
+        }
+        TerminationHop.performDuringTerminate(after: TerminationHop.replyBackstopSeconds) {
+            reply.send(reason: "backstop")
         }
     }
 
@@ -151,7 +159,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         if terminationStarted { return }
         terminationStarted = true
         let gate = ExitGate()
-        Task { [weak self] in
+        // Detached so this wait on the main thread cannot stall the task
+        // if the caller is the main actor.
+        Task.detached { [weak self] in
             await self?.shutdownForExit()
             gate.signal()
         }
@@ -356,6 +366,28 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     private func log(_ message: String) {
         logShell(message)
+    }
+}
+
+/// Replies to `.terminateLater` once. Both shutdown and the backstop call it.
+private final class TerminationReply: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent = false
+
+    func send(reason: String) {
+        guard mark() else { return }
+        logShell("termination reply \(reason)")
+        TerminationHop.performDuringTerminate {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+    }
+
+    private func mark() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if sent { return false }
+        sent = true
+        return true
     }
 }
 
