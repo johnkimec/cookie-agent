@@ -50,11 +50,11 @@ export function acceptIssue(check: AnswerCheck, entry: string): string | null {
     return "needs a digit or a word of 4 or more letters";
   }
   const question = normalizeMatchText(check.question ?? "");
-  if (question.includes(normalized)) {
+  if (contains(question, normalized)) {
     return "appears in the question";
   }
   for (const blocked of check.mustNotContain ?? []) {
-    if (normalizeMatchText(blocked).includes(normalized)) {
+    if (contains(normalizeMatchText(blocked), normalized)) {
       return "appears in mustNotContain";
     }
   }
@@ -63,5 +63,13 @@ export function acceptIssue(check: AnswerCheck, entry: string): string | null {
 
 function contains(haystack: string, needle: string): boolean {
   const normalized = normalizeMatchText(needle);
-  return normalized.length > 0 && haystack.includes(normalized);
+  if (normalized.length === 0) {
+    return false;
+  }
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`,
+    "u",
+  );
+  return pattern.test(haystack);
 }

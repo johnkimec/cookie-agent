@@ -54,6 +54,21 @@ describe("recall answer match", () => {
         "Switched to a box squat.",
       ),
     ).toBe(true);
+    expect(answerMatches({ expectedFact: "170 g" }, "It is 1170 g.")).toBe(
+      false,
+    );
+    expect(
+      answerMatches(
+        { expectedFact: "Priya", mustNotContain: ["170 g"] },
+        "Priya lifted 1170 g.",
+      ),
+    ).toBe(true);
+    expect(
+      answerMatches(
+        { expectedFact: "Priya", mustNotContain: ["170 g"] },
+        "Priya lifted 170 g.",
+      ),
+    ).toBe(false);
   });
 
   it("rejects an accept entry that is too weak or already in the question", () => {

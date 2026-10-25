@@ -10,12 +10,21 @@
 import { appendFileSync } from "node:fs";
 import { Socket } from "node:net";
 
-/** Stderr line the eval requires when `COOKIE_LOOPBACK_ONLY=1`. */
-export const LOOPBACK_GUARD_LINE = "cookie-core: loopback guard active";
+/** TEST-NET-1. The guard must refuse this host before it reports itself. */
+export const LOOPBACK_SELF_TEST_HOST = "192.0.2.1";
+
+/**
+ * Exact stderr line the eval requires.
+ * The nonce comes from `COOKIE_LOOPBACK_NONCE`, which the runner sets.
+ */
+export function loopbackGuardLine(nonce: string): string {
+  return `cookie-core: loopback guard active ${nonce}`;
+}
 
 type Connect = Socket["connect"];
 
 let original: Connect | null = null;
+let probing = false;
 
 export function installLoopbackGuard(
   env: NodeJS.ProcessEnv = process.env,
@@ -31,11 +40,38 @@ export function installLoopbackGuard(
   ): Socket {
     const host = connectHost(args);
     if (host !== null && !isLoopbackHost(host)) {
-      noteBlocked(host);
+      if (!probing) {
+        noteBlocked(host);
+      }
       throw new Error(`egress blocked: ${host}`);
     }
     return saved.apply(this, args) as Socket;
   } as Connect;
+  if (!selfTestRefused()) {
+    return;
+  }
+  const nonce = env.COOKIE_LOOPBACK_NONCE;
+  if (typeof nonce !== "string" || nonce === "" || /[\r\n]/.test(nonce)) {
+    return;
+  }
+  process.stderr.write(`${loopbackGuardLine(nonce)}\n`);
+}
+
+function selfTestRefused(): boolean {
+  probing = true;
+  try {
+    const socket = new Socket();
+    try {
+      socket.connect({ host: LOOPBACK_SELF_TEST_HOST, port: 9 });
+      socket.destroy();
+      return false;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      return message === `egress blocked: ${LOOPBACK_SELF_TEST_HOST}`;
+    }
+  } finally {
+    probing = false;
+  }
 }
 
 export function loopbackGuardActive(): boolean {

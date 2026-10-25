@@ -6,7 +6,7 @@
 
 import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
-import { installLoopbackGuard, LOOPBACK_GUARD_LINE } from "./loopback-guard.ts";
+import { installLoopbackGuard } from "./loopback-guard.ts";
 import { ChatLog } from "./memory/chat-log.ts";
 import { clockFromEnv } from "./memory/clock.ts";
 import { cachedProbe } from "./memory/embed-config.ts";
@@ -44,9 +44,6 @@ export function startStdioCore(
   env: NodeJS.ProcessEnv = process.env,
 ): AgentCore {
   installLoopbackGuard(env);
-  if (env.COOKIE_LOOPBACK_ONLY === "1") {
-    process.stderr.write(`${LOOPBACK_GUARD_LINE}\n`);
-  }
   let port: number;
   let thinking: boolean;
   let history: ChatLog;

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { loopbackGuardLine } from "../loopback-guard.ts";
 import { startLlamaStub } from "../verify-llama-stub.ts";
 import {
   attachEvalDataCleanup,
@@ -19,15 +20,17 @@ import {
   coreEvalEnv,
   evalExitCode,
   FAKE_RETRIEVAL_TOP,
+  forgottenProbeFor,
   REAL_PORTS_REQUIRED,
   resolveRealPorts,
   retrievalHit,
   runMemoryEval,
   scriptedAnswer,
+  stderrHasExactLine,
   storedTurnId,
   writeServerEvidence,
 } from "./runner.ts";
-import { loadTasks } from "./tasks.ts";
+import { FORGET_TASK_ID, loadTasks } from "./tasks.ts";
 
 const dirs: string[] = [];
 
@@ -83,8 +86,10 @@ describe("memory recall runner", () => {
       clockFile: "/tmp/clock",
       traceFile: "/tmp/trace",
       egressLog: "/tmp/egress",
+      loopbackNonce: "nonce-1",
     });
     expect(env.COOKIE_LOOPBACK_ONLY).toBe("1");
+    expect(env.COOKIE_LOOPBACK_NONCE).toBe("nonce-1");
     expect(env.COOKIE_REFLECT_IDLE_MS).toBe("0");
     expect(env.COOKIE_INDEX_BEFORE_DONE).toBe("1");
     expect(env.COOKIE_CLOCK_FILE).toBe("/tmp/clock");
@@ -97,6 +102,7 @@ describe("memory recall runner", () => {
       clockFile: "/tmp/clock",
       traceFile: "/tmp/trace",
       egressLog: "/tmp/egress",
+      loopbackNonce: "nonce-1",
       lexicalOnly: true,
     });
     expect(lexical.COOKIE_RRF_VECTOR).toBe("0");
@@ -330,6 +336,78 @@ describe("memory recall runner", () => {
     } finally {
       await stub.close();
     }
+  });
+
+  it("treats a tool-call reply with no text as an empty answer", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    function: {
+                      name: "memory.forget",
+                      arguments: "{}",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("tool-call server did not bind");
+    }
+    try {
+      const text = await completeAtTemperatureZero(address.port, {
+        messages: [{ role: "user", content: "forget it" }],
+      });
+      expect(text).toBe("");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
+  it("requires the loopback line as a full line with the nonce", () => {
+    const line = loopbackGuardLine("abc");
+    expect(stderrHasExactLine(`${line}\n`, line)).toBe(true);
+    expect(stderrHasExactLine(`noise\n${line}\nother\n`, line)).toBe(true);
+    expect(stderrHasExactLine(`prefix ${line}\n`, line)).toBe(false);
+    expect(stderrHasExactLine(`${line} extra\n`, line)).toBe(false);
+    expect(
+      stderrHasExactLine("cookie-core: loopback guard active\n", line),
+    ).toBe(false);
+  });
+
+  it("turns a forgotten-id throw into a task-06 miss", () => {
+    expect(
+      forgottenProbeFor(FORGET_TASK_ID, "/tmp/none", () => {
+        throw new Error("forgottenTurnIds exploded");
+      }),
+    ).toBeNull();
+    expect(
+      forgottenProbeFor("03-lab-partner", "/tmp/none", () => {
+        throw new Error("should not run");
+      }),
+    ).toBeUndefined();
   });
 
   it("removes a temp data dir on SIGTERM", () => {

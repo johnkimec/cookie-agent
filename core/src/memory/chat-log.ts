@@ -37,6 +37,7 @@ export class ChatLog implements ConversationHistory {
   private readonly retriever: { retrieve: Retrieve } | null;
   private readonly reflector: Reflector | null;
   private readonly tracePath: string | null;
+  private readonly reflectPending = new Set<string>();
   private indexTail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -188,7 +189,17 @@ export class ChatLog implements ConversationHistory {
       }
       const ended = this.store.session(id);
       if (ended !== null && ended.endedAt !== null) {
+        this.reflectPending.add(id);
+      }
+    }
+    for (const id of [...this.reflectPending]) {
+      try {
         await reflector.reflect(id);
+        this.reflectPending.delete(id);
+      } catch (error) {
+        const detail =
+          error instanceof Error ? error.message : "reflect failed";
+        process.stderr.write(`cookie-core: reflect failed: ${detail}\n`);
       }
     }
     return session;
