@@ -29,9 +29,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
     private var terminationStarted = false
-    /// True only while `ingestDelta` is on the stack. The session still applies
-    /// the chunk immediately so Stop sees the first delta and its message id.
-    private var holdUIPublish = false
+    /// `chat.delta` waits here. `chat.done` delivers this buffer before
+    /// `ingestDone`, because `applyDelta` no-ops once the reply is settled.
+    private var replyBuffer = ReplyDeltaBuffer()
     private var uiCoalescer = ReplyUICoalescer()
     private var flushItem: DispatchWorkItem?
 
@@ -251,7 +251,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func publishTurns() {
-        if holdUIPublish { return }
         publishTurnsNow()
     }
 
@@ -283,9 +282,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                     self.turns.noteRuntime(status.state)
                 }
             case .delta(let delta):
-                self.holdUIPublish = true
-                self.turns.ingestDelta(delta)
-                self.holdUIPublish = false
+                self.replyBuffer.append(delta)
                 if self.uiCoalescer.noteDelta() {
                     self.scheduleReplyFlush()
                 }
@@ -293,7 +290,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self.flushItem?.cancel()
                 self.flushItem = nil
                 self.uiCoalescer.noteDone()
-                self.holdUIPublish = false
+                self.deliverBufferedDeltas()
                 self.turns.ingestDone(done)
                 let accumulated = ReplyStream.cookieText(in: self.conversation)
                 self.log(ReplyStream.doneLog(messageId: done.messageId, accumulated: accumulated))
@@ -303,12 +300,18 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
+    private func deliverBufferedDeltas() {
+        for delta in replyBuffer.takePending() {
+            turns.ingestDelta(delta)
+        }
+    }
+
     private func scheduleReplyFlush() {
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.flushItem = nil
             guard self.uiCoalescer.noteFlush() else { return }
-            self.publishTurnsNow()
+            self.deliverBufferedDeltas()
         }
         flushItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + ReplyStream.flushInterval, execute: item)

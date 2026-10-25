@@ -58,9 +58,38 @@ public enum ReplyStream {
     }
 }
 
-/// Decides when a burst of `chat.delta` should publish to SwiftUI.
-/// The session still applies every delta immediately, so Stop sees the first
-/// chunk and its message id. This only coalesces the view update.
+/// Holds `chat.delta` until a flush or `chat.done`.
+/// `finish` applies the buffer and then `chat.done`. Applying `chat.done`
+/// first drops the tail, because `applyDelta` no-ops once the reply is settled.
+public struct ReplyDeltaBuffer: Equatable, Sendable {
+    public private(set) var pending: [ChatDeltaParams] = []
+
+    public init() {}
+
+    public mutating func append(_ delta: ChatDeltaParams) {
+        pending.append(delta)
+    }
+
+    public mutating func takePending() -> [ChatDeltaParams] {
+        let batch = pending
+        pending = []
+        return batch
+    }
+
+    @discardableResult
+    public mutating func finish(
+        _ done: ChatDoneParams,
+        conversation: inout PopupConversation
+    ) -> String {
+        let text = ReplyStream.finish(pending: pending, done: done, conversation: &conversation)
+        pending = []
+        return text
+    }
+}
+
+/// Decides when a burst of `chat.delta` should reach the session and SwiftUI.
+/// The shell keeps those deltas in `ReplyDeltaBuffer` and delivers the whole
+/// buffer before `chat.done`.
 public struct ReplyUICoalescer: Equatable, Sendable {
     public private(set) var dirty = false
     public private(set) var flushPending = false

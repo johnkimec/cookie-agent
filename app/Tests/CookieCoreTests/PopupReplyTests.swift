@@ -58,6 +58,37 @@ final class PopupReplyTests: XCTestCase {
         XCTAssertEqual(ReplyStream.flushInterval, 1.0 / 30, accuracy: 0.000_001)
     }
 
+    /// Two deltas stay buffered. `chat.done` must apply both before it settles.
+    func testDeltaDeltaDoneFlushesTheLastBufferedChunk() throws {
+        var conversation = PopupConversation()
+        conversation.draft = "who is einstein"
+        XCTAssertEqual(conversation.prepareSend(runtime: .up), .send(text: "who is einstein"))
+        var buffer = ReplyDeltaBuffer()
+        let first = ChatDeltaParams(
+            conversationId: "conv-1",
+            messageId: "msg-1",
+            index: 0,
+            text: "Einstein is best known for"
+        )
+        let second = ChatDeltaParams(
+            conversationId: "conv-1",
+            messageId: "msg-1",
+            index: 1,
+            text: " the theory of relativity."
+        )
+        buffer.append(first)
+        buffer.append(second)
+        XCTAssertEqual(buffer.pending.map(\.text), [first.text, second.text])
+        XCTAssertEqual(ReplyStream.cookieText(in: conversation), "")
+
+        let full = buffer.finish(stopDone(messageId: "msg-1"), conversation: &conversation)
+        XCTAssertEqual(full, "Einstein is best known for the theory of relativity.")
+        XCTAssertTrue(buffer.pending.isEmpty)
+        XCTAssertFalse(conversation.replyInFlight)
+        XCTAssertEqual(ReplyStream.cookieText(in: conversation), full)
+        XCTAssertEqual(conversation.turns.filter { $0.role == .cookie }.count, 1)
+    }
+
     func testAckThenSameIdAppendsAndOtherIdIsIgnored() {
         var conversation = PopupConversation()
         conversation.draft = "hi"
