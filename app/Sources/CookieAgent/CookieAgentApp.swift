@@ -27,12 +27,17 @@ struct CookieApp: App {
 /// is not delivered in the window where it would be ignored.
 enum QuitSignals {
     private static let queue = DispatchQueue(label: "com.johnkimec.cookie-agent.signals")
-    private static var sources: [DispatchSourceSignal] = []
-    private static var installed = false
+    /// A class, not a `static var`: Swift 6 rejects nonisolated global
+    /// mutable state. The instance is what keeps the sources alive.
+    private final class Holder: @unchecked Sendable {
+        var sources: [DispatchSourceSignal] = []
+        var installed = false
+    }
+    private static let holder = Holder()
 
     static func install() {
-        if installed { return }
-        installed = true
+        if holder.installed { return }
+        holder.installed = true
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
@@ -42,7 +47,7 @@ enum QuitSignals {
                 }
             }
             source.resume()
-            sources.append(source)
+            holder.sources.append(source)
         }
         let pid = ProcessInfo.processInfo.processIdentifier
         writeShellPid(pid)
