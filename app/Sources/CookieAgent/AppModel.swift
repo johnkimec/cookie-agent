@@ -34,6 +34,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var replyBuffer = ReplyDeltaBuffer()
     private var uiCoalescer = ReplyUICoalescer()
     private var flushItem: DispatchWorkItem?
+    /// Resolved in `start` from `COOKIE_DATA_DIR` or the product default.
+    /// Tests that construct this model can replace it before any log line.
+    private var shellEnvironment = ProcessInfo.processInfo.environment
 
     var menuGlyphState: MenuGlyph {
         menuGlyph(
@@ -94,6 +97,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             plistRepoRoot: plistRoot,
             bundleURL: Bundle.main.bundleURL
         )
+        shellEnvironment = launch.environment
         do {
             try launch.prepareDataDirectory()
         } catch {
@@ -159,9 +163,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             }
             if let embed = servers.embed {
                 let embedEvents = embed.events
+                let environment = launch.environment
                 embedEventsTask = Task {
                     for await status in embedEvents {
-                        logShell("embed runtime \(status.state.rawValue)")
+                        logShell("embed runtime \(status.state.rawValue)", environment: environment)
                     }
                 }
             }
@@ -192,7 +197,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func prepareTermination() {
         if terminationStarted { return }
         terminationStarted = true
-        let reply = TerminationReply()
+        let reply = TerminationReply(environment: shellEnvironment)
         Task.detached { [weak self] in
             await self?.shutdownForExit()
             reply.send(reason: "stopped")
@@ -413,18 +418,23 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func log(_ message: String) {
-        logShell(message)
+        logShell(message, environment: shellEnvironment)
     }
 }
 
 /// Replies to `.terminateLater` once. Both shutdown and the backstop call it.
 private final class TerminationReply: @unchecked Sendable {
     private let lock = NSLock()
+    private let environment: [String: String]
     private var sent = false
+
+    init(environment: [String: String]) {
+        self.environment = environment
+    }
 
     func send(reason: String) {
         guard mark() else { return }
-        logShell("termination reply \(reason)")
+        logShell("termination reply \(reason)", environment: environment)
         TerminationHop.performDuringTerminate {
             NSApp.reply(toApplicationShouldTerminate: true)
         }

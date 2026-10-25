@@ -494,9 +494,9 @@ struct CookiePlaceholder: View {
             let earsRaised = pose == .listening
             let earY: CGFloat = earsRaised ? size.height * 0.42 : size.height * 0.12
             let ear = CGSize(width: size.width * 0.22, height: size.height * 0.42)
-            var left = Path(ellipseIn: CGRect(x: size.width * 0.08, y: earY, width: ear.width, height: ear.height))
-            var right = Path(ellipseIn: CGRect(x: size.width * 0.70, y: earY, width: ear.width, height: ear.height))
-            var head = Path(ellipseIn: rect.insetBy(dx: size.width * 0.18, dy: size.height * 0.16))
+            let left = Path(ellipseIn: CGRect(x: size.width * 0.08, y: earY, width: ear.width, height: ear.height))
+            let right = Path(ellipseIn: CGRect(x: size.width * 0.70, y: earY, width: ear.width, height: ear.height))
+            let head = Path(ellipseIn: rect.insetBy(dx: size.width * 0.18, dy: size.height * 0.16))
             context.fill(left, with: .color(fur))
             context.fill(right, with: .color(fur))
             context.fill(head, with: .color(fur))
