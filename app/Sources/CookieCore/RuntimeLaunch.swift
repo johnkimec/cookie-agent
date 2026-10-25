@@ -212,9 +212,73 @@ public func interpretHealth(status: Int, body: Data) -> RuntimeProbe {
     return .up
 }
 
-public func logShell(_ message: String) {
+public func logShell(
+    _ message: String,
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+) {
     let line = "cookie-shell: \(message)\n"
     FileHandle.standardError.write(Data(line.utf8))
+    ShellLogStore.write(
+        Data(line.utf8),
+        name: "cookie-shell.log",
+        append: true,
+        environment: environment,
+        homeDirectory: homeDirectory
+    )
+}
+
+/// `<dataDir>/logs/cookie-agent.pid`. `open` does not leave the pid on stdout.
+public func writeShellPid(
+    _ pid: Int32,
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+) {
+    ShellLogStore.write(
+        Data("\(pid)\n".utf8),
+        name: "cookie-agent.pid",
+        append: false,
+        environment: environment,
+        homeDirectory: homeDirectory
+    )
+}
+
+/// Stderr from an `open` launch is discarded. The same lines are appended
+/// under the data directory so a harness can read them.
+private enum ShellLogStore {
+    private static let lock = NSLock()
+
+    static func write(
+        _ data: Data,
+        name: String,
+        append: Bool,
+        environment: [String: String],
+        homeDirectory: URL
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        let root: URL
+        if let raw = environment["COOKIE_DATA_DIR"], !raw.isEmpty {
+            root = URL(fileURLWithPath: raw, isDirectory: true)
+        } else {
+            root = CoreLaunch.defaultDataDirectory(home: homeDirectory)
+        }
+        let dir = root.appendingPathComponent("logs", isDirectory: true)
+        let file = dir.appendingPathComponent(name)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if append, FileManager.default.fileExists(atPath: file.path) {
+                let handle = try FileHandle(forWritingTo: file)
+                defer { try? handle.close() }
+                _ = handle.seekToEndOfFile()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: file, options: .atomic)
+            }
+        } catch {
+            return
+        }
+    }
 }
 
 /// How long Quit waits after SIGTERM before SIGKILL.

@@ -895,20 +895,65 @@ else
   log "quit left port ${PORT} listener state unchanged"
 fi
 
+cookie_agent_pids() {
+  pgrep -x CookieAgent 2>/dev/null || true
+}
+
+# Quit can still be reaping when the next step starts. Bash 3.2: no arrays.
+wait_for_no_cookie_agent() {
+  local attempt
+  for attempt in $(seq 1 40); do
+    if [[ -z "$(cookie_agent_pids)" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+log_cookie_processes() {
+  log "ps pid ppid lstart command:"
+  ps -ax -o pid,ppid,lstart,command | awk 'NR==1 || ((/CookieAgent/ || /llama-server/) && $0 !~ /awk/)' || true
+}
+
+shell_log_bytes() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    printf '%s\n' "0"
+    return
+  fi
+  wc -c < "$file" | tr -d ' '
+}
+
+dump_shell_log_since() {
+  local file="$1" mark="$2"
+  log "shell log since byte ${mark}:"
+  if [[ ! -f "$file" ]]; then
+    log "(no $file)"
+    return
+  fi
+  tail -c +$((mark + 1)) "$file" || true
+}
+
 # Finder and `open` pass no COOKIE_* variables and a minimal PATH.
 # LaunchServices does not keep this shell's environment. env -i is the
 # same shape John gets from `open -n`.
 open_clean_check() {
-  if pgrep -x CookieAgent >/dev/null 2>&1; then
+  if ! wait_for_no_cookie_agent; then
+    log_cookie_processes
     fail "CookieAgent still running before open launch"
   fi
-  local support port_before
+  local support port_before shell_log log_mark
   support="$(open_support_dir)"
+  shell_log="$support/logs/cookie-shell.log"
+  log_mark="$(shell_log_bytes "$shell_log")"
   port_before=0
   if port_listening 8080; then
     port_before=1
   fi
-  log "open -n clean env support=$support"
+  local before
+  before="$(cookie_agent_pids)"
+  log "open -n clean env support=$support existing=${before:-none}"
   env -i \
     HOME="$HOME" \
     USER="${USER:-$(id -un)}" \
@@ -916,19 +961,56 @@ open_clean_check() {
     TMPDIR="${TMPDIR:-/tmp}" \
     PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
     /usr/bin/open -n "$APP"
-  local found="" attempt
+  local attempt pid current fresh="" count=0
   for attempt in $(seq 1 40); do
-    found="$(pgrep -x CookieAgent 2>/dev/null | head -n 1 || true)"
-    if [[ -n "$found" ]]; then
+    current="$(cookie_agent_pids)"
+    fresh=""
+    count=0
+    for pid in $current; do
+      case " $before " in
+        *" $pid "*) ;;
+        *)
+          fresh="$fresh $pid"
+          count=$((count + 1))
+          ;;
+      esac
+    done
+    if [[ "$count" -eq 1 ]]; then
+      break
+    fi
+    if [[ "$count" -gt 1 ]]; then
+      log_cookie_processes
+      fail "open started more than one CookieAgent:$fresh"
+    fi
+    fresh=""
+    sleep 0.25
+  done
+  if [[ "$count" -ne 1 ]]; then
+    log_cookie_processes
+    fail "open did not start CookieAgent"
+  fi
+  APP_PID="${fresh# }"
+  log "open pid=$APP_PID"
+  local ready=0
+  for attempt in $(seq 1 40); do
+    if [[ -f "$shell_log" ]] && tail -c +$((log_mark + 1)) "$shell_log" 2>/dev/null | grep -E "signals installed pid=${APP_PID}([^0-9]|$)" >/dev/null; then
+      ready=1
       break
     fi
     sleep 0.25
   done
-  if [[ -z "$found" ]]; then
-    fail "open did not start CookieAgent"
+  if [[ "$ready" != "1" ]]; then
+    dump_shell_log_since "$shell_log" "$log_mark"
+    fail "signals installed line did not appear for pid $APP_PID"
   fi
-  APP_PID="$found"
-  log "open pid=$APP_PID"
+  local recorded=""
+  if [[ -f "$support/logs/cookie-agent.pid" ]]; then
+    recorded="$(awk 'NF >= 1 { print $1; exit }' "$support/logs/cookie-agent.pid")"
+  fi
+  if [[ "$recorded" != "$APP_PID" ]]; then
+    fail "cookie-agent.pid is ${recorded:-missing}, open pid is $APP_PID"
+  fi
+  log "signals installed pid=$APP_PID"
   local cwd="" menu_text=""
   for attempt in $(seq 1 40); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
@@ -962,6 +1044,11 @@ open_clean_check() {
     fi
     log "open runtime up"
   fi
+  # read_menu leaves the status item in event-tracking mode if the closing
+  # click does not land. Escape returns the run loop to the default mode
+  # before SIGTERM. The app also accepts the hop in that tracking mode.
+  osascript_run -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 || true
+  sleep 0.3
   local pidfile owned=""
   pidfile="$support/logs/llama-server.pid"
   if [[ -f "$pidfile" ]]; then
@@ -975,8 +1062,11 @@ open_clean_check() {
       term_port="$parsed"
     fi
   fi
-  log "pkill -TERM CookieAgent pidfile=${owned:-none} port=$term_port"
-  pkill -TERM CookieAgent || true
+  local signal_mark
+  signal_mark="$(shell_log_bytes "$shell_log")"
+  log_cookie_processes
+  log "SIGTERM target pid=$APP_PID pidfile=${owned:-none} port=$term_port"
+  kill -TERM "$APP_PID" || true
   local exited=0
   for attempt in $(seq 1 40); do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
@@ -985,7 +1075,9 @@ open_clean_check() {
     fi
     sleep 0.5
   done
+  dump_shell_log_since "$shell_log" "$signal_mark"
   if [[ "$exited" != "1" ]]; then
+    log_cookie_processes
     fail "CookieAgent still running after SIGTERM"
   fi
   wait "$APP_PID" 2>/dev/null || true

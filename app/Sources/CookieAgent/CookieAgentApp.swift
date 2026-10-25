@@ -8,6 +8,7 @@ struct CookieApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
+        QuitSignals.install()
         NSApplication.shared.setActivationPolicy(.accessory)
     }
 
@@ -21,35 +22,46 @@ struct CookieApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    let model = AppModel()
-    private var popup: PopupController?
-    private var hotkey: HotkeyCenter?
-    private var signalSources: [DispatchSourceSignal] = []
-    /// Not the main queue. `terminate` called from a main-queue block never
-    /// returns while `.terminateLater` is waiting, so that queue cannot drain.
-    private let signalQueue = DispatchQueue(label: "com.johnkimec.cookie-agent.signals")
+/// Retains the signal sources for the process lifetime. Installed from
+/// `CookieApp.init`, before the delegate exists, so a SIGTERM during launch
+/// is not delivered in the window where it would be ignored.
+enum QuitSignals {
+    private static let queue = DispatchQueue(label: "com.johnkimec.cookie-agent.signals")
+    private static var sources: [DispatchSourceSignal] = []
+    private static var installed = false
 
-    override init() {
-        super.init()
-        installQuitSignals()
-    }
-
-    /// `pkill -TERM` must take the same path as Quit. Ignore the signal
-    /// first, or the default action kills the process before the source runs.
-    /// The source hops to the main run loop, not `DispatchQueue.main`.
-    private func installQuitSignals() {
+    static func install() {
+        if installed { return }
+        installed = true
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
             source.setEventHandler {
                 TerminationHop.perform {
                     NSApp.terminate(nil)
                 }
             }
             source.resume()
-            signalSources.append(source)
+            sources.append(source)
         }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        writeShellPid(pid)
+        logShell("signals installed pid=\(pid)")
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let model = AppModel()
+    private var popup: PopupController?
+    private var hotkey: HotkeyCenter?
+
+    override init() {
+        super.init()
+        QuitSignals.install()
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        QuitSignals.install()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

@@ -11,6 +11,14 @@ public enum TerminationHop {
     /// `NSModalPanelRunLoopMode`. AppKit exposes this as
     /// `RunLoop.Mode.modalPanel`; Foundation does not.
     public static let modalPanel = RunLoop.Mode(rawValue: "NSModalPanelRunLoopMode")
+    /// `NSEventTrackingRunLoopMode`. A status-item menu runs in this mode.
+    /// AppKit exposes it as `RunLoop.Mode.eventTracking`.
+    public static let eventTracking = RunLoop.Mode(rawValue: "NSEventTrackingRunLoopMode")
+
+    /// `RunLoop.perform` with no modes waits for the default mode only.
+    /// drive-mac's menu read leaves the app in event-tracking mode, so a
+    /// SIGTERM hop queued for the default mode never calls `terminate`.
+    public static let signalModes: [RunLoop.Mode] = [.default, eventTracking, modalPanel]
 
     /// Modes `NSApplication` uses while `.terminateLater` is pending.
     /// `.common` includes the modal-panel mode; listing both matches the
@@ -25,9 +33,11 @@ public enum TerminationHop {
         coreShutdownSeconds + runtimeStopGraceSeconds + sigkillWaitSeconds + 3.0
 
     /// Enter `NSApp.terminate` from the main run loop, not from a main-queue
-    /// block. A signal source calls this from a background queue.
+    /// block. A signal source calls this from a background queue. The block
+    /// is registered for the default, event-tracking, and modal-panel modes
+    /// so an open status menu cannot swallow it.
     public static func perform(_ body: @escaping @Sendable () -> Void) {
-        RunLoop.main.perform(body)
+        RunLoop.main.perform(inModes: signalModes, block: body)
         CFRunLoopWakeUp(RunLoop.main.getCFRunLoop())
     }
 

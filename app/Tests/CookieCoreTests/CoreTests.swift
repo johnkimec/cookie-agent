@@ -390,6 +390,34 @@ final class TerminationHopTests: XCTestCase {
         XCTAssertEqual(TerminationHop.replyBackstopSeconds, 15)
         XCTAssertGreaterThan(TerminationHop.replyBackstopSeconds, reap)
         XCTAssertEqual(TerminationHop.replyModes, [.common, TerminationHop.modalPanel])
+        XCTAssertEqual(
+            TerminationHop.signalModes,
+            [.default, TerminationHop.eventTracking, TerminationHop.modalPanel]
+        )
+    }
+
+    func testShellLogAndPidFileFollowTheDataDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-shell-log-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        logShell(
+            "signals installed pid=42",
+            environment: ["COOKIE_DATA_DIR": root.appendingPathComponent("data").path],
+            homeDirectory: home
+        )
+        writeShellPid(42, environment: ["COOKIE_DATA_DIR": root.appendingPathComponent("data").path], homeDirectory: home)
+        let log = root.appendingPathComponent("data/logs/cookie-shell.log")
+        let pid = root.appendingPathComponent("data/logs/cookie-agent.pid")
+        let text = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(text.contains("cookie-shell: signals installed pid=42"))
+        XCTAssertEqual(try String(contentsOf: pid, encoding: .utf8), "42\n")
+
+        logShell("signals installed pid=7", environment: [:], homeDirectory: home)
+        let fallback = home
+            .appendingPathComponent("Library/Application Support/com.johnkimec.cookie-agent/logs/cookie-shell.log")
+        let fallbackText = try String(contentsOf: fallback, encoding: .utf8)
+        XCTAssertTrue(fallbackText.contains("cookie-shell: signals installed pid=7"))
     }
 
     /// A signal source calls this from a background queue. The block has to
