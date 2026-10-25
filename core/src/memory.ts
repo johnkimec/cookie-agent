@@ -20,7 +20,11 @@ export interface ChatTurnCommit {
  * The system prompt is not stored; the provider adds it on each call.
  */
 export interface ConversationHistory {
-  messagesFor(conversationId: string, userText: string): ModelMessage[];
+  messagesFor(
+    conversationId: string,
+    userText: string,
+    signal?: AbortSignal,
+  ): ModelMessage[] | Promise<ModelMessage[]>;
   commit(turn: ChatTurnCommit): void;
   close(): void;
 }

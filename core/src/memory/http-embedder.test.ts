@@ -4,12 +4,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resolveEmbedder } from "./embed-config.ts";
 import { FakeEmbedder } from "./embedder.ts";
 import {
+  DEFAULT_EMBED_TIMEOUT_MS,
+  DEFAULT_QUERY_EMBED_TIMEOUT_MS,
   DOCUMENT_PREFIX,
   HttpEmbedder,
   l2Norm,
   prefixDocument,
   QUERY_PREFIX,
   readEmbedPort,
+  readEmbedTimeoutMs,
+  readQueryEmbedTimeoutMs,
 } from "./http-embedder.ts";
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
 
@@ -39,6 +43,12 @@ describe("embed port", () => {
     expect(() => readEmbedPort({ COOKIE_EMBED_PORT: "nope" })).toThrow(
       /COOKIE_EMBED_PORT/,
     );
+    expect(readQueryEmbedTimeoutMs({})).toBe(DEFAULT_QUERY_EMBED_TIMEOUT_MS);
+    expect(readQueryEmbedTimeoutMs({ COOKIE_EMBED_TIMEOUT_MS: "250" })).toBe(
+      250,
+    );
+    expect(readEmbedTimeoutMs({})).toBe(DEFAULT_EMBED_TIMEOUT_MS);
+    expect(DEFAULT_QUERY_EMBED_TIMEOUT_MS).toBe(400);
   });
 });
 

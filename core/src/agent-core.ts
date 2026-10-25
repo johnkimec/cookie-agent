@@ -542,13 +542,26 @@ export class AgentCore {
 
   private async runStream(flight: Flight): Promise<void> {
     let stream: ModelStream;
+    let messages: Awaited<ReturnType<ConversationHistory["messagesFor"]>>;
+    try {
+      messages = await this.history.messagesFor(
+        flight.conversationId,
+        flight.userText,
+        flight.abort.signal,
+      );
+    } catch (error) {
+      this.failStream(flight, error);
+      return;
+    }
+    // Cancel during retrieval already emitted chat.done. Do not start
+    // the user-facing stream after that.
+    if (flight.cancelled || this.inflight !== flight) {
+      return;
+    }
     try {
       stream = this.provider.streamChat({
         system: SYSTEM_PROMPT,
-        messages: this.history.messagesFor(
-          flight.conversationId,
-          flight.userText,
-        ),
+        messages,
         abortSignal: flight.abort.signal,
       });
     } catch (error) {
