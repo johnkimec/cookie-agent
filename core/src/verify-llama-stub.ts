@@ -33,6 +33,12 @@ export interface StubChatRequest {
   aborted: boolean;
 }
 
+/** One scripted completion. `hold` waits until the client aborts. */
+export type StubScriptTurn =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; name: string; arguments: Record<string, unknown> }
+  | { kind: "hold" };
+
 export interface LlamaStubOptions {
   /**
    * When set, each completion is one chunk. If an earlier message contains
@@ -40,6 +46,14 @@ export interface LlamaStubOptions {
    * Otherwise the chunk is `remembered`.
    */
   recallWord?: string;
+  /**
+   * When set, this chooses each completion instead of `recallWord`.
+   * `tool` is one function call (`finish_reason` `tool_calls`).
+   * `hold` writes the headers and waits until the client aborts.
+   */
+  script?: (
+    record: StubChatRequest,
+  ) => StubScriptTurn | Promise<StubScriptTurn>;
 }
 
 export interface LlamaStub {
@@ -208,7 +222,7 @@ async function handle(
         record.aborted = true;
       }
     });
-    await writeChat(response, record, control, options);
+    await writeChat(request, response, record, control, options);
     return;
   }
   response.writeHead(404, { "content-type": "text/plain" });
@@ -229,6 +243,7 @@ function readBody(request: IncomingMessage): Promise<string> {
 }
 
 async function writeChat(
+  request: IncomingMessage,
   response: ServerResponse,
   record: StubChatRequest,
   control: StubControl,
@@ -240,6 +255,10 @@ async function writeChat(
     connection: "keep-alive",
   });
   response.socket?.setNoDelay(true);
+  if (options.script !== undefined) {
+    await writeScripted(request, response, record, options.script);
+    return;
+  }
   const recall = options.recallWord;
   const chunks =
     recall === undefined
@@ -259,7 +278,7 @@ async function writeChat(
     const text = chunks[index] ?? "";
     response.write(`data: ${JSON.stringify(contentChunk(text))}\n\n`);
     if (control.holdAfterFirst && index === 0) {
-      await waitUntilClosed(response);
+      await waitUntilClosed(response, request);
       return;
     }
   }
@@ -298,15 +317,93 @@ function usageFor(
   return { input: 8 + count * 6, output: Math.max(1, words) };
 }
 
-function waitUntilClosed(response: ServerResponse): Promise<void> {
-  if (response.destroyed || response.writableEnded) {
+function waitUntilClosed(
+  response: ServerResponse,
+  request?: IncomingMessage,
+): Promise<void> {
+  // `request` "close" fires when the body has been read. That is not an abort.
+  if (
+    response.destroyed ||
+    response.writableEnded ||
+    request?.aborted === true
+  ) {
     return Promise.resolve();
   }
   return new Promise((resolve) => {
-    response.on("close", () => {
+    const done = (): void => {
+      response.off("close", done);
+      request?.off("aborted", done);
       resolve();
-    });
+    };
+    response.on("close", done);
+    request?.on("aborted", done);
   });
+}
+
+async function writeScripted(
+  request: IncomingMessage,
+  response: ServerResponse,
+  record: StubChatRequest,
+  script: NonNullable<LlamaStubOptions["script"]>,
+): Promise<void> {
+  const turn = await script(record);
+  if (response.writableEnded || record.aborted) {
+    if (!response.writableEnded) {
+      response.end();
+    }
+    return;
+  }
+  if (turn.kind === "hold") {
+    await waitUntilClosed(response, request);
+    if (request.aborted === true) {
+      record.aborted = true;
+    }
+    if (!response.writableEnded) {
+      response.end();
+    }
+    return;
+  }
+  if (turn.kind === "tool") {
+    const args = JSON.stringify(turn.arguments);
+    response.write(`data: ${JSON.stringify(toolChunk(turn.name, args))}\n\n`);
+    response.write(
+      `data: ${JSON.stringify(stopChunk(STUB_INPUT_TOKENS, STUB_OUTPUT_TOKENS, "tool_calls"))}\n\n`,
+    );
+    response.write("data: [DONE]\n\n");
+    response.end();
+    return;
+  }
+  response.write(`data: ${JSON.stringify(contentChunk(turn.text))}\n\n`);
+  const usage = usageFor(record.messages, turn.text, false);
+  response.write(
+    `data: ${JSON.stringify(stopChunk(usage.input, usage.output))}\n\n`,
+  );
+  response.write("data: [DONE]\n\n");
+  response.end();
+}
+
+function toolChunk(name: string, args: string): unknown {
+  return {
+    id: "chatcmpl-cookie",
+    object: "chat.completion.chunk",
+    created: 0,
+    model: "Qwen3.6-35B-A3B",
+    choices: [
+      {
+        index: 0,
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call-cookie",
+              function: { name, arguments: args },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+  };
 }
 
 function pauseOrClose(response: ServerResponse, ms: number): Promise<boolean> {
@@ -373,7 +470,11 @@ function contentChunk(text: string): unknown {
   };
 }
 
-function stopChunk(inputTokens: number, outputTokens: number): unknown {
+function stopChunk(
+  inputTokens: number,
+  outputTokens: number,
+  finishReason = "stop",
+): unknown {
   return {
     id: "chatcmpl-cookie",
     object: "chat.completion.chunk",
@@ -383,7 +484,7 @@ function stopChunk(inputTokens: number, outputTokens: number): unknown {
       {
         index: 0,
         delta: {},
-        finish_reason: "stop",
+        finish_reason: finishReason,
       },
     ],
     usage: {
