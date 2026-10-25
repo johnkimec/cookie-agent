@@ -35,5 +35,13 @@ export interface ModelProvider {
     system: string;
     messages: ModelMessage[];
     abortSignal: AbortSignal;
+    /** Rerank asks for a short JSON object. Chat leaves this unset. */
+    maxOutputTokens?: number;
+    responseFormat?: {
+      type: "json";
+      name: string;
+      description?: string;
+      schema: Record<string, unknown>;
+    };
   }): ModelStream;
 }

@@ -13,6 +13,31 @@ export interface ResolveEmbedderOptions {
 }
 
 /**
+ * Remember a probe for `ttlMs` so a closed embed port is not dialed
+ * on every chat turn. The first call still probes.
+ */
+export function cachedProbe(
+  probe: () => Promise<boolean>,
+  ttlMs = 5000,
+): () => Promise<boolean> {
+  let checkedAt = 0;
+  let up = false;
+  return async () => {
+    const now = Date.now();
+    if (checkedAt !== 0 && now - checkedAt < ttlMs) {
+      return up;
+    }
+    try {
+      up = await probe();
+    } catch {
+      up = false;
+    }
+    checkedAt = Date.now();
+    return up;
+  };
+}
+
+/**
  * Embedder for `createMemoryRuntime` (PR #18).
  *
  * TODO(#18): `createMemoryRuntime` is not on this branch. It still

@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 usage() {
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|popup-reply|all] [--runtime fake|real] [--evidence dir]" >&2
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
 }
 
@@ -19,7 +19,7 @@ runtime="fake"
 evidence=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    menu-bar-icon|hotkey-popup|chat|popup-reply|all)
+    menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check)
       feature="$1"
       ;;
     --runtime)
@@ -59,12 +59,18 @@ if [[ -z "$data" || "$data" == *"Application Support"* ]]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+DRIVE_BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=drive-mac-pid.sh
+source "$DRIVE_BIN_DIR/drive-mac-pid.sh"
+DRIVE_PROCESS_LIB="$DRIVE_BIN_DIR/cookie-drive-process.applescript"
 APP="${COOKIE_APP:-"$ROOT/dist/Cookie Agent.app"}"
 BIN="$APP/Contents/MacOS/CookieAgent"
 if [[ ! -x "$BIN" ]]; then
   printf '%s\n' "not-ok" "set COOKIE_APP to Cookie Agent.app (missing $BIN)"
   exit 1
 fi
+SOURCE_APP="$APP"
+SOURCE_BIN="$BIN"
 
 export COOKIE_DATA_DIR="$data"
 export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
@@ -86,28 +92,276 @@ fi
 log() { printf '%s\n' "$*"; }
 
 APP_PID=""
-cleanup() {
-  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
-    kill "$APP_PID" 2>/dev/null || true
+DECOY_PID=""
+DECOY_BIN=""
+DECOY_PROCESS_NAME=""
+DECOY_BUNDLE_ID=""
+DRIVE_APP_ROOTS=""
+TARGET_PID=""
+TARGET_BIN=""
+stop_pid() {
+  local pid="$1"
+  local expected_bin="${2:-}"
+  local expected_name="${3:-}"
+  local expected_bundle="${4:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  [[ "$pid" -ge 2 ]] || return 0
+  if [[ "$pid" == "$$" ]]; then
+    return 0
+  fi
+  if [[ -z "$expected_bin" || -z "$expected_name" || -z "$expected_bundle" ]]; then
+    log "not signaling pid $pid: identity was not recorded"
+    return 0
+  fi
+  local reason
+  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" || true)"
+  if [[ -n "$reason" ]]; then
+    log "not signaling pid $pid: $reason"
+    return 0
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
     local attempt
     for attempt in $(seq 1 40); do
-      kill -0 "$APP_PID" 2>/dev/null || break
+      kill -0 "$pid" 2>/dev/null || break
       sleep 0.5
     done
-    if kill -0 "$APP_PID" 2>/dev/null; then
-      kill -9 "$APP_PID" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
     fi
-    wait "$APP_PID" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+DECOY_DATA=""
+DRIVE_DATA=""
+cleanup() {
+  local root
+  stop_pid "$APP_PID" "$BIN" "${DRIVE_PROCESS_NAME:-}" "${DRIVE_BUNDLE_ID:-}"
+  stop_pid "$DECOY_PID" "$DECOY_BIN" "$DECOY_PROCESS_NAME" "$DECOY_BUNDLE_ID"
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    case "$root" in
+      */cookie-drive-app.*)
+        rm -rf "$root"
+        ;;
+    esac
+  done <<< "$DRIVE_APP_ROOTS"
+  case "$DECOY_DATA" in
+    /tmp/cookie-m0-decoy.*)
+      rm -rf "$DECOY_DATA"
+      ;;
+  esac
+  if [[ -n "$DRIVE_DATA" && "$(drive_temp_data_dir "$DRIVE_DATA")" == "$DRIVE_DATA" ]]; then
+    rm -rf "$DRIVE_DATA"
   fi
 }
 trap cleanup EXIT
 
-log "launch $BIN"
-"$BIN" &
-APP_PID=$!
-
+# Every System Events call goes through here. The process must be the pid
+# this drive launched, and that pid's name and bundle id must be the per-run
+# identity. The product executable name and bundle id are refused.
 osascript_run() {
-  /usr/bin/osascript "$@"
+  local target_pid target_bin target_name target_bundle reason tmp code
+  target_pid="${TARGET_PID:-$APP_PID}"
+  target_bin="${TARGET_BIN:-$BIN}"
+  target_name="${TARGET_PROCESS_NAME:-$DRIVE_PROCESS_NAME}"
+  target_bundle="${TARGET_BUNDLE_ID:-$DRIVE_BUNDLE_ID}"
+  if [[ -z "$target_name" || "$target_name" == "CookieAgent" ]]; then
+    fail "refusing to drive: process identity is missing or is the product executable name"
+  fi
+  if [[ -z "$target_bundle" || "$target_bundle" == "com.johnkimec.cookie-agent" ]]; then
+    fail "refusing to drive: bundle id is missing or is the installed app"
+  fi
+  reason="$(verify_drive_pid_reason "$target_pid" "$target_bin" "$target_name" "$target_bundle" || true)"
+  if [[ -n "$reason" ]]; then
+    fail "refusing to drive: $reason"
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/cookie-drive-osa.XXXXXX")"
+  if [[ "${1:-}" == "-e" ]]; then
+    [[ $# -ge 2 ]] || fail "osascript_run is missing its script"
+    printf '%s\n' "$2" >"$tmp.in"
+    shift 2
+  elif [[ $# -gt 0 && -f "${1:-}" ]]; then
+    cp "$1" "$tmp.in"
+    shift
+  else
+    cat >"$tmp.in"
+  fi
+  python3 "$DRIVE_BIN_DIR/prepend-drive-library.py" "$DRIVE_PROCESS_LIB" "$tmp.in" "$tmp"
+  # Build the forbidden phrases so this file does not contain them literally.
+  local named_tell='tell process '
+  named_tell="${named_tell}\""
+  local named_app='tell '
+  named_app="${named_app}application "
+  named_app="${named_app}\"Cookie"
+  local quit_by_name='quit '
+  quit_by_name="${quit_by_name}app"
+  if grep -n -F "$named_tell" "$tmp" >/dev/null; then
+    grep -n -F "$named_tell" "$tmp" >&2 || true
+    rm -f "$tmp" "$tmp.in"
+    fail "refusing to run AppleScript that targets a process by name"
+  fi
+  if grep -n -F "$named_app" "$tmp" >/dev/null; then
+    rm -f "$tmp" "$tmp.in"
+    fail "refusing to run AppleScript that tells Cookie by name"
+  fi
+  if grep -n -F "$quit_by_name" "$tmp" >/dev/null; then
+    rm -f "$tmp" "$tmp.in"
+    fail "refusing to run AppleScript that quits an app by name"
+  fi
+  set +e
+  COOKIE_DRIVE_PID="$target_pid" COOKIE_DRIVE_PROCESS_NAME="$target_name" COOKIE_DRIVE_BUNDLE_ID="$target_bundle" /usr/bin/osascript "$tmp" "$@"
+  code=$?
+  set -e
+  rm -f "$tmp" "$tmp.in"
+  return "$code"
+}
+
+current_target_pid() {
+  printf '%s\n' "${TARGET_PID:-$APP_PID}"
+}
+
+launch_verified() {
+  # $1 binary, $2 app|decoy, $3 per-run process name, $4 per-run bundle id.
+  local bin="$1" which="$2" name="$3" bundle="$4" existing attempt reason pid
+  existing="$(pids_for_executable "$bin" "$name" | tr '\n' ' ')"
+  if [[ -n "${existing// /}" ]]; then
+    fail "refusing to launch: $bin already running as pid ${existing}"
+  fi
+  "$bin" &
+  pid=$!
+  reason=""
+  for attempt in $(seq 1 30); do
+    reason="$(verify_drive_pid_reason "$pid" "$bin" "$name" "$bundle" || true)"
+    if [[ -z "$reason" ]]; then
+      remember_launched "$which" "$pid" "$bin" "$name" "$bundle"
+      log "drive pid=$pid process=$name bundle=$bundle exe=$bin"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    case "$reason" in
+      *"also pid"*)
+        fail "refusing to drive: $reason"
+        ;;
+    esac
+    sleep 0.1
+  done
+  remember_launched "$which" "$pid" "$bin" "$name" "$bundle"
+  fail "refusing to drive: ${reason:-pid $pid did not become $bin}"
+}
+
+remember_launched() {
+  local which="$1" pid="$2" bin="$3" name="$4" bundle="$5"
+  if [[ "$which" == "decoy" ]]; then
+    DECOY_PID="$pid"
+    DECOY_BIN="$bin"
+    DECOY_PROCESS_NAME="$name"
+    DECOY_BUNDLE_ID="$bundle"
+  else
+    APP_PID="$pid"
+  fi
+}
+
+launch_direct() {
+  launch_verified "$BIN" app "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID"
+}
+
+# Copy the packaged app to a per-run bundle. The executable name and bundle
+# id are unique, so John's installed CookieAgent cannot share either one.
+# CFBundleName stays Cookie. The product app on disk is not modified.
+prepare_drive_bundle() {
+  local source_app="$1"
+  local source_bin="$source_app/Contents/MacOS/CookieAgent"
+  [[ -x "$source_bin" ]] || fail "refusing to launch: $source_bin is not executable"
+  local token name bundle_id root dest mac_dir
+  token="$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
+  name="CDrv${token}"
+  bundle_id="com.johnkimec.cookie-agent.drive.${token}"
+  root="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-app.XXXXXX")"
+  DRIVE_APP_ROOTS="${DRIVE_APP_ROOTS}${root}"$'\n'
+  dest="$root/${name}.app"
+  if command -v ditto >/dev/null 2>&1; then
+    ditto "$source_app" "$dest"
+  else
+    cp -R "$source_app" "$dest"
+  fi
+  mac_dir="$dest/Contents/MacOS"
+  mv "$mac_dir/CookieAgent" "$mac_dir/$name"
+  chmod +x "$mac_dir/$name"
+  plutil -replace CFBundleExecutable -string "$name" "$dest/Contents/Info.plist"
+  plutil -replace CFBundleIdentifier -string "$bundle_id" "$dest/Contents/Info.plist"
+  codesign --force --sign - "$dest"
+  local got_name got_bundle got_display
+  got_name="$(plist_value "$dest/Contents/Info.plist" CFBundleExecutable || true)"
+  got_bundle="$(plist_value "$dest/Contents/Info.plist" CFBundleIdentifier || true)"
+  got_display="$(plist_value "$dest/Contents/Info.plist" CFBundleName || true)"
+  if [[ "$got_name" != "$name" || "$got_bundle" != "$bundle_id" ]]; then
+    fail "refusing to launch: prepared bundle identity did not stick (process ${got_name:-missing}, bundle ${got_bundle:-missing})"
+  fi
+  if [[ "$got_display" != "Cookie" ]]; then
+    fail "refusing to launch: prepared bundle changed the visible name"
+  fi
+  PREPARED_APP="$dest"
+  PREPARED_BIN="$mac_dir/$name"
+  PREPARED_PROCESS_NAME="$name"
+  PREPARED_BUNDLE_ID="$bundle_id"
+}
+
+install_prepared_identity() {
+  prepare_drive_bundle "$1"
+  APP="$PREPARED_APP"
+  BIN="$PREPARED_BIN"
+  DRIVE_PROCESS_NAME="$PREPARED_PROCESS_NAME"
+  DRIVE_BUNDLE_ID="$PREPARED_BUNDLE_ID"
+  log "drive identity process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID app=$APP"
+}
+
+with_target() {
+  local pid="$1" bin="$2" name="$3" bundle="$4"
+  shift 4
+  local saved_pid="${TARGET_PID:-}" saved_bin="${TARGET_BIN:-}"
+  local saved_name="${TARGET_PROCESS_NAME:-}" saved_bundle="${TARGET_BUNDLE_ID:-}"
+  local code=0
+  TARGET_PID="$pid"
+  TARGET_BIN="$bin"
+  TARGET_PROCESS_NAME="$name"
+  TARGET_BUNDLE_ID="$bundle"
+  "$@" || code=$?
+  TARGET_PID="$saved_pid"
+  TARGET_BIN="$saved_bin"
+  TARGET_PROCESS_NAME="$saved_name"
+  TARGET_BUNDLE_ID="$saved_bundle"
+  return "$code"
+}
+
+frontmost_unix_id() {
+  osascript_run -e 'tell application "System Events" to unix id of first process whose frontmost is true'
+}
+
+trim_osascript() {
+  printf '%s' "$1" | tr -d '[:space:]'
+}
+
+# Key codes go to the frontmost process. Refuse unless that unix id is ours.
+send_key_code() {
+  local code="$1"
+  [[ "$code" =~ ^[0-9]+$ ]] || fail "refusing keystroke: code is not an integer"
+  COOKIE_KEY_CODE="$code" osascript_run <<'APPLESCRIPT'
+set drivePid to (system attribute "COOKIE_DRIVE_PID") as integer
+set keyCode to (system attribute "COOKIE_KEY_CODE") as integer
+set expectedName to system attribute "COOKIE_DRIVE_PROCESS_NAME"
+set expectedBundle to system attribute "COOKIE_DRIVE_BUNDLE_ID"
+tell application "System Events"
+  set frontProc to first process whose frontmost is true
+  set frontPid to unix id of frontProc
+  if frontPid is not drivePid then error "refusing keystroke: frontmost unix id " & frontPid & " is not drive pid " & drivePid
+  if name of frontProc is not expectedName then error "refusing keystroke: frontmost process is not the launched executable"
+  if bundle identifier of frontProc is not expectedBundle then error "refusing keystroke: frontmost bundle id is not the launched app"
+  key code keyCode
+end tell
+APPLESCRIPT
 }
 
 fail() {
@@ -222,8 +476,9 @@ assert_both_servers() {
 }
 
 pid_alive() {
-  [[ -n "${1:-}" ]] || return 1
-  kill -0 "$1" 2>/dev/null
+  local pid="$1"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null
 }
 
 pid_is_llama() {
@@ -279,15 +534,14 @@ open_support_dir() {
   printf '%s\n' "$HOME/Library/Application Support/com.johnkimec.cookie-agent"
 }
 
-# System Events names the process after the executable, CookieAgent,
-# when the binary inside the bundle is launched directly.
-# The frontmost process is read from System Events, not from inside
-# `tell process "CookieAgent"` (that lookup is error -1728).
+# Resolve the process by the pid and per-run identity this drive launched.
+# Reading frontmost from inside that process tell is error -1728, so ask
+# System Events outside it.
 read_menu() {
   osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set statusItem to missing value
     repeat with barIndex from 1 to (count of menu bars)
       if (count of menu bar items of menu bar barIndex) > 0 then
@@ -314,9 +568,9 @@ frontmost_app() {
 # Primary open path. Synthetic ⌥Space and option-click are not this path.
 open_via_ask() {
   osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set statusItem to missing value
     repeat with barIndex from 1 to (count of menu bars)
       if (count of menu bar items of menu bar barIndex) > 0 then
@@ -384,9 +638,9 @@ on axtext(elem)
   return my coerceToString(rawValue)
 end axtext
 
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set popupWindow to missing value
     repeat with candidate in windows
       set candidateName to ""
@@ -461,9 +715,9 @@ on axid(elem)
   end tell
 end axid
 
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set popupWindow to missing value
     repeat with candidate in windows
       set candidateName to ""
@@ -567,9 +821,9 @@ on axtext(elem)
   return ""
 end axtext
 
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set popupWindow to missing value
     repeat with candidate in windows
       try
@@ -617,11 +871,14 @@ set dotWidth to 0
 set inputHeight to 0
 set windowHeight to 0
 set bottomPlace to "outside"
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
     set popupWindow to missing value
     repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
       try
         if name of candidate is "Ask Cookie…" then set popupWindow to candidate
       end try
@@ -779,9 +1036,13 @@ on axid(elem)
   end tell
 end axid
 
+try
+  set cookieProc to my cookieDriveProcess()
+on error
+  return
+end try
 tell application "System Events"
-  if not (exists process "CookieAgent") then return
-  tell process "CookieAgent"
+  tell cookieProc
     repeat with candidate in windows
       try
         if name of candidate is not "Ask Cookie…" then
@@ -806,9 +1067,13 @@ APPLESCRIPT
 
 popup_is_open() {
   osascript_run <<'APPLESCRIPT'
+try
+  set cookieProc to my cookieDriveProcess()
+on error
+  return "no"
+end try
 tell application "System Events"
-  if not (exists process "CookieAgent") then return "no"
-  tell process "CookieAgent"
+  tell cookieProc
     repeat with candidate in windows
       try
         if name of candidate is "Ask Cookie…" then return "yes"
@@ -822,9 +1087,9 @@ APPLESCRIPT
 
 option_click_status() {
   osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set statusItem to missing value
     repeat with barIndex from 1 to (count of menu bars)
       if (count of menu bar items of menu bar barIndex) > 0 then
@@ -837,7 +1102,7 @@ tell application "System Events"
   key down option
   delay 0.1
   try
-    tell process "CookieAgent" to click statusItem
+    tell cookieProc to click statusItem
     key up option
   on error errText
     try
@@ -884,6 +1149,165 @@ PY
   return 1
 }
 
+# One line: pid, AXSelected, menu position, menu size, window count.
+# Open is AXSelected, or menu 1 of this status item with an on-screen position
+# and a positive size. Item count is not read: a closed menu still exposes them.
+observe_status() {
+  osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
+set selectedText to "no"
+set menuPosText to "-"
+set menuSizeText to "-"
+set windowCount to 0
+set drivePid to 0
+tell application "System Events"
+  tell cookieProc
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+    try
+      set rawSelected to value of attribute "AXSelected" of statusItem
+      if rawSelected is true or rawSelected is 1 then set my selectedText to "yes"
+    end try
+    try
+      set statusMenu to menu 1 of statusItem
+      set menuPos to position of statusMenu
+      set menuSize to size of statusMenu
+      set my menuPosText to ((item 1 of menuPos) as integer) & "," & ((item 2 of menuPos) as integer)
+      set my menuSizeText to ((item 1 of menuSize) as integer) & "," & ((item 2 of menuSize) as integer)
+    end try
+    try
+      set my windowCount to count of windows
+    end try
+  end tell
+  set my drivePid to unix id of cookieProc
+end tell
+return (drivePid as string) & (character id 9) & selectedText & (character id 9) & menuPosText & (character id 9) & menuSizeText & (character id 9) & (windowCount as string)
+APPLESCRIPT
+}
+
+click_status() {
+  osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
+set drivePid to 0
+tell application "System Events"
+  tell cookieProc
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
+    click statusItem
+  end tell
+  set my drivePid to unix id of cookieProc
+end tell
+return drivePid as string
+APPLESCRIPT
+}
+
+wait_observe() {
+  local pid="$1" bin="$2" name="$3" bundle="$4"
+  local attempt line got
+  for attempt in $(seq 1 40); do
+    line="$(with_target "$pid" "$bin" "$name" "$bundle" observe_status 2>/dev/null || true)"
+    got="$(status_field "$line" 1)"
+    if [[ "$got" == "$pid" ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+    sleep 0.5
+  done
+  printf '%s\n' "$line"
+  return 1
+}
+
+# Two per-run copies. Click only the drive pid. John's CookieAgent is observed, never signaled.
+run_self_check() {
+  # Global so the EXIT trap can delete it. A local would hide it from cleanup.
+  DRIVE_DATA="$(drive_temp_data_dir "$COOKIE_DATA_DIR")"
+  if [[ "$runtime" != "fake" ]]; then
+    fail "self-check is fake-core only"
+  fi
+  prepare_drive_bundle "$SOURCE_APP"
+  local decoy_app="$PREPARED_APP" decoy_bin="$PREPARED_BIN"
+  local decoy_name="$PREPARED_PROCESS_NAME" decoy_bundle="$PREPARED_BUNDLE_ID"
+  install_prepared_identity "$SOURCE_APP"
+  if [[ "$DRIVE_PROCESS_NAME" == "$decoy_name" || "$DRIVE_BUNDLE_ID" == "$decoy_bundle" ]]; then
+    fail "self-check identities collided"
+  fi
+  if [[ "$DRIVE_PROCESS_NAME" == "CookieAgent" || "$decoy_name" == "CookieAgent" ]]; then
+    fail "self-check reused the product process name"
+  fi
+  if [[ "$DRIVE_BUNDLE_ID" == "com.johnkimec.cookie-agent" || "$decoy_bundle" == "com.johnkimec.cookie-agent" ]]; then
+    fail "self-check reused the installed bundle id"
+  fi
+  DECOY_DATA="$(mktemp -d /tmp/cookie-m0-decoy.XXXXXX)"
+  COOKIE_DATA_DIR="$DECOY_DATA" launch_verified "$decoy_bin" decoy "$decoy_name" "$decoy_bundle"
+  launch_direct
+  local foreign foreign_pid
+  foreign="$(cookieagent_comm_pids | tr '\n' ' ')"
+  log "self-check drive pid=$APP_PID process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID"
+  log "self-check decoy pid=$DECOY_PID process=$decoy_name bundle=$decoy_bundle"
+  log "self-check foreign CookieAgent pids:${foreign:- none}"
+  local drive_before decoy_before
+  drive_before="$(wait_observe "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID")" || fail "self-check drive status item did not appear: ${drive_before:-empty}"
+  decoy_before="$(wait_observe "$DECOY_PID" "$decoy_bin" "$decoy_name" "$decoy_bundle")" || fail "self-check decoy status item did not appear: ${decoy_before:-empty}"
+  if status_menu_open "$drive_before"; then
+    fail "self-check drive menu was already open: $drive_before"
+  fi
+  if status_menu_open "$decoy_before"; then
+    fail "self-check decoy menu was already open: $decoy_before"
+  fi
+  local clicked
+  clicked="$(trim_osascript "$(with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" click_status)")"
+  if [[ "$clicked" != "$APP_PID" ]]; then
+    fail "self-check click returned pid ${clicked:-empty}, drive pid is $APP_PID"
+  fi
+  sleep 0.4
+  local drive_after decoy_after
+  drive_after="$(with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" observe_status)"
+  decoy_after="$(with_target "$DECOY_PID" "$decoy_bin" "$decoy_name" "$decoy_bundle" observe_status)"
+  if [[ "$(status_field "$drive_after" 1)" != "$APP_PID" ]]; then
+    fail "self-check drive observation is not pid $APP_PID: $drive_after"
+  fi
+  if [[ "$(status_field "$decoy_after" 1)" != "$DECOY_PID" ]]; then
+    fail "self-check decoy observation is not pid $DECOY_PID: $decoy_after"
+  fi
+  if ! status_menu_open "$drive_after"; then
+    log "self-check drive before: $drive_before"
+    log "self-check drive after: $drive_after"
+    fail "self-check drive menu did not open"
+  fi
+  if [[ "$(status_open_fields "$decoy_before")" != "$(status_open_fields "$decoy_after")" ]]; then
+    log "self-check decoy before: $decoy_before"
+    log "self-check decoy after: $decoy_after"
+    fail "self-check touched the decoy"
+  fi
+  for foreign_pid in $foreign; do
+    [[ -n "$foreign_pid" ]] || continue
+    if ! pid_alive "$foreign_pid"; then
+      fail "self-check foreign pid $foreign_pid is gone"
+    fi
+  done
+  with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" click_status >/dev/null || fail "self-check could not close the drive menu"
+  log "self-check left CookieAgent pids untouched:${foreign:- none}"
+  log "self-check decoy pid $DECOY_PID unchanged"
+}
+
+if [[ "$feature" == "self-check" ]]; then
+  run_self_check
+  log "ok"
+  exit 0
+fi
+
+install_prepared_identity "$SOURCE_APP"
+launch_direct
 log "wait for menu bar"
 if ! wait_for_menu; then
   log "not-ok"
@@ -934,15 +1358,17 @@ if [[ "$feature" == "chat" || "$feature" == "all" || "$runtime" == "real" ]]; th
 fi
 
 if [[ "$drive_popup" == "1" ]]; then
-  before="$(frontmost_app)"
-  log "frontmost-before $before"
+  before_pid="$(trim_osascript "$(frontmost_unix_id)")"
+  before_name="$(frontmost_app)"
+  log "frontmost-before $before_pid $before_name"
   log "open via Ask Cookie…"
   open_via_ask
   sleep 0.6
-  after="$(frontmost_app)"
-  log "frontmost-after $after"
-  if [[ "$before" != "$after" ]]; then
-    fail "frontmost changed from $before to $after"
+  after_pid="$(trim_osascript "$(frontmost_unix_id)")"
+  after_name="$(frontmost_app)"
+  log "frontmost-after $after_pid $after_name"
+  if [[ "$before_pid" != "$after_pid" ]]; then
+    fail "frontmost pid changed from $before_pid ($before_name) to $after_pid ($after_name)"
   fi
   if ! dump_popup_ax > /tmp/cookie-drive-mac-ax.txt; then
     fail "popup accessibility read failed"
@@ -1005,6 +1431,10 @@ if [[ -n "$evidence" ]]; then
   mkdir -p "$evidence"
   {
     printf '%s\n' "drive-mac $feature --runtime $runtime"
+    printf '%s\n' "pid=${APP_PID}"
+    printf '%s\n' "process=${DRIVE_PROCESS_NAME}"
+    printf '%s\n' "bundle=${DRIVE_BUNDLE_ID}"
+    printf '%s\n' "app=${APP}"
     printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
     printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
     printf '%s\n' "COOKIE_EMBED_PORT=${COOKIE_EMBED_PORT:-}"
@@ -1049,8 +1479,18 @@ if [[ "$feature" == "menu-bar-icon" || "$feature" == "hotkey-popup" || "$feature
 fi
 
 relaunch_app() {
-  "$BIN" &
-  APP_PID=$!
+  local attempt gone=0
+  for attempt in $(seq 1 40); do
+    if [[ -z "$(pids_for_executable "$BIN" "$DRIVE_PROCESS_NAME" | tr -d '[:space:]')" ]]; then
+      gone=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "$gone" != "1" ]]; then
+    fail "previous drive executable still running, refusing to launch another"
+  fi
+  launch_direct
   if ! wait_for_menu; then
     fail "menu bar did not return after relaunch"
   fi
@@ -1072,7 +1512,7 @@ orphan_reap_check() {
   if [[ "$runtime" == "real" ]]; then
     old_embed="$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)"
   fi
-  log "orphan-reap kill -9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
+  log "orphan-reap signal 9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
   kill -9 "$APP_PID" 2>/dev/null || true
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
@@ -1117,9 +1557,9 @@ if [[ "$runtime" == "real" ]]; then
 fi
 log "quit via menu pid=${owned_before_quit:-none} embed=${owned_embed_before:-none} port=${PORT}"
 osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
 tell application "System Events"
-  if not (exists process "CookieAgent") then error "CookieAgent is not running"
-  tell process "CookieAgent"
+  tell cookieProc
     set statusItem to missing value
     repeat with barIndex from 1 to (count of menu bars)
       if (count of menu bar items of menu bar barIndex) > 0 then
@@ -1187,25 +1627,9 @@ if [[ "$runtime" == "real" ]]; then
   log "quit reaped embed ${owned_embed_before} port ${embed_port_now} clear"
 fi
 
-cookie_agent_pids() {
-  pgrep -x CookieAgent 2>/dev/null || true
-}
-
-# Quit can still be reaping when the next step starts. Bash 3.2: no arrays.
-wait_for_no_cookie_agent() {
-  local attempt
-  for attempt in $(seq 1 40); do
-    if [[ -z "$(cookie_agent_pids)" ]]; then
-      return 0
-    fi
-    sleep 0.25
-  done
-  return 1
-}
-
 log_cookie_processes() {
   log "ps pid ppid lstart command:"
-  ps -ax -o pid,ppid,lstart,command | awk 'NR==1 || ((/CookieAgent/ || /llama-server/) && $0 !~ /awk/)' || true
+  ps -ax -o pid,ppid,lstart,command | awk -v drive="${DRIVE_PROCESS_NAME:-}" 'NR==1 || (((drive != "" && index($0, drive)) || /CookieAgent/ || /llama-server/) && $0 !~ /awk/)' || true
 }
 
 shell_log_bytes() {
@@ -1231,9 +1655,38 @@ dump_shell_log_since() {
 # LaunchServices does not keep this shell's environment. env -i is the
 # same shape John gets from `open -n`.
 open_clean_check() {
-  if ! wait_for_no_cookie_agent; then
+  local attempt gone=0
+  for attempt in $(seq 1 40); do
+    if [[ -z "$(pids_for_executable "$BIN" "$DRIVE_PROCESS_NAME" | tr -d '[:space:]')" ]]; then
+      gone=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "$gone" != "1" ]]; then
     log_cookie_processes
-    fail "CookieAgent still running before open launch"
+    fail "drive executable still running before open launch: $BIN"
+  fi
+  local others
+  others="$(cookieagent_comm_pids | tr '\n' ' ')"
+  if [[ -n "${others// /}" ]]; then
+    log "open-clean skipped: another CookieAgent is running (pid ${others}); not launching into Application Support and not signaling those pids"
+    if [[ -n "$evidence" ]]; then
+      mkdir -p "$evidence"
+      {
+        printf '%s\n' "open-clean skipped"
+        printf '%s\n' "reason=another CookieAgent is running"
+        printf '%s\n' "pids=${others}"
+        printf '%s\n' "signaled=none"
+      } > "$evidence/open-clean-skip.txt"
+      if [[ -f "$evidence/command.txt" ]]; then
+        printf '%s\n' "open-clean=skipped" >> "$evidence/command.txt"
+      fi
+    fi
+    # Return 0. A non-zero return under `cmd || …` would disable errexit for
+    # this whole function, including the launch and SIGTERM that follow a real run.
+    open_clean_status=3
+    return 0
   fi
   local support port_before shell_log log_mark
   support="$(open_support_dir)"
@@ -1243,9 +1696,7 @@ open_clean_check() {
   if port_listening 8080; then
     port_before=1
   fi
-  local before
-  before="$(cookie_agent_pids)"
-  log "open -n clean env support=$support existing=${before:-none}"
+  log "open -n clean env support=$support existing=none"
   env -i \
     HOME="$HOME" \
     USER="${USER:-$(id -un)}" \
@@ -1253,36 +1704,40 @@ open_clean_check() {
     TMPDIR="${TMPDIR:-/tmp}" \
     PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
     /usr/bin/open -n "$APP"
-  local attempt pid current fresh="" count=0
+  local pid current fresh="" count=0
   for attempt in $(seq 1 40); do
-    current="$(cookie_agent_pids)"
+    current="$(comm_pids_named "$DRIVE_PROCESS_NAME" | tr '\n' ' ')"
     fresh=""
     count=0
     for pid in $current; do
-      case " $before " in
-        *" $pid "*) ;;
-        *)
-          fresh="$fresh $pid"
-          count=$((count + 1))
-          ;;
-      esac
+      [[ -n "$pid" ]] || continue
+      fresh="$fresh $pid"
+      count=$((count + 1))
     done
     if [[ "$count" -eq 1 ]]; then
       break
     fi
     if [[ "$count" -gt 1 ]]; then
       log_cookie_processes
-      fail "open started more than one CookieAgent:$fresh"
+      fail "open started more than one process:$fresh"
     fi
     fresh=""
+    count=0
     sleep 0.25
   done
   if [[ "$count" -ne 1 ]]; then
     log_cookie_processes
-    fail "open did not start CookieAgent"
+    fail "open did not start a new instance of $BIN"
   fi
-  APP_PID="${fresh# }"
-  log "open pid=$APP_PID"
+  local new_pid reason
+  new_pid="${fresh# }"
+  reason="$(verify_drive_pid_reason "$new_pid" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" || true)"
+  if [[ -n "$reason" ]]; then
+    log_cookie_processes
+    fail "refusing to drive open pid: $reason"
+  fi
+  APP_PID="$new_pid"
+  log "open pid=$APP_PID process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID"
   local ready=0
   for attempt in $(seq 1 40); do
     if [[ -f "$shell_log" ]] && tail -c +$((log_mark + 1)) "$shell_log" 2>/dev/null | grep -E "signals installed pid=${APP_PID}([^0-9]|$)" >/dev/null; then
@@ -1337,9 +1792,16 @@ open_clean_check() {
     log "open runtime up"
   fi
   # read_menu leaves the status item in event-tracking mode if the closing
-  # click does not land. Escape returns the run loop to the default mode
-  # before SIGTERM. The app also accepts the hop in that tracking mode.
-  osascript_run -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 || true
+  # click does not land. A key goes to the frontmost process, which is
+  # usually not this menu-bar app. The tracking-mode hop still runs, so
+  # skip the key instead of delivering it to some other pid.
+  local front
+  front="$(trim_osascript "$(frontmost_unix_id || true)")"
+  if [[ "$front" == "$APP_PID" ]]; then
+    send_key_code 53
+  else
+    log "not sending escape: frontmost unix id ${front:-unknown} is not drive pid $APP_PID"
+  fi
   sleep 0.3
   local pidfile owned=""
   pidfile="$support/logs/llama-server.pid"
@@ -1387,7 +1849,7 @@ open_clean_check() {
   dump_shell_log_since "$shell_log" "$signal_mark"
   if [[ "$exited" != "1" ]]; then
     log_cookie_processes
-    fail "CookieAgent still running after SIGTERM"
+    fail "drive process still running after SIGTERM"
   fi
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
@@ -1427,7 +1889,12 @@ open_clean_check() {
   fi
 }
 
+open_clean_status=0
 open_clean_check
+if [[ "$open_clean_status" -ne 0 ]]; then
+  log "skipped"
+  exit "$open_clean_status"
+fi
 
 log "ok"
 log "Mac proof is pending until this transcript is saved under verify-evidence/ and the feature files are updated."

@@ -2,6 +2,7 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { AgentCore, RUNTIME_FRESH_MS } from "./agent-core.ts";
+import type { ConversationHistory } from "./memory.ts";
 import { createAiSdkProvider } from "./model/ai-sdk-provider.ts";
 import { createLlamaServerProvider } from "./model/llama.ts";
 import type { ModelProvider } from "./model/provider.ts";
@@ -111,6 +112,7 @@ function harnessFor(
     probeTimeoutMs?: number;
     now?: () => number;
     watchIntervalMs?: number;
+    history?: ConversationHistory;
   } = {},
 ): Harness {
   const harness: Harness = {
@@ -124,6 +126,7 @@ function harnessFor(
     probeTimeoutMs: options.probeTimeoutMs ?? 200,
     now: options.now,
     watchIntervalMs: options.watchIntervalMs,
+    history: options.history,
     emit: (message) => {
       expect(isCookieMessage(message), messageErrors(message)).toBe(true);
       harness.messages.push(message);
@@ -356,6 +359,57 @@ describe("agent core", () => {
         (message) => isRecord(message) && message.id === "4",
       ),
     ).toMatchObject({ result: { cancelled: false } });
+  });
+
+  it("cancels during retrieval and does not start the model", async () => {
+    const { provider, model } = scriptedProvider({
+      parts: ["should not stream"],
+    });
+    let retrievalStarted: () => void = () => undefined;
+    const retrieval = new Promise<void>((resolve) => {
+      retrievalStarted = resolve;
+    });
+    const waiting: ConversationHistory = {
+      messagesFor(_conversationId, _userText, abortSignal) {
+        retrievalStarted();
+        return new Promise((resolve) => {
+          if (abortSignal?.aborted === true) {
+            resolve([]);
+            return;
+          }
+          abortSignal?.addEventListener("abort", () => resolve([]), {
+            once: true,
+          });
+        });
+      },
+      commit() {
+        return undefined;
+      },
+      close() {
+        return undefined;
+      },
+    };
+    const harness = harnessFor(provider, { history: waiting });
+    await ready(harness);
+    send(harness, chatSend("2", "stop during retrieval"));
+    await retrieval;
+    send(harness, {
+      jsonrpc: "2.0",
+      id: "3",
+      method: "chat.cancel",
+      params: { conversationId: "conv-1", messageId: "msg-1" },
+    });
+    await waitFor(harness, () =>
+      harness.messages.some(
+        (message) =>
+          isRecord(message) &&
+          message.method === "chat.done" &&
+          isRecord(message.params) &&
+          message.params.finishReason === "cancelled",
+      ),
+    );
+    expect(deltasOf(harness.messages)).toEqual([]);
+    expect(model.doStreamCalls).toHaveLength(0);
   });
 
   it("reports runtime down and refuses chat.send when the runtime is unreachable", async () => {
