@@ -86,13 +86,30 @@ log() { printf '%s\n' "$*"; }
 
 APP_PID=""
 DECOY_PID=""
+DECOY_BIN=""
+DECOY_PROCESS_NAME=""
+DECOY_BUNDLE_ID=""
+DRIVE_APP_ROOTS=""
 TARGET_PID=""
 TARGET_BIN=""
 stop_pid() {
   local pid="$1"
+  local expected_bin="${2:-}"
+  local expected_name="${3:-}"
+  local expected_bundle="${4:-}"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   [[ "$pid" -ge 2 ]] || return 0
   if [[ "$pid" == "$$" ]]; then
+    return 0
+  fi
+  if [[ -z "$expected_bin" || -z "$expected_name" || -z "$expected_bundle" ]]; then
+    log "not signaling pid $pid: identity was not recorded"
+    return 0
+  fi
+  local reason
+  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" || true)"
+  if [[ -n "$reason" ]]; then
+    log "not signaling pid $pid: $reason"
     return 0
   fi
   if kill -0 "$pid" 2>/dev/null; then
@@ -109,14 +126,27 @@ stop_pid() {
   fi
 }
 DECOY_DATA=""
+DRIVE_DATA=""
 cleanup() {
-  stop_pid "$APP_PID"
-  stop_pid "$DECOY_PID"
+  local root
+  stop_pid "$APP_PID" "$BIN" "${DRIVE_PROCESS_NAME:-}" "${DRIVE_BUNDLE_ID:-}"
+  stop_pid "$DECOY_PID" "$DECOY_BIN" "$DECOY_PROCESS_NAME" "$DECOY_BUNDLE_ID"
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    case "$root" in
+      */cookie-drive-app.*)
+        rm -rf "$root"
+        ;;
+    esac
+  done <<< "$DRIVE_APP_ROOTS"
   case "$DECOY_DATA" in
     /tmp/cookie-m0-decoy.*)
       rm -rf "$DECOY_DATA"
       ;;
   esac
+  if [[ -n "$DRIVE_DATA" && "$(drive_temp_data_dir "$DRIVE_DATA")" == "$DRIVE_DATA" ]]; then
+    rm -rf "$DRIVE_DATA"
+  fi
 }
 trap cleanup EXIT
 
@@ -154,7 +184,8 @@ osascript_run() {
   # Build the forbidden phrases so this file does not contain them literally.
   local named_tell='tell process '
   named_tell="${named_tell}\""
-  local named_app='tell application '
+  local named_app='tell '
+  named_app="${named_app}application "
   named_app="${named_app}\"Cookie"
   local quit_by_name='quit '
   quit_by_name="${quit_by_name}app"
@@ -196,11 +227,7 @@ launch_verified() {
   for attempt in $(seq 1 30); do
     reason="$(verify_drive_pid_reason "$pid" "$bin" "$name" "$bundle" || true)"
     if [[ -z "$reason" ]]; then
-      if [[ "$which" == "decoy" ]]; then
-        DECOY_PID="$pid"
-      else
-        APP_PID="$pid"
-      fi
+      remember_launched "$which" "$pid" "$bin" "$name" "$bundle"
       log "drive pid=$pid process=$name bundle=$bundle exe=$bin"
       return 0
     fi
@@ -214,12 +241,20 @@ launch_verified() {
     esac
     sleep 0.1
   done
+  remember_launched "$which" "$pid" "$bin" "$name" "$bundle"
+  fail "refusing to drive: ${reason:-pid $pid did not become $bin}"
+}
+
+remember_launched() {
+  local which="$1" pid="$2" bin="$3" name="$4" bundle="$5"
   if [[ "$which" == "decoy" ]]; then
     DECOY_PID="$pid"
+    DECOY_BIN="$bin"
+    DECOY_PROCESS_NAME="$name"
+    DECOY_BUNDLE_ID="$bundle"
   else
     APP_PID="$pid"
   fi
-  fail "refusing to drive: ${reason:-pid $pid did not become $bin}"
 }
 
 launch_direct() {
@@ -238,6 +273,7 @@ prepare_drive_bundle() {
   name="CDrv${token}"
   bundle_id="com.johnkimec.cookie-agent.drive.${token}"
   root="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-app.XXXXXX")"
+  DRIVE_APP_ROOTS="${DRIVE_APP_ROOTS}${root}"$'\n'
   dest="$root/${name}.app"
   if command -v ditto >/dev/null 2>&1; then
     ditto "$source_app" "$dest"
@@ -433,8 +469,9 @@ assert_both_servers() {
 }
 
 pid_alive() {
-  [[ -n "${1:-}" ]] || return 1
-  kill -0 "$1" 2>/dev/null
+  local pid="$1"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null
 }
 
 pid_is_llama() {
@@ -935,12 +972,15 @@ PY
   return 1
 }
 
-# One line: pid, AXSelected, menu open, window count. No AXValue and no confirm.
+# One line: pid, AXSelected, menu position, menu size, window count.
+# Open is AXSelected, or menu 1 of this status item with an on-screen position
+# and a positive size. Item count is not read: a closed menu still exposes them.
 observe_status() {
   osascript_run <<'APPLESCRIPT'
 set cookieProc to my cookieDriveProcess()
 set selectedText to "no"
-set menuText to "no"
+set menuPosText to "-"
+set menuSizeText to "-"
 set windowCount to 0
 set drivePid to 0
 tell application "System Events"
@@ -954,10 +994,14 @@ tell application "System Events"
     if statusItem is missing value then error "no menu bar item"
     try
       set rawSelected to value of attribute "AXSelected" of statusItem
-      if rawSelected is true then set my selectedText to "yes"
+      if rawSelected is true or rawSelected is 1 then set my selectedText to "yes"
     end try
     try
-      if (count of menu items of menu 1 of statusItem) > 0 then set my menuText to "yes"
+      set statusMenu to menu 1 of statusItem
+      set menuPos to position of statusMenu
+      set menuSize to size of statusMenu
+      set my menuPosText to ((item 1 of menuPos) as integer) & "," & ((item 2 of menuPos) as integer)
+      set my menuSizeText to ((item 1 of menuSize) as integer) & "," & ((item 2 of menuSize) as integer)
     end try
     try
       set my windowCount to count of windows
@@ -965,7 +1009,7 @@ tell application "System Events"
   end tell
   set my drivePid to unix id of cookieProc
 end tell
-return (drivePid as string) & (character id 9) & selectedText & (character id 9) & menuText & (character id 9) & (windowCount as string)
+return (drivePid as string) & (character id 9) & selectedText & (character id 9) & menuPosText & (character id 9) & menuSizeText & (character id 9) & (windowCount as string)
 APPLESCRIPT
 }
 
@@ -990,10 +1034,6 @@ return drivePid as string
 APPLESCRIPT
 }
 
-status_field() {
-  python3 -c 'import sys; parts=sys.argv[1].strip().split("\t"); i=int(sys.argv[2]); print(parts[i-1] if 0 < i <= len(parts) else "")' "$1" "$2"
-}
-
 wait_observe() {
   local pid="$1" bin="$2" name="$3" bundle="$4"
   local attempt line got
@@ -1012,6 +1052,8 @@ wait_observe() {
 
 # Two per-run copies. Click only the drive pid. John's CookieAgent is observed, never signaled.
 run_self_check() {
+  # Global so the EXIT trap can delete it. A local would hide it from cleanup.
+  DRIVE_DATA="$(drive_temp_data_dir "$COOKIE_DATA_DIR")"
   if [[ "$runtime" != "fake" ]]; then
     fail "self-check is fake-core only"
   fi
@@ -1039,10 +1081,10 @@ run_self_check() {
   local drive_before decoy_before
   drive_before="$(wait_observe "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID")" || fail "self-check drive status item did not appear: ${drive_before:-empty}"
   decoy_before="$(wait_observe "$DECOY_PID" "$decoy_bin" "$decoy_name" "$decoy_bundle")" || fail "self-check decoy status item did not appear: ${decoy_before:-empty}"
-  if [[ "$(status_field "$drive_before" 2)" == "yes" || "$(status_field "$drive_before" 3)" == "yes" ]]; then
+  if status_menu_open "$drive_before"; then
     fail "self-check drive menu was already open: $drive_before"
   fi
-  if [[ "$(status_field "$decoy_before" 2)" == "yes" || "$(status_field "$decoy_before" 3)" == "yes" ]]; then
+  if status_menu_open "$decoy_before"; then
     fail "self-check decoy menu was already open: $decoy_before"
   fi
   local clicked
@@ -1060,19 +1102,19 @@ run_self_check() {
   if [[ "$(status_field "$decoy_after" 1)" != "$DECOY_PID" ]]; then
     fail "self-check decoy observation is not pid $DECOY_PID: $decoy_after"
   fi
-  if [[ "$(status_field "$drive_after" 2)" != "yes" && "$(status_field "$drive_after" 3)" != "yes" ]]; then
+  if ! status_menu_open "$drive_after"; then
     log "self-check drive before: $drive_before"
     log "self-check drive after: $drive_after"
     fail "self-check drive menu did not open"
   fi
-  if [[ "$(status_field "$decoy_before" 2)" != "$(status_field "$decoy_after" 2)" || "$(status_field "$decoy_before" 3)" != "$(status_field "$decoy_after" 3)" || "$(status_field "$decoy_before" 4)" != "$(status_field "$decoy_after" 4)" ]]; then
+  if [[ "$(status_open_fields "$decoy_before")" != "$(status_open_fields "$decoy_after")" ]]; then
     log "self-check decoy before: $decoy_before"
     log "self-check decoy after: $decoy_after"
     fail "self-check touched the decoy"
   fi
   for foreign_pid in $foreign; do
     [[ -n "$foreign_pid" ]] || continue
-    if ! kill -0 "$foreign_pid" 2>/dev/null; then
+    if ! pid_alive "$foreign_pid"; then
       fail "self-check foreign pid $foreign_pid is gone"
     fi
   done
@@ -1288,7 +1330,7 @@ orphan_reap_check() {
   if [[ "$runtime" == "real" ]]; then
     old_embed="$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)"
   fi
-  log "orphan-reap kill -9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
+  log "orphan-reap signal 9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
   kill -9 "$APP_PID" 2>/dev/null || true
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
@@ -1447,6 +1489,21 @@ open_clean_check() {
   others="$(cookieagent_comm_pids | tr '\n' ' ')"
   if [[ -n "${others// /}" ]]; then
     log "open-clean skipped: another CookieAgent is running (pid ${others}); not launching into Application Support and not signaling those pids"
+    if [[ -n "$evidence" ]]; then
+      mkdir -p "$evidence"
+      {
+        printf '%s\n' "open-clean skipped"
+        printf '%s\n' "reason=another CookieAgent is running"
+        printf '%s\n' "pids=${others}"
+        printf '%s\n' "signaled=none"
+      } > "$evidence/open-clean-skip.txt"
+      if [[ -f "$evidence/command.txt" ]]; then
+        printf '%s\n' "open-clean=skipped" >> "$evidence/command.txt"
+      fi
+    fi
+    # Return 0. A non-zero return under `cmd || …` would disable errexit for
+    # this whole function, including the launch and SIGTERM that follow a real run.
+    open_clean_status=3
     return 0
   fi
   local support port_before shell_log log_mark
@@ -1650,7 +1707,12 @@ open_clean_check() {
   fi
 }
 
+open_clean_status=0
 open_clean_check
+if [[ "$open_clean_status" -ne 0 ]]; then
+  log "skipped"
+  exit "$open_clean_status"
+fi
 
 log "ok"
 log "Mac proof is pending until this transcript is saved under verify-evidence/ and the feature files are updated."

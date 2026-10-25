@@ -44,10 +44,10 @@ while i < len(lines):
     elif "osascript_run -e '" in line:
         rest = line.split("osascript_run -e ", 1)[1]
         if not rest.startswith("'"):
-            sys.exit("expected a single-quoted osascript -e script")
+            sys.exit("expected a single-quoted -e script")
         end = rest.find("'", 1)
         if end < 0:
-            sys.exit("unterminated osascript -e script")
+            sys.exit("unterminated -e script")
         blocks.append(rest[1:end] + "\n")
     i += 1
 if not blocks:

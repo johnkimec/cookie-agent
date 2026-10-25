@@ -5,13 +5,24 @@ real_path() {
   python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
 }
 
+# macOS `ps -o comm=` is the full executable path. `Cookie Agent.app` contains a
+# space, so field $2 is only `/Applications/Cookie`. Strip the leading pid and
+# take the basename of the rest of the line. `-ww` keeps the path from being
+# truncated at the terminal width.
 comm_pids_named() {
   local want="$1"
-  ps -ax -o pid=,comm= 2>/dev/null | awk -v want="$want" '
-    NF >= 2 {
-      name = $2
-      n = split(name, parts, "/")
-      if (parts[n] == want && !seen[$1]++) print $1
+  ps -axww -o pid=,comm= 2>/dev/null | awk -v want="$want" '
+    {
+      pid = $1
+      path = $0
+      if (path !~ /^[[:space:]]*[0-9]+[[:space:]]+/) next
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", path)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", path)
+      if (path == "") next
+      n = split(path, parts, "/")
+      name = parts[n]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      if (name == want && pid ~ /^[0-9]+$/ && !seen[pid]++) print pid
     }
   '
 }
@@ -22,7 +33,8 @@ cookieagent_comm_pids() {
 
 process_comm_name() {
   local pid="$1"
-  ps -p "$pid" -o comm= 2>/dev/null | awk '
+  # The whole line is the comm value. It may be a full path with spaces.
+  ps -ww -p "$pid" -o comm= 2>/dev/null | awk '
     {
       name = $0
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
@@ -207,4 +219,60 @@ verify_drive_pid_reason() {
     fi
   fi
   return 0
+}
+
+status_field() {
+  python3 -c 'import sys; parts=sys.argv[1].strip().split("\t"); i=int(sys.argv[2]); print(parts[i-1] if 0 < i <= len(parts) else "")' "$1" "$2"
+}
+
+# Observation line from observe_status:
+# pid, AXSelected (yes/no), menu position "x,y" or "-", menu size "w,h" or "-", window count.
+# Open when AXSelected is yes, or the status item's menu has an on-screen position
+# and a positive size. A closed menu still exposes its items; that count is not a
+# field here and must not decide this. A 0,0 position is not on screen.
+status_menu_open() {
+  local line="$1"
+  local selected pos size width height x y
+  selected="$(status_field "$line" 2)"
+  if [[ "$selected" == "yes" ]]; then
+    return 0
+  fi
+  pos="$(status_field "$line" 3)"
+  size="$(status_field "$line" 4)"
+  [[ "$pos" =~ ^[0-9]+,[0-9]+$ ]] || return 1
+  [[ "$size" =~ ^[0-9]+,[0-9]+$ ]] || return 1
+  x="${pos%%,*}"
+  y="${pos#*,}"
+  width="${size%%,*}"
+  height="${size#*,}"
+  # y = 0 is the menu-bar edge. A closed menu that still reports a size uses 0,0.
+  [[ "$y" -gt 0 && "$width" -gt 0 && "$height" -gt 0 ]]
+}
+
+status_open_fields() {
+  local line="$1"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$(status_field "$line" 2)" \
+    "$(status_field "$line" 3)" \
+    "$(status_field "$line" 4)" \
+    "$(status_field "$line" 5)"
+}
+
+# Self-check deletes only its own /tmp/cookie-m0.<token> directory.
+# /tmp/cookie-m0-decoy.<token> belongs to the decoy cleanup, not this one.
+drive_temp_data_dir() {
+  local dir="$1"
+  local base
+  case "$dir" in
+    /tmp/cookie-m0-decoy.*)
+      return 0
+      ;;
+    /tmp/cookie-m0.*)
+      base="${dir#/tmp/}"
+      case "$base" in
+        */*) return 0 ;;
+      esac
+      printf '%s\n' "$dir"
+      ;;
+  esac
 }

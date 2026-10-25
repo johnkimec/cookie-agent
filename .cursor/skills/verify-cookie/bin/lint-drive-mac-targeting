@@ -1,6 +1,7 @@
 #!/bin/bash
-# Fail if a drive script targets Cookie by process name.
+# Fail if a drive script targets Cookie by process name or signal.
 # Linux CI runs this. It does not launch the app.
+# This file is not scanned: its self-test fixtures contain the patterns it rejects.
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,85 +15,101 @@ fail() {
   exit 1
 }
 
-# Used inside lint_tree so a self-test can catch the failure.
 lint_fail() {
   printf '%s\n' "$*" >&2
   return 1
 }
 
-# Print matching lines. Return 1 when pattern is absent.
-scan() {
-  local pattern="$1"
-  local file="$2"
-  python3 - "$pattern" "$file" <<'PY'
-import re, sys
-pattern, path = sys.argv[1], sys.argv[2]
-rx = re.compile(pattern)
+# Per-line bans. An allowed osascript line is the one helper invocation.
+# key down option is the one deferred option-click. Every other key down fails.
+lint_lines() {
+  python3 - "$@" <<'PY'
+import re
+import sys
+
+files = sys.argv[1:]
+osascript_word = re.compile(r"\bosascript\b")
+helper = ("COOKIE_DRIVE_PID=", "COOKIE_DRIVE_PROCESS_NAME=", "COOKIE_DRIVE_BUNDLE_ID=", "/usr/bin/osascript")
+tell_process = re.compile(r'tell\s+process\s+"')
+tell_app = re.compile(r"tell\s+(app|application)\b(.*)$")
+system_events = re.compile(r'^"System Events"(\s|$)')
+whose_name = re.compile(r"whose\s+name\b")
+key_down = re.compile(r"\bkey down\b")
+key_down_option = re.compile(r"\bkey down option\b")
+keystroke = re.compile(r"\bkeystroke\b")
+pgrep = re.compile(r"\bpgrep\b")
+pgrep_parent = re.compile(r"\bpgrep\s+-P\b")
+kill_word = re.compile(r"\bkill\b")
+kill_ok = re.compile(
+    r"""(?:^|[^\w.])kill(?:\s+-[0-9A-Za-z]+)?\s+"\$(?:pid|APP_PID|DECOY_PID)\""""
+)
+pkill = re.compile(r"\bpkill\b")
+killall = re.compile(r"\bkillall\b")
+quit_app = re.compile(r"\bquit\s+app(?:lication)?\b")
+
 hits = []
-for number, line in enumerate(open(path, encoding="utf-8"), 1):
-    if rx.search(line):
-        hits.append(f"{path}:{number}:{line.rstrip()}")
+
+def add(label, path, number, text):
+    hits.append(f"{label}: {path}:{number}:{text}")
+
+for path in files:
+    with open(path, encoding="utf-8") as handle:
+        for number, raw in enumerate(handle, 1):
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("--"):
+                continue
+            if osascript_word.search(line) and not all(part in line for part in helper):
+                add("osascript outside osascript_run", path, number, stripped)
+            if tell_process.search(line):
+                add("name-based tell process", path, number, stripped)
+            match = tell_app.search(line)
+            if match and not system_events.match(match.group(2).strip()):
+                add("tell other than System Events", path, number, stripped)
+            if whose_name.search(line):
+                add("whose name", path, number, stripped)
+            if key_down.search(line) and not key_down_option.search(line):
+                add("key down", path, number, stripped)
+            if keystroke.search(line) and "refusing keystroke:" not in line:
+                add("keystroke is not pid-targeted", path, number, stripped)
+            if pgrep.search(line):
+                rest = pgrep_parent.sub("", line)
+                if pgrep.search(rest):
+                    add("pgrep", path, number, stripped)
+            if pkill.search(line):
+                add("pkill", path, number, stripped)
+            if killall.search(line):
+                add("killall", path, number, stripped)
+            if quit_app.search(line):
+                add("quit app by name", path, number, stripped)
+            if kill_word.search(line) and not re.match(r"kill\s*\(\)\s*\{", stripped):
+                rest = kill_ok.sub("", line)
+                if kill_word.search(rest):
+                    add("kill is only allowed", path, number, stripped)
+
 if hits:
-    print("\n".join(hits))
+    print("\n".join(hits), file=sys.stderr)
     sys.exit(1)
 PY
 }
 
-require_clean() {
-  local label="$1"
-  local pattern="$2"
-  shift 2
-  local file hit
-  for file in "$@"; do
-    if hit="$(scan "$pattern" "$file")"; then
-      continue
-    fi
-    printf '%s\n' "$hit" >&2
-    lint_fail "$label"
-    return 1
-  done
-}
-
-lint_tree() {
+lint_drive_shape() {
   local drive="$1"
-  local lib="$2"
   [[ -f "$drive" ]] || { lint_fail "missing $drive"; return 1; }
-  [[ -f "$lib" ]] || { lint_fail "missing $lib"; return 1; }
-  local files=("$drive" "$lib")
-  local extra
-  shopt -s nullglob
-  for extra in "$BIN_DIR"/scripts/*.applescript; do
-    files+=("$extra")
-  done
-  shopt -u nullglob
-
-  require_clean "name-based tell process" 'tell process "' "${files[@]}" || return 1
-  require_clean "tell application Cookie by name" 'tell application "Cookie' "${files[@]}" || return 1
-  require_clean "quit app by name" 'quit app' "${files[@]}" || return 1
-  require_clean "pkill" '\bpkill\b' "${files[@]}" || return 1
-  require_clean "killall" '\bkillall\b' "${files[@]}" || return 1
-  require_clean "pgrep by process name" 'pgrep -x' "${files[@]}" || return 1
-  require_clean "osascript outside osascript_run" '/usr/bin/osascript' "$lib" || return 1
-
-  local osa_lines
-  osa_lines="$(grep -n '/usr/bin/osascript' "$drive" || true)"
-  local osa_count=0
+  local osa_lines osa_count
+  osa_lines="$(grep -n -E '\bosascript\b' "$drive" || true)"
+  osa_count=0
   if [[ -n "$osa_lines" ]]; then
     osa_count="$(printf '%s\n' "$osa_lines" | wc -l | tr -d ' ')"
   fi
   if [[ "$osa_count" -ne 1 ]]; then
     printf '%s\n' "$osa_lines" >&2
-    lint_fail "drive-mac must call /usr/bin/osascript from exactly one helper (found $osa_count)" || return 1
+    lint_fail "drive-mac must call osascript from exactly one helper (found $osa_count)" || return 1
   fi
   case "$osa_lines" in
-    *'COOKIE_DRIVE_PID='*'COOKIE_DRIVE_PROCESS_NAME='*'COOKIE_DRIVE_BUNDLE_ID='*) ;;
+    *'COOKIE_DRIVE_PID='*'COOKIE_DRIVE_PROCESS_NAME='*'COOKIE_DRIVE_BUNDLE_ID='*'/usr/bin/osascript'*) ;;
     *) lint_fail "the osascript helper must set COOKIE_DRIVE_PID, COOKIE_DRIVE_PROCESS_NAME, and COOKIE_DRIVE_BUNDLE_ID" || return 1 ;;
   esac
-
-  if grep -n -E '\bkeystroke\b' "$drive" "$lib" | grep -v 'refusing keystroke:' >/dev/null; then
-    grep -n -E '\bkeystroke\b' "$drive" "$lib" | grep -v 'refusing keystroke:' >&2 || true
-    lint_fail "keystroke is not pid-targeted; drive the field with AX" || return 1
-  fi
   local key_lines key_count
   key_lines="$(grep -n 'key code' "$drive" || true)"
   key_count=0
@@ -112,6 +129,12 @@ lint_tree() {
   return 0
 }
 
+lint_tree() {
+  lint_lines "$@" || return 1
+  lint_drive_shape "$1" || return 1
+  return 0
+}
+
 self_test() {
   local tmp
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-lint.XXXXXX")"
@@ -124,8 +147,15 @@ send_key_code() {
   key code keyCode
 }
 set cookieProc to my cookieDriveProcess()
+kill -0 "$pid"
+kill "$APP_PID"
+kill -9 "$DECOY_PID"
+children="$(pgrep -P "$current")"
+tell application "System Events"
+key down option
 EOF
   printf '%s\n' 'on cookieDriveProcess()' >"$tmp/good-lib"
+  printf '%s\n' 'tell application "System Events"' >>"$tmp/good-lib"
   lint_tree "$tmp/good-drive" "$tmp/good-lib"
 
   assert_rejects() {
@@ -133,7 +163,6 @@ EOF
     local body="$2"
     printf '%s\n' "$body" >"$tmp/bad-drive"
     cp "$tmp/good-lib" "$tmp/bad-lib"
-    # Keep the helper shape so only the planted pattern fails.
     cat >>"$tmp/bad-drive" <<'EOF'
 osascript_run() {
   COOKIE_DRIVE_PID="$target_pid" COOKIE_DRIVE_PROCESS_NAME="$target_name" COOKIE_DRIVE_BUNDLE_ID="$target_bundle" /usr/bin/osascript "$tmp"
@@ -154,12 +183,22 @@ EOF
   }
 
   assert_rejects "name-based tell process" 'tell process "CookieAgent"'
-  assert_rejects "tell application Cookie by name" 'tell application "Cookie Agent" to activate'
+  assert_rejects "name-based tell process" 'tell process  "CookieAgent"'
+  assert_rejects "tell other than System Events" 'tell application "Cookie Agent" to activate'
+  assert_rejects "tell other than System Events" 'tell application id "com.johnkimec.cookie-agent"'
+  assert_rejects "tell other than System Events" 'tell app "Cookie Agent"'
+  assert_rejects "whose name" 'first process whose name is "CookieAgent"'
   assert_rejects "quit app by name" "osascript -e 'quit app \"Cookie Agent\"'"
   assert_rejects "pkill" 'pkill -TERM CookieAgent'
   assert_rejects "killall" 'killall CookieAgent'
-  assert_rejects "pgrep by process name" 'pgrep -x CookieAgent'
+  assert_rejects "pgrep" 'pgrep -x CookieAgent'
+  assert_rejects "pgrep" 'pgrep -f CookieAgent'
+  assert_rejects "pgrep" 'kill $(pgrep CookieAgent)'
+  assert_rejects "kill is only allowed" 'kill -9 $(lsof -ti :8080)'
+  assert_rejects "osascript outside osascript_run" 'osascript -e "beep"'
+  assert_rejects "osascript outside osascript_run" 'osascript -l JavaScript -e "Application(\"System Events\")"'
   assert_rejects "keystroke is not pid-targeted" 'keystroke "hello"'
+  assert_rejects "key down" 'key down command'
 
   python3 - "$PREPEND" "$LIB" "$tmp/use-src.applescript" "$tmp/use-out.applescript" <<'PY'
 import pathlib, subprocess, sys
@@ -186,7 +225,24 @@ PY
 }
 
 self_test
-lint_tree "$DRIVE" "$LIB"
+lint_drive_shape "$DRIVE"
+
+bin_files=()
+while IFS= read -r extra; do
+  [[ -n "$extra" ]] || continue
+  bin_files+=("$extra")
+done < <(find "$BIN_DIR" -type f ! -name 'lint-drive-mac-targeting' | sort)
+lint_lines "${bin_files[@]}"
+
+option_lines="$(grep -n 'key down' "${bin_files[@]}" || true)"
+option_count=0
+if [[ -n "$option_lines" ]]; then
+  option_count="$(printf '%s\n' "$option_lines" | wc -l | tr -d ' ')"
+fi
+if [[ "$option_count" -ne 1 ]] || ! printf '%s\n' "$option_lines" | grep -q 'key down option'; then
+  printf '%s\n' "$option_lines" >&2
+  fail "key down option must appear once, inside option_click_status (found $option_count)"
+fi
 
 for needle in \
   'whose unix id is drivePid' \

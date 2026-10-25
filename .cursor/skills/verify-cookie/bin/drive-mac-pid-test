@@ -1,5 +1,5 @@
 #!/bin/bash
-# Linux-side checks for drive-mac pid verification. No app, no osascript.
+# Linux-side checks for drive-mac pid verification. No app and no AppleScript.
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,12 +13,13 @@ export FIXTURE
 
 cat >"$FIXTURE/bin/ps" <<'EOF'
 #!/bin/bash
-if [[ "$*" == "-ax -o pid=,comm=" ]]; then
+# macOS prints the full executable path, including spaces in Cookie Agent.app.
+if [[ "$*" == "-axww -o pid=,comm=" ]]; then
   awk -F '|' '{ print $1, $2 }' "$FIXTURE/procs"
   exit 0
 fi
-if [[ "$1" == "-p" && "$3" == "-o" && "$4" == "comm=" ]]; then
-  awk -F '|' -v pid="$2" '$1 == pid { print $2; exit }' "$FIXTURE/procs"
+if [[ "$1" == "-ww" && "$2" == "-p" && "$4" == "-o" && "$5" == "comm=" ]]; then
+  awk -F '|' -v pid="$3" '$1 == pid { print $2; exit }' "$FIXTURE/procs"
   exit 0
 fi
 printf 'unexpected ps %s\n' "$*" >&2
@@ -46,7 +47,7 @@ kill() {
     awk -F '|' -v pid="$2" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }' "$FIXTURE/procs"
     return
   fi
-  builtin kill "$@"
+  return 0
 }
 
 write_procs() {
@@ -85,9 +86,9 @@ expect_fail() {
 }
 
 write_procs \
-  "111|CookieAgent|$JOHN" \
-  "222|CookieAgent|$OURS" \
-  "333|CookieAgent|$DECOY"
+  "111|$JOHN|$JOHN" \
+  "222|$OURS|$OURS" \
+  "333|$DECOY|$DECOY"
 
 expect_ok 222 "$OURS"
 expect_ok 111 "$JOHN"
@@ -101,21 +102,44 @@ expect_fail "" "$OURS" "not one integer"
 
 # A dylib listed before the executable still matches the bundle we launched.
 write_procs \
-  "222|CookieAgent|/usr/lib/dyld;$OURS"
+  "222|$OURS|/usr/lib/dyld;$OURS"
 expect_ok 222 "$OURS"
 
 # Two processes at the same path are ambiguous.
 write_procs \
-  "222|CookieAgent|$OURS" \
-  "444|CookieAgent|$OURS"
+  "222|$OURS|$OURS" \
+  "444|$OURS|$OURS"
 expect_fail 222 "$OURS" "also pid 444"
 expect_fail 444 "$OURS" "also pid 222"
 
 # John's process does not make our path ambiguous.
 write_procs \
-  "111|CookieAgent|$JOHN" \
-  "222|CookieAgent|$OURS"
+  "111|$JOHN|$JOHN" \
+  "222|$OURS|$OURS"
 expect_ok 222 "$OURS"
+
+# macOS comm is the full path. The space in Cookie Agent.app must not hide it.
+write_procs "111|/Applications/Cookie Agent.app/Contents/MacOS/CookieAgent|$JOHN"
+spaced="$(comm_pids_named CookieAgent | tr -d '[:space:]')"
+if [[ "$spaced" != "111" ]]; then
+  printf 'spaced CookieAgent path was not found, got %s\n' "${spaced:-empty}" >&2
+  exit 1
+fi
+if [[ "$(process_comm_name 111)" != "CookieAgent" ]]; then
+  printf 'basename of spaced comm was %s\n' "$(process_comm_name 111)" >&2
+  exit 1
+fi
+if [[ -n "$(comm_pids_named Cookie | tr -d '[:space:]')" ]]; then
+  printf 'path component Cookie matched as the process name\n' >&2
+  exit 1
+fi
+# A short comm value still matches, for a ps that does not print a path.
+write_procs "555|CookieAgent|$JOHN"
+short="$(comm_pids_named CookieAgent | tr -d '[:space:]')"
+if [[ "$short" != "555" ]]; then
+  printf 'short CookieAgent comm was not found, got %s\n' "${short:-empty}" >&2
+  exit 1
+fi
 
 expect_identity_ok() {
   local pid="$1" bin="$2" name="$3" bundle="$4"
@@ -179,26 +203,120 @@ DRIVE_BIN="$(write_bundle "$FIXTURE/drive.app" "$DRIVE_NAME" "$DRIVE_BUNDLE")"
 DECOY_BIN="$(write_bundle "$FIXTURE/decoy.app" "$DECOY_NAME" "$DECOY_BUNDLE")"
 
 write_procs \
-  "111|CookieAgent|$JOHN" \
-  "222|$DRIVE_NAME|$DRIVE_BIN" \
-  "333|$DECOY_NAME|$DECOY_BIN"
+  "111|$JOHN|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN" \
+  "333|$DECOY_BIN|$DECOY_BIN"
 expect_identity_ok 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE"
 expect_identity_ok 333 "$DECOY_BIN" "$DECOY_NAME" "$DECOY_BUNDLE"
 expect_identity_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "com.johnkimec.cookie-agent" "installed app"
 expect_identity_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "com.johnkimec.cookie-agent.drive" "not a per-run drive bundle id"
 expect_identity_fail 111 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "executable is not"
 
-write_procs "222|CookieAgent|$DRIVE_BIN"
+write_procs "222|/tmp/other/CookieAgent|$DRIVE_BIN"
 expect_name_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "process name is CookieAgent"
 expect_identity_fail 222 "$DRIVE_BIN" "CookieAgent" "$DRIVE_BUNDLE" "product executable"
 expect_identity_fail 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "expected exactly one"
 
 MISMATCH="$(write_bundle "$FIXTURE/mismatch.app" "$DRIVE_NAME" "$DRIVE_BUNDLE" "CookieAgent" "$DRIVE_BUNDLE")"
-write_procs "222|$DRIVE_NAME|$MISMATCH"
+write_procs "222|$MISMATCH|$MISMATCH"
 expect_identity_fail 222 "$MISMATCH" "$DRIVE_NAME" "$DRIVE_BUNDLE" "CFBundleExecutable"
 
 BUNDLE_MISMATCH="$(write_bundle "$FIXTURE/bundle-mismatch.app" "$DRIVE_NAME" "$DRIVE_BUNDLE" "$DRIVE_NAME" "com.johnkimec.cookie-agent")"
-write_procs "222|$DRIVE_NAME|$BUNDLE_MISMATCH"
+write_procs "222|$BUNDLE_MISMATCH|$BUNDLE_MISMATCH"
 expect_identity_fail 222 "$BUNDLE_MISMATCH" "$DRIVE_NAME" "$DRIVE_BUNDLE" "bundle id is"
+
+expect_menu() {
+  local expect="$1"
+  local line="$2"
+  local opened=0
+  if status_menu_open "$line"; then
+    opened=1
+  fi
+  if [[ "$expect" == "open" && "$opened" -ne 1 ]]; then
+    printf 'expected menu open, got closed: %s\n' "$line" >&2
+    exit 1
+  fi
+  if [[ "$expect" == "closed" && "$opened" -ne 0 ]]; then
+    printf 'expected menu closed, got open: %s\n' "$line" >&2
+    exit 1
+  fi
+}
+
+# pid, AXSelected, exposed item count, position, size, window count.
+# The item count is accepted and dropped. It must not appear on the line.
+facts_line() {
+  local items="$3"
+  : "$items"
+  printf '%s\t%s\t%s\t%s\t%s' "$1" "$2" "$4" "$5" "$6"
+}
+
+# Sergey's self-check line: AXSelected no, the old item-count signal yes, windows 0.
+expect_menu closed $'19527\tno\tyes\t0'
+# Closed menu with items exposed. No on-screen position.
+expect_menu closed "$(facts_line 19527 no 4 - - 0)"
+# AXSelected opens the menu even when nothing is on screen.
+expect_menu open "$(facts_line 19527 yes 0 - - 0)"
+# Status-item menu with an on-screen position and a positive size.
+expect_menu open "$(facts_line 19527 no 4 120,28 180,200 1)"
+# A closed menu can still report a size at the placeholder origin.
+expect_menu closed "$(facts_line 19527 no 4 0,0 180,200 0)"
+expect_menu closed "$(facts_line 19527 no 4 120,28 0,90 1)"
+# Some other window of this pid is not the status menu.
+expect_menu closed "$(facts_line 19527 no 4 - - 2)"
+expect_menu closed "$(facts_line 19527 no 4 10,-4 180,200 1)"
+
+if [[ "$(drive_temp_data_dir /tmp/cookie-m0.Ab12Cd)" != "/tmp/cookie-m0.Ab12Cd" ]]; then
+  printf 'drive data dir was not recognized\n' >&2
+  exit 1
+fi
+if [[ -n "$(drive_temp_data_dir /tmp/cookie-m0-decoy.Ab12Cd)" ]]; then
+  printf 'decoy data dir was treated as the drive data dir\n' >&2
+  exit 1
+fi
+if [[ -n "$(drive_temp_data_dir /tmp/cookie-m0.Ab12Cd/nested)" ]]; then
+  printf 'nested data path was accepted\n' >&2
+  exit 1
+fi
+if [[ -n "$(drive_temp_data_dir /tmp/not-cookie)" ]]; then
+  printf 'unrelated temp dir was accepted\n' >&2
+  exit 1
+fi
+if [[ -n "$(drive_temp_data_dir "$HOME/Library/Application Support/com.johnkimec.cookie-agent")" ]]; then
+  printf 'Application Support was accepted for deletion\n' >&2
+  exit 1
+fi
+
+observe="$(awk '
+  /^observe_status\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$BIN_DIR/drive-mac")"
+case "$observe" in
+  *'menu items'*)
+    printf 'observe_status still decides from menu items\n' >&2
+    exit 1
+    ;;
+esac
+case "$observe" in
+  *AXSelected*) ;;
+  *)
+    printf 'observe_status does not read AXSelected\n' >&2
+    exit 1
+    ;;
+esac
+case "$observe" in
+  *'position of statusMenu'*) ;;
+  *)
+    printf 'observe_status does not read the status menu position\n' >&2
+    exit 1
+    ;;
+esac
+case "$observe" in
+  *'size of statusMenu'*) ;;
+  *)
+    printf 'observe_status does not read the status menu size\n' >&2
+    exit 1
+    ;;
+esac
 
 printf '%s\n' "drive-mac pid test ok"

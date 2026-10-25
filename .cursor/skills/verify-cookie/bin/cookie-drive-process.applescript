@@ -1,5 +1,5 @@
 -- Prepended by osascript_run. Callers use `my cookieDriveProcess()`.
--- The pid, process name, and bundle id are set only for this osascript.
+-- The pid, process name, and bundle id are set only for this run.
 -- A mismatch on any of the three is an error. The product name and bundle id never match.
 on cookieDriveProcess()
   set rawPid to system attribute "COOKIE_DRIVE_PID"
