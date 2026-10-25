@@ -6,7 +6,10 @@ This is the build plan for M1. It adds no scope to [cookie-agent.md](./cookie-ag
 
 ## Progress
 
-Draft. Open: John's picks on D1–D5 and the open questions at the end.
+Approved by John on 2026-10-25. He accepted the recommendations in "John's answers", including D1 (`better-sqlite3` 12.11.1; see the D1 update and `D-2026-10-25-02`).
+
+- Step 0 is merged: PR #11, `d3cdd97` (better-sqlite3 spike and memory contracts).
+- Step 1A (SQLite store, append-only turns, FTS5, session boundaries, replace `ConversationMemory`) is in progress. The app owns the popup and its 10-minute draft TTL. It mints a new `conversationId` for a new chat (⌘K or ⌘N) and after the popup has been closed for 10 minutes. The core ends the previous session when that id changes. It does not run a window timer. Protocol 0.1 is unchanged.
 
 ## Goal
 
@@ -62,13 +65,15 @@ Not M1 scope in the design doc, but it runs alongside because it is Swift-side a
 
 ## Protocol
 
-**No protocol change is planned.** M1 stays on `0.1`:
+**No protocol version bump is planned.** M1 stays on `0.1`:
 
 - The DB path reaches the core through `COOKIE_DATA_DIR`, which the shell already sets on spawn.
 - The embedding server is a dependency the core degrades around (BM25-only), not a status the UI shows. `runtime.status` keeps describing the chat model.
 - The Stop control uses the existing `chat.cancel`.
 
 If John wants any memory UI in M1 (Q6), that needs `memory.list` / `memory.forget` methods. That would be protocol `0.2`, with a schema change, golden examples, and Swift Codable types, landed contract-first before either side builds against it.
+
+Step 1A does not change protocol 0.1. `protocol/` matches main. A new chat, and a popup that has been closed for 10 minutes, are both a new `conversationId` on the existing `chat.send`. The app mints that id. The core ends the previous open session when the id changes and does not time the window. `shutdown` does not end the session.
 
 ## Decisions for John
 
@@ -80,6 +85,8 @@ Each one changes what a later task builds. Options, then my recommendation. John
 2. **`better-sqlite3`**. Mature and fast, but a native addon that has to be rebuilt per Node version and complicates SEA packaging.
 
 Recommendation: 1, if the spike in Step 0 passes on macOS and on Linux CI. It probably means raising `engines` from `>=22.6`. The existing `--disable-warning=ExperimentalWarning` flag already covers its warning.
+
+**Update (2026-10-25).** The Node 22.13.0 spike failed FTS5 on `node:sqlite` (SQLite 3.47.2, `no such module: fts5`) on Linux and on macOS arm64. Evidence is GitHub Actions run [40217048358](https://github.com/johnkimec/cookie-agent/actions/runs/40217048358) and the archived script `core/scripts/spike-node-sqlite.mjs`. John, relayed by the principal engineer, picked option 2. The core uses `better-sqlite3` 12.11.1 (prebuild for Node ABI 127). Release 13.x's bundled prebuild segfaults on Node 22.13.0 at `new Database()`. `engines` stays `>=22.6`. Logged as `D-2026-10-25-02`. This supersedes the D1 pick in John's answers below.
 
 ### D2: Embedding model and how it runs
 
@@ -144,7 +151,7 @@ Contract first, then parallel work, then one integration run on the Mac. One tas
 
 ### Step 0: contract and spike (one PR, Sergey with Engineer 1)
 
-- Spike: on Node 22.13 (Mac) and CI's Node 22, confirm `node:sqlite` opens WAL, has FTS5, and can load sqlite-vec. Record the result as a lesson.
+- Spike: Node 22.13 `node:sqlite` failed FTS5 (see the D1 update). The replacement spike is `better-sqlite3` 12.11.1 on Node 22.13 (Mac and CI): WAL, FTS5 including `bm25()`, sqlite-vec via `loadExtension`, and a prebuild install with no compile. Record the result as a lesson.
 - Land the SQL migration `001` matching the design doc schema, the TypeScript interfaces above with fakes, `features/memory.md` (all `planned`), and the eval task format with two sample tasks.
 - **Depends on:** D1, D5, and this doc merged.
 - **Verify:** CI green. Migration test opens a temp DB and lists the tables. The spike output is in the PR.
@@ -189,7 +196,7 @@ M1 is the memory and retrieval milestone, so these come up at implementation tim
 | Risk | Mitigation |
 | --- | --- |
 | Reranking the top 20 with Qwen adds several thousand fresh tokens and blows the 2 s first-token goal | Measure in Step 2D. If it's over, I bring John options (smaller rerank set, rerank only when fusion is unsure) instead of quietly dropping it. |
-| `node:sqlite` or sqlite-vec doesn't work on Node 22.13 | Step 0 spike runs before anything builds on it. Fallbacks: D1 option 2, and the brute-force cosine path the design doc already requires. |
+| `node:sqlite` lacks FTS5 on Node 22.13 | Happened. D1 is now `better-sqlite3` 12.11.1. The brute-force cosine path still covers a sqlite-vec failure. |
 | Reflect writes wrong facts | Every fact keeps `source_turn` and confidence, contradictions supersede, and derived tables are rebuildable. |
 | Local tool calls in D3 are unreliable | Schema validation and one local repair, as in the design doc's escalation path. Recall does not depend on the tool. |
 
@@ -209,7 +216,7 @@ M1 is the memory and retrieval milestone, so these come up at implementation tim
 
 John approved every recommendation as written:
 
-- **D1:** `node:sqlite`, as long as the step 0 spike confirms it supports WAL, FTS5 and loading sqlite-vec.
+- **D1:** `better-sqlite3` 12.11.1. The `node:sqlite` spike on Node 22.13.0 failed FTS5. See the D1 update above and `D-2026-10-25-02`. The original pick was `node:sqlite` if that spike passed.
 - **D2:** a second `llama-server --embeddings` process.
 - **D3:** "remember" and "forget" are `memory.*` tools.
 - **D4:** the reflect job waits until chat is idle.
@@ -227,3 +234,6 @@ Still open: John's top popup issues for the polish sub-track.
 ## Change history
 
 - 2026-10-25 — Created from the design doc's M1 row after M0 finished (main `e5570a8`).
+- 2026-10-25 — D1 switched to `better-sqlite3` 12.11.1 after the `node:sqlite` spike on Node 22.13.0 failed FTS5 (`no such module: fts5`). Logged as `D-2026-10-25-02`.
+- 2026-10-25 — Progress updated after Step 0 merged (PR #11, `d3cdd97`). Step 1A is in progress. New-chat session end uses `chat.send` `conversationId`. `session.window` is proposed for the 10-minute closed window and is not a decision-log entry.
+- 2026-10-25 — The `session.window` proposal is dropped. Protocol 0.1 stays unchanged in M1. The app owns the 10-minute popup TTL and mints a new `conversationId` for a new chat and after the popup has been closed for 10 minutes. The core ends the previous session on that id and does not run a window timer. This supersedes the `session.window` sentence in the Progress update above.
