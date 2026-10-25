@@ -546,7 +546,7 @@ function isTransientIndexError(error: unknown): boolean {
     }
     if (
       typeof record.message === "string" &&
-      /timeout|timed out|econnrefused|econnreset|embedder unreachable/i.test(
+      /timeout|timed out|econnrefused|econnreset|embedder unreachable|embedder status (?:429|503)/i.test(
         record.message,
       )
     ) {

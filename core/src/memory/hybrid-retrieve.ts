@@ -121,10 +121,12 @@ export class HybridRetriever {
     const now = this.now();
     const forgotten = readForgottenTurnIds(this.store);
     const omit = omitTurnIds ?? new Set<string>();
+    const counts = turnTokenCounts(this.db, query);
     const facts = match === "" ? [] : this.bm25Facts(match, now);
     const turns =
-      match === "" ? [] : this.bm25Turns(match, forgotten, omit, query);
-    const summaries = match === "" ? [] : this.bm25Summaries(query, forgotten);
+      match === "" ? [] : this.bm25Turns(match, forgotten, omit, query, counts);
+    const summaries =
+      match === "" ? [] : this.bm25Summaries(query, forgotten, counts);
     const byId = new Map<string, Memory>();
     for (const memory of [...facts, ...turns, ...summaries]) {
       remember(byId, memory);
@@ -244,6 +246,7 @@ export class HybridRetriever {
     forgotten: ReadonlySet<string>,
     omit: ReadonlySet<string>,
     query: string,
+    counts: ReadonlyMap<string, number>,
   ): Memory[] {
     const hidden = [...forgotten, ...omit];
     const rows = this.db
@@ -271,7 +274,7 @@ export class HybridRetriever {
         row.text,
         "turn",
         row.created_at,
-        matchSpan(row.text, query),
+        matchSpan(row.text, query, counts),
       ),
     );
   }
@@ -284,6 +287,7 @@ export class HybridRetriever {
   private bm25Summaries(
     query: string,
     forgotten: ReadonlySet<string>,
+    counts: ReadonlyMap<string, number>,
   ): Memory[] {
     const tokens = query
       .split(/[^\p{L}\p{N}]+/u)
@@ -311,7 +315,7 @@ export class HybridRetriever {
           row.summary,
           "chunk",
           row.started_at,
-          matchSpan(row.summary, query),
+          matchSpan(row.summary, query, counts),
         ),
       );
       if (out.length === this.pool) {
@@ -508,14 +512,55 @@ export function collapseChunkHits(
   return out;
 }
 
+const MATCH_STOPWORDS = new Set(
+  `a an the and or but if of to in on for at by with from as is it its be am
+   are was were do does did my me we our you your he she they them their this
+   that these those what who how when where why not no so than then into about
+   just can will would could should have has had remember forget something
+   anything tell said say know`
+    .split(/\s+/)
+    .filter((word) => word.length > 0),
+);
+
 export function ftsOrQuery(text: string): string {
   const tokens = text
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((token) => token.length > 0);
+    .filter((token) => token.length > 1)
+    .filter((token) => !MATCH_STOPWORDS.has(token.toLocaleLowerCase("en")));
   if (tokens.length === 0) {
     return "";
   }
   return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
+}
+
+/**
+ * How many `turns_fts` rows contain each match token.
+ * A lower count is rarer. The key is the token in English lowercase.
+ * A MATCH that FTS rejects counts as zero so one bad token does not
+ * drop the preview.
+ */
+export function turnTokenCounts(
+  db: Database.Database,
+  query: string,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const stmt = db.prepare(
+    "SELECT count(*) AS n FROM turns_fts WHERE turns_fts MATCH ?",
+  );
+  for (const token of matchTokens(query)) {
+    const key = token.toLocaleLowerCase("en");
+    if (counts.has(key)) {
+      continue;
+    }
+    const quoted = `"${token.replaceAll('"', '""')}"`;
+    try {
+      const row = stmt.get(quoted) as { n: number };
+      counts.set(key, row.n);
+    } catch {
+      counts.set(key, 0);
+    }
+  }
+  return counts;
 }
 
 /**
@@ -737,32 +782,37 @@ function remember(byId: Map<string, Memory>, memory: Memory): void {
   }
 }
 
-const MATCH_STOPWORDS = new Set(
-  `a an the and or but if of to in on for at by with from as is it its be am
-   are was were do does did my me we our you your he she they them their this
-   that these those what who how when where why not no so than then into about
-   just can will would could should have has had`
-    .split(/\s+/)
-    .filter((word) => word.length > 0),
-);
-
-/**
- * Whole word from `text` for the longest useful query token.
- * Stopwords and tokens under 3 characters are skipped, so "is" does not
- * match inside "This". Comparison is case-insensitive on the original
- * word, so "İ" does not shift the slice.
- */
-export function matchSpan(text: string, query: string): string | undefined {
-  const tokens = query.split(/[^\p{L}\p{N}]+/u).filter((token) => {
+function matchTokens(query: string): string[] {
+  return query.split(/[^\p{L}\p{N}]+/u).filter((token) => {
     if (token.length < 3) {
       return false;
     }
     return !MATCH_STOPWORDS.has(token.toLocaleLowerCase("en"));
   });
+}
+
+function hasDigit(token: string): boolean {
+  return /\p{N}/u.test(token);
+}
+
+/**
+ * Whole word from `text` for the best query token.
+ * Stopwords and tokens under 3 characters are skipped, so "is" does not
+ * match inside "This". A token that contains a digit wins, then the
+ * rarer token (`counts` is a `turns_fts` row count; lower is better),
+ * then the longer token, then the earliest. Comparison is
+ * case-insensitive on the original word, so "İ" does not shift the slice.
+ */
+export function matchSpan(
+  text: string,
+  query: string,
+  counts?: ReadonlyMap<string, number>,
+): string | undefined {
+  const tokens = matchTokens(query);
   if (tokens.length === 0) {
     return undefined;
   }
-  let best: { at: number; length: number; rank: number } | null = null;
+  let best: { at: number; length: number; token: string } | null = null;
   for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
     const word = match[0];
     const at = match.index;
@@ -773,13 +823,8 @@ export function matchSpan(text: string, query: string): string | undefined {
       if (word.localeCompare(token, "en", { sensitivity: "base" }) !== 0) {
         continue;
       }
-      const rank = token.length;
-      if (
-        best === null ||
-        rank > best.rank ||
-        (rank === best.rank && at < best.at)
-      ) {
-        best = { at, length: word.length, rank };
+      if (best === null || spanBeats(token, at, best, counts)) {
+        best = { at, length: word.length, token };
       }
     }
   }
@@ -787,6 +832,28 @@ export function matchSpan(text: string, query: string): string | undefined {
     return undefined;
   }
   return text.slice(best.at, best.at + best.length);
+}
+
+function spanBeats(
+  token: string,
+  at: number,
+  best: { at: number; token: string },
+  counts: ReadonlyMap<string, number> | undefined,
+): boolean {
+  const digit = hasDigit(token) ? 0 : 1;
+  const bestDigit = hasDigit(best.token) ? 0 : 1;
+  if (digit !== bestDigit) {
+    return digit < bestDigit;
+  }
+  const rare = counts?.get(token.toLocaleLowerCase("en")) ?? 0;
+  const bestRare = counts?.get(best.token.toLocaleLowerCase("en")) ?? 0;
+  if (rare !== bestRare) {
+    return rare < bestRare;
+  }
+  if (token.length !== best.token.length) {
+    return token.length > best.token.length;
+  }
+  return at < best.at;
 }
 
 function dedupeText(memories: readonly Memory[]): Memory[] {

@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { renderRetrieved } from "../context.ts";
+import { previewAround, renderRetrieved } from "../context.ts";
 import { ChatLog } from "./chat-log.ts";
 import {
   HttpEmbedder,
@@ -19,6 +19,7 @@ import {
   KNN_MAX_K,
   matchSpan,
   readRrfWeights,
+  turnTokenCounts,
 } from "./hybrid-retrieve.ts";
 import { openMemoryDatabase } from "./migrate.ts";
 import { rerankPrompt } from "./rerank.ts";
@@ -82,6 +83,10 @@ describe("RRF weights", () => {
       /COOKIE_RRF_BM25/,
     );
     expect(ftsOrQuery('ECE "midterm"')).toBe('"ECE" OR "midterm"');
+    expect(ftsOrQuery("I this is ECE")).toBe('"ECE"');
+    expect(ftsOrQuery("remember my gym locker code 4417")).toBe(
+      '"gym" OR "locker" OR "code" OR "4417"',
+    );
     expect(
       fuseRrf(
         [
@@ -674,6 +679,94 @@ describe("hybrid retrieval", () => {
     expect(matchSpan("Cafe İSTANBUL opens", "where is istanbul")).toBe(
       "İSTANBUL",
     );
+    store.close();
+  });
+
+  it("leaves stopword-only rows out of the BM25 block", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      store.appendTurn(
+        turn(`noise-${index}`, "ses", "I think this is fine", index + 1),
+      );
+    }
+    store.appendTurn(turn("hit", "ses", "ECE midterm is on Friday", 20));
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const hits = await retriever.retrieve("I this is ECE");
+    expect(hits.map((memory) => memory.id)).toEqual(["hit"]);
+    store.close();
+  });
+
+  it("centers a gym locker code on 4417", () => {
+    const filler = "Something about the week. ".repeat(30);
+    const remember = `Remember to buy food. ${filler} gym locker code is 4417. ${filler}`;
+    const rememberSpan = matchSpan(
+      remember,
+      "remember my gym locker code 4417",
+    );
+    expect(rememberSpan).toBe("4417");
+    expect(previewAround(remember, rememberSpan, 200)).toContain("4417");
+    const something = `${filler} code 4417 ${filler}`;
+    const somethingSpan = matchSpan(something, "something about the 4417 code");
+    expect(somethingSpan).toBe("4417");
+    expect(previewAround(something, somethingSpan, 200)).toContain("4417");
+  });
+
+  it("ranks a digit token ahead of a longer rarer word", () => {
+    const text = `locker ${"word ".repeat(80)}4417`;
+    const counts = new Map<string, number>([
+      ["locker", 1],
+      ["4417", 50],
+    ]);
+    expect(matchSpan(text, "locker 4417", counts)).toBe("4417");
+    expect(previewAround(text, "4417", 40)).toContain("4417");
+  });
+
+  it("ranks a rarer turn token ahead of a longer common word", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      store.appendTurn(
+        turn(`meet-${index}`, "ses", "meeting notes for the group", index + 1),
+      );
+    }
+    const filler = "weekly notes. ".repeat(40);
+    const body = `meeting ${filler}bahen room`;
+    store.appendTurn(turn("rare", "ses", body, 50));
+    const counts = turnTokenCounts(store.database(), "meeting bahen");
+    expect(counts.get("meeting")).toBe(7);
+    expect(counts.get("bahen")).toBe(1);
+    expect(matchSpan(body, "meeting bahen")).toBe("meeting");
+    expect(matchSpan(body, "meeting bahen", counts)).toBe("bahen");
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const hits = await retriever.retrieve("meeting bahen");
+    expect(hits[0]?.id).toBe("rare");
+    expect(hits[0]?.matchText).toBe("bahen");
+    expect(previewAround(body, hits[0]?.matchText, 80)).toContain("bahen");
     store.close();
   });
 

@@ -638,6 +638,42 @@ describe("content indexer", () => {
     db.close();
   });
 
+  it("does not spend attempt limit on embedder HTTP 429 or 503", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let calls = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(): Promise<Float32Array> {
+          calls += 1;
+          const status = calls % 2 === 0 ? 503 : 429;
+          throw new Error(`embedder status ${status}`);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', 'still try this turn', 1)`,
+    ).run();
+    for (
+      let attempt = 0;
+      attempt < INDEX_TURN_ATTEMPT_LIMIT + 1;
+      attempt += 1
+    ) {
+      const failed = await indexer.indexPending();
+      expect(failed.skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    }
+    expect(calls).toBe(INDEX_TURN_ATTEMPT_LIMIT + 1);
+    db.close();
+  });
+
   it("resets attempt counts after a successful batch", async () => {
     const db = openMemoryDatabase(tempDbPath());
     let mode: "bad" | "ok" = "bad";
