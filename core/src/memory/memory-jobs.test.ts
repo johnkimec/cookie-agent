@@ -312,6 +312,7 @@ describe("memory.remember and memory.forget", () => {
     ).toBe(false);
     expect(derived.forgottenTurnIds()).toEqual(["t1"]);
     expect(derived.listChunks()).toEqual([]);
+    // Pinned `ece_midterm` stays: the needle is "midterm", not the value.
     // Pinned `linked` shares t1 and stays. Unpinned `echo` on that turn goes.
     // The sibling fact on t1 stays.
     expect(
@@ -319,7 +320,7 @@ describe("memory.remember and memory.forget", () => {
         .listProfile()
         .map((row) => row.key)
         .sort(),
-    ).toEqual(["kept", "linked"]);
+    ).toEqual(["ece_midterm", "kept", "linked"]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
   });
 
