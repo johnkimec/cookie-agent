@@ -93,7 +93,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(ShellLaunchFailure.coreNotFound.statusLine, CookieCopy.coreNotFound)
         XCTAssertEqual(ShellLaunchFailure.pnpmNotFound.statusLine, CookieCopy.pnpmNotFound)
         XCTAssertEqual(PopupLayout.width, 560)
-        XCTAssertEqual(PopupLayout.maxHeight, 520)
+        XCTAssertEqual(PopupLayout.maxHeight, 320)
         XCTAssertEqual(PopupLayout.collapsedHeight, 64)
         XCTAssertEqual(PopupLayout.mascot, 40)
         XCTAssertEqual(PopupLayout.draftTTL, 600)

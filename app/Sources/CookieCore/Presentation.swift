@@ -73,10 +73,19 @@ public enum ShellLaunchFailure: Equatable, Sendable {
 
 public enum PopupLayout {
     public static let width: CGFloat = 560
-    public static let maxHeight: CGFloat = 520
+    /// Upper third of a 13-inch MacBook. The default canvas is 1470×956
+    /// points, so after the menu bar that band is about 300 points. 320
+    /// still sits there on a 13- or 14-inch display: the input row plus
+    /// about eleven 22 pt lines, then the transcript scrolls.
+    public static let maxHeight: CGFloat = 320
     public static let collapsedHeight: CGFloat = 64
     public static let mascot: CGFloat = 40
     public static let draftTTL: TimeInterval = 600
+    /// Space under the last transcript line. The follow-bottom marker
+    /// lives here and does not add a row to the stack.
+    public static let transcriptBottomInset: CGFloat = 8
+    /// Padding above the mascot. The input row's top is that far above it.
+    public static let inputRowVerticalPadding: CGFloat = 12
 }
 
 /// Product default is 10 minutes. `COOKIE_DRAFT_TTL_SECONDS` shortens that

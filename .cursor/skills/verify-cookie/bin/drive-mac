@@ -854,8 +854,49 @@ end tell
 APPLESCRIPT
 }
 
-popup_reply_metrics() {
+popup_layout_constant() {
+  local name="$1"
+  python3 - "$ROOT/app/Sources/CookieCore/Presentation.swift" "$name" <<'PY'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+name = sys.argv[2]
+match = re.search(
+    rf"static let {re.escape(name)}: CGFloat = ([0-9]+(?:\.[0-9]+)?)",
+    text,
+)
+if not match:
+    sys.exit(1)
+print(match.group(1))
+PY
+}
+
+popup_window_height() {
   osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set windowHeight to item 2 of (get size of popupWindow)
+    return windowHeight
+  end tell
+end tell
+APPLESCRIPT
+}
+
+popup_reply_metrics() {
+  local pad="$1"
+  [[ "$pad" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 2
+  local script
+  script="$(cat <<'APPLESCRIPT'
 on axid(elem)
   tell application "System Events"
     try
@@ -889,6 +930,7 @@ tell application "System Events"
     set dotElem to missing value
     set inputElem to missing value
     set bottomElem to missing value
+    set mascotElem to missing value
     repeat with elem in nodes
       set theId to my axid(elem)
       if theId is "cookie.badge.on-device.0" then error "per-message badge cookie.badge.on-device.0 is still present"
@@ -896,11 +938,13 @@ tell application "System Events"
       if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
       if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
       if theId is "cookie.popup.transcript-bottom" and bottomElem is missing value then set bottomElem to elem
+      if theId is "cookie.popup.mascot" and mascotElem is missing value then set mascotElem to elem
     end repeat
     if replyElem is missing value then error "missing cookie.turn.cookie.0"
     if dotElem is missing value then error "missing cookie.badge.on-device"
     if inputElem is missing value then error "missing cookie.popup.input"
     if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
+    if mascotElem is missing value then error "missing cookie.popup.mascot"
     set replyHeight to item 2 of (get size of replyElem)
     set dotWidth to item 1 of (get size of dotElem)
     set inputHeight to item 2 of (get size of inputElem)
@@ -914,8 +958,10 @@ tell application "System Events"
     set wWidth to item 1 of (get size of popupWindow)
     set wHeight to item 2 of (get size of popupWindow)
     set replyBottom to (item 2 of (get position of replyElem)) + replyHeight
-    set inputTop to item 2 of (get position of inputElem)
-    set gap to inputTop - replyBottom
+    set rowPad to __ROW_PAD__
+    set mascotTop to item 2 of (get position of mascotElem)
+    set rowTop to mascotTop - rowPad
+    set gap to rowTop - replyBottom
     if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= (wTop + wHeight + 4) then
       set bottomPlace to "inside"
     end if
@@ -923,6 +969,9 @@ tell application "System Events"
 end tell
 return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap
 APPLESCRIPT
+)"
+  script="${script//__ROW_PAD__/$pad}"
+  printf '%s\n' "$script" | osascript_run
 }
 
 # CGWindowList for this drive pid only. screencapture -l needs that window id.
@@ -984,13 +1033,35 @@ SWIFT
 }
 
 run_popup_reply() {
+  local max_height row_pad
+  max_height="$(popup_layout_constant maxHeight)" || fail "PopupLayout.maxHeight is missing"
+  row_pad="$(popup_layout_constant inputRowVerticalPadding)" || fail "PopupLayout.inputRowVerticalPadding is missing"
+  export POPUP_MAX_HEIGHT="$max_height"
   log "open via Ask Cookie…"
   open_via_ask
   sleep 0.6
+  log "measure empty popup"
+  local empty_height=""
+  local attempt
+  for attempt in $(seq 1 40); do
+    if empty_height="$(popup_window_height 2>/tmp/cookie-drive-mac-empty.err)"; then
+      empty_height="$(printf '%s' "$empty_height" | tr -d '[:space:]')"
+      if python3 -c 'import sys; h=float(sys.argv[1]); raise SystemExit(0 if h < 80 else 1)' "$empty_height"; then
+        break
+      fi
+    fi
+    empty_height=""
+    sleep 0.25
+  done
+  if [[ -z "$empty_height" ]]; then
+    log "empty popup"
+    cat /tmp/cookie-drive-mac-empty.err 2>/dev/null || true
+    fail "empty popup is not under 80 pt"
+  fi
+  log "empty height $empty_height"
   log "send long reply"
   send_chat
   local ready=0
-  local attempt
   for attempt in $(seq 1 80); do
     cookie_turn_value > /tmp/cookie-drive-mac-chat.txt || true
     if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
@@ -1003,9 +1074,9 @@ PY
       sleep 0.25
       continue
     fi
-    if popup_reply_metrics > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+    if popup_reply_metrics "$row_pad" > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
       if python3 - <<'PY'
-import pathlib, sys
+import os, pathlib, sys
 text = pathlib.Path("/tmp/cookie-drive-mac-metrics.txt").read_text()
 vals = {}
 for line in text.splitlines():
@@ -1021,13 +1092,14 @@ dot_width = float(vals["dotWidth"])
 input_height = float(vals["inputHeight"])
 window_height = float(vals["windowHeight"])
 gap = float(vals["gap"])
+max_height = float(os.environ["POPUP_MAX_HEIGHT"])
 ok = (
     reply_height > 40
-    and window_height > 400
+    and abs(window_height - max_height) <= 1
     and vals["bottom"] == "inside"
     and 4 < dot_width < 40
     and input_height < 48
-    and gap > 0
+    and 0 <= gap <= 16
 )
 if not ok:
     print(text.strip())
@@ -1049,8 +1121,9 @@ PY
     cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
     dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
     cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
-    fail "popup reply did not wrap, follow the bottom, and show one on-device dot"
+    fail "popup reply missed the height cap, the input-row gap, or the bottom marker"
   fi
+  printf 'emptyHeight %s\n' "$empty_height" >> /tmp/cookie-drive-mac-metrics.txt
   dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || fail "popup accessibility read failed"
   local shell_log="$COOKIE_DATA_DIR/logs/cookie-shell.log"
   if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=" | grep -F "END-OF-REPLY-m1-popup" | grep -F "Einstein is best known for" >/dev/null; then

@@ -649,3 +649,52 @@ private func laidOutTurnHeight(_ text: String) -> CGFloat {
     host.layoutSubtreeIfNeeded()
     return host.fittingSize.height
 }
+
+final class PopupSizingTests: XCTestCase {
+    func testEmptyPanelIsTheInputRow() {
+        let height = PopupMetrics.panelHeight(turnTexts: [], draft: "", showsNotice: false)
+        XCTAssertEqual(height, PopupLayout.collapsedHeight)
+        XCTAssertLessThan(height, 80)
+        XCTAssertEqual(PopupMetrics.inputLineHeight, 22)
+    }
+
+    func testShortReplyGrowsAndStaysUnderTheCap() {
+        let estimated = PopupMetrics.panelHeight(
+            turnTexts: ["what's the setup time?", "2.1 ns min at 3.3 V."],
+            draft: "",
+            showsNotice: false
+        )
+        XCTAssertGreaterThan(estimated, PopupLayout.collapsedHeight)
+        XCTAssertLessThan(estimated, PopupLayout.maxHeight)
+        let measured = PopupMetrics.panelHeight(
+            turnTexts: ["what's the setup time?", "2.1 ns min at 3.3 V."],
+            draft: "",
+            showsNotice: false,
+            measuredTranscript: 72
+        )
+        XCTAssertEqual(measured, PopupLayout.collapsedHeight + 72 + 1)
+        XCTAssertLessThan(measured, PopupLayout.maxHeight)
+    }
+
+    func testLongReplyCapsAtMaxHeight() {
+        let line = String(repeating: "The transcript keeps going until it scrolls. ", count: 40)
+        let texts = ["tell me more", line]
+        XCTAssertEqual(
+            PopupMetrics.panelHeight(turnTexts: texts, draft: "", showsNotice: false),
+            PopupLayout.maxHeight
+        )
+        XCTAssertEqual(
+            PopupMetrics.panelHeight(
+                turnTexts: texts,
+                draft: "",
+                showsNotice: false,
+                measuredTranscript: 4000
+            ),
+            PopupLayout.maxHeight
+        )
+        XCTAssertEqual(PopupLayout.maxHeight, 320)
+        XCTAssertEqual(PopupLayout.transcriptBottomInset, 8)
+        XCTAssertEqual(PopupLayout.inputRowVerticalPadding, 12)
+        XCTAssertLessThanOrEqual(PopupLayout.transcriptBottomInset + 1, 16)
+    }
+}

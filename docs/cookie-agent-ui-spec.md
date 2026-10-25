@@ -226,7 +226,7 @@ A standard `MenuBarExtra` menu. Option-click the icon to open the popup directly
 ### 6.2 Hotkey popup
 
 - **Window:** Non-activating `NSPanel` (as in the design doc), floating level, centred in the upper third of the active screen.
-- **Size:** 560 pt wide. Collapsed it's about 64 pt tall (input plus a 40 pt Cookie). It grows with the conversation to at most 520 pt, then scrolls.
+- **Size:** 560 pt wide. With no reply the panel is the input row, 64 pt tall (under 80 pt): the 22 pt field, the 40 pt Cookie, and one 8×8 on-device dot. It grows with the transcript up to `PopupLayout.maxHeight`, 320 pt, then the transcript scrolls inside and stays pinned to the bottom. 320 pt is the upper third of a 13-inch MacBook (default canvas 1470×956 pt; after the menu bar that band is about 300 pt) and still fits that band on a 14-inch display. That is the input row plus about eleven 22 pt lines. The last transcript line sits 8 pt above the input row. The follow-bottom marker occupies that inset and does not leave a blank band.
 - **Cookie:** A 40 pt animated head at the left of the input row, driven by the state table. It's the only animated thing in the panel.
 - **Open/close:** ⌥Space toggles it (rebindable) and Esc closes it. Clicking outside closes it unless an action card is pending. The draft is kept for 10 minutes.
 - **Input:** Single line that grows to 5 lines. ⏎ sends, ⇧⏎ adds a newline, ↑ edits the last message, ⌘K clears.

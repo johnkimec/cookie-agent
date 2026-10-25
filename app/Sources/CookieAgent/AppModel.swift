@@ -17,6 +17,20 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     var onPopup: ((Bool) -> Void)?
     var onLayout: (() -> Void)?
+    /// Laid-out transcript height, including its insets. Zero until the
+    /// scroll content reports one. The panel uses it so a short reply does
+    /// not keep the line-count estimate's extra space.
+    var measuredTranscriptHeight: CGFloat = 0
+
+    func noteTranscriptHeight(_ height: CGFloat) {
+        let next = height
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard abs(self.measuredTranscriptHeight - next) > 0.5 else { return }
+            self.measuredTranscriptHeight = next
+            self.onLayout?()
+        }
+    }
 
     private let turns: PopupChatSession
     private var supervisor: CoreSupervisor?
@@ -291,6 +305,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let apply = { [weak self] in
             guard let self else { return }
             let snap = self.turns.snapshot
+            if snap.conversation.turns.count != self.conversation.turns.count {
+                self.measuredTranscriptHeight = 0
+            }
             self.conversation = snap.conversation
             if self.popupOpen != snap.popupOpen {
                 self.popupOpen = snap.popupOpen

@@ -152,22 +152,15 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 
     private func preferredHeight() -> CGFloat {
-        let turns = model.conversation.turns
-        let draftLines = PopupMetrics.inputLineCount(model.conversation.draft)
         let showsNotice = popupLoadingLine(runtime: model.runtime.state) != nil
             || model.conversation.refusalLine(runtime: model.runtime.state) != nil
-        let notice: CGFloat = showsNotice ? 20 : 0
-        let input = max(
-            PopupLayout.collapsedHeight,
-            16 + PopupMetrics.clampedInputHeight(lineCount: draftLines) + notice
+        let measured = model.measuredTranscriptHeight
+        return PopupMetrics.panelHeight(
+            turnTexts: model.conversation.turns.map(\.text),
+            draft: model.conversation.draft,
+            showsNotice: showsNotice,
+            measuredTranscript: measured > 1 ? measured : nil
         )
-        guard !turns.isEmpty else { return min(PopupLayout.maxHeight, input) }
-        var lines = 0
-        for turn in turns {
-            lines += PopupMetrics.estimatedLines(turn.text, width: 400)
-        }
-        let transcript = CGFloat(lines) * PopupMetrics.inputLineHeight + CGFloat(turns.count) * 16 + 16
-        return min(PopupLayout.maxHeight, input + transcript)
     }
 
     private func focusField() {
@@ -299,10 +292,19 @@ struct PopupRoot: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(model.conversation.turns) { turn in
-                        TurnRow(turn: turn)
+                // The marker used to be the last stack item, so the 12 pt
+                // spacing, its 8 pt height, and the 16 pt padding sat under
+                // the last line. It now occupies the bottom inset.
+                ZStack(alignment: .bottomLeading) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(model.conversation.turns) { turn in
+                            TurnRow(turn: turn)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, PopupLayout.transcriptBottomInset)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     IdentifiedBox(
                         identifier: CookieAX.transcriptBottom,
                         label: "transcript"
@@ -310,7 +312,6 @@ struct PopupRoot: View {
                     .frame(width: 8, height: 8)
                     .id(CookieAX.transcriptBottom)
                 }
-                .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background {
                     GeometryReader { geo in
@@ -337,6 +338,7 @@ struct PopupRoot: View {
             .onPreferenceChange(TranscriptFrameKey.self) { frame in
                 transcriptFrame = frame
                 follow(proxy, frame: frame, viewport: viewportHeight)
+                model.noteTranscriptHeight(frame.height)
             }
             .onChange(of: model.conversation.turns.last?.text ?? "") { _, _ in
                 guard pin.pinnedToBottom else { return }
@@ -410,7 +412,7 @@ struct PopupRoot: View {
             .help(control.stopsReply ? CookieCopy.stop : CookieCopy.ask)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, PopupLayout.inputRowVerticalPadding)
         .frame(minHeight: PopupLayout.collapsedHeight)
     }
 
