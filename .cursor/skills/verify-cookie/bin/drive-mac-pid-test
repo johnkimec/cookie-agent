@@ -319,4 +319,115 @@ case "$observe" in
     ;;
 esac
 
+# CookieAgent appeared after launch. The drive copy is already up.
+# A later product CookieAgent is foreign, so option-space is not sent.
+HOTKEY_EV="$FIXTURE/popup-hotkey-appeared"
+mkdir -p "$HOTKEY_EV"
+SENT="$FIXTURE/hotkey-sent"
+
+try_hotkey_send() {
+  local own="$1"
+  local dir="$2"
+  guard_popup_hotkey_send "$own" "$dir"
+  printf '%s\n' "sent" >"$SENT"
+}
+
+write_procs "222|$DRIVE_BIN|$DRIVE_BIN"
+rm -f "$SENT"
+if ! try_hotkey_send 222 "$HOTKEY_EV"; then
+  printf 'drive copy alone was treated as a foreign CookieAgent\n' >&2
+  exit 1
+fi
+if [[ "$(cat "$SENT" 2>/dev/null || true)" != "sent" ]]; then
+  printf 'option-space was not sent when no foreign CookieAgent was running\n' >&2
+  exit 1
+fi
+
+# The drive copy's own pid is not foreign, even when its comm is CookieAgent.
+write_procs "222|$JOHN|$JOHN"
+rm -f "$SENT"
+if ! try_hotkey_send 222 "$HOTKEY_EV"; then
+  printf 'this drive copy was treated as a foreign CookieAgent\n' >&2
+  exit 1
+fi
+
+write_procs \
+  "222|$DRIVE_BIN|$DRIVE_BIN" \
+  "111|$JOHN|$JOHN"
+rm -f "$SENT"
+: >"$HOTKEY_EV/command.txt"
+status=0
+out="$(try_hotkey_send 222 "$HOTKEY_EV")" || status=$?
+if [[ "$status" -ne 3 ]]; then
+  printf 'CookieAgent appeared after launch: expected exit 3, got %s\n' "$status" >&2
+  exit 1
+fi
+last="$(printf '%s\n' "$out" | tail -n 1)"
+if [[ "$last" != "skipped" ]]; then
+  printf 'CookieAgent appeared after launch: expected skipped, got %s\n' "${out:-empty}" >&2
+  exit 1
+fi
+if [[ -f "$SENT" ]]; then
+  printf 'CookieAgent appeared after launch: option-space was sent\n' >&2
+  exit 1
+fi
+if [[ ! -f "$HOTKEY_EV/popup-hotkey-skip.txt" ]]; then
+  printf 'CookieAgent appeared after launch: skip file was not written\n' >&2
+  exit 1
+fi
+if ! grep -F "reason=a CookieAgent appeared after launch" "$HOTKEY_EV/popup-hotkey-skip.txt" >/dev/null; then
+  printf 'skip file missing the after-launch reason\n' >&2
+  exit 1
+fi
+if ! grep -F "pids=111" "$HOTKEY_EV/popup-hotkey-skip.txt" >/dev/null; then
+  printf 'skip file did not record the foreign pid\n' >&2
+  exit 1
+fi
+if grep -F "222" "$HOTKEY_EV/popup-hotkey-skip.txt" >/dev/null; then
+  printf 'drive copy pid was recorded as foreign\n' >&2
+  exit 1
+fi
+if ! grep -F "signaled=none" "$HOTKEY_EV/popup-hotkey-skip.txt" >/dev/null; then
+  printf 'skip file did not record signaled=none\n' >&2
+  exit 1
+fi
+if ! grep -F "popup-hotkey=skipped" "$HOTKEY_EV/command.txt" >/dev/null; then
+  printf 'command.txt did not record the skip\n' >&2
+  exit 1
+fi
+
+# A second product CookieAgent beside a copy whose comm is CookieAgent is still foreign.
+write_procs \
+  "222|$JOHN|$JOHN" \
+  "111|$JOHN|$JOHN"
+rm -f "$SENT" "$HOTKEY_EV/popup-hotkey-skip.txt"
+status=0
+out="$(try_hotkey_send 222 "$HOTKEY_EV")" || status=$?
+if [[ "$status" -ne 3 || -f "$SENT" ]]; then
+  printf 'foreign CookieAgent beside the drive copy was not skipped (status %s)\n' "$status" >&2
+  exit 1
+fi
+if grep -F "222" "$HOTKEY_EV/popup-hotkey-skip.txt" >/dev/null; then
+  printf 'drive copy pid was recorded beside the foreign CookieAgent\n' >&2
+  exit 1
+fi
+
+toggle_body="$(awk '
+  /^toggle_hotkey\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$BIN_DIR/drive-mac-recipes")"
+guard_line='guard_popup_hotkey_send "${APP_PID:-}" "${evidence:-}"'
+send_line='send_key_code 49 option hotkey'
+before="${toggle_body%%"$send_line"*}"
+if [[ "$before" == "$toggle_body" ]]; then
+  printf 'toggle_hotkey does not send option-space\n' >&2
+  exit 1
+fi
+last_stmt="$(printf '%s\n' "$before" | awk 'NF && $1 !~ /^#/ { line = $0 } END { gsub(/^[ \t]+|[ \t]+$/, "", line); print line }')"
+if [[ "$last_stmt" != "$guard_line" ]]; then
+  printf 'cookieagent check is not immediately before option-space: %s\n' "${last_stmt:-empty}" >&2
+  exit 1
+fi
+
 printf '%s\n' "drive-mac pid test ok"

@@ -31,6 +31,48 @@ cookieagent_comm_pids() {
   comm_pids_named "CookieAgent"
 }
 
+# CookieAgent pids that are not this drive's launched copy.
+# $1 is that copy's pid. An empty own pid treats every CookieAgent as foreign.
+foreign_cookieagent_pids() {
+  local own="${1:-}"
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if [[ -n "$own" && "$pid" == "$own" ]]; then
+      continue
+    fi
+    printf '%s\n' "$pid"
+  done < <(cookieagent_comm_pids)
+}
+
+# Immediately before option-space. Returns 0 when no foreign CookieAgent is running.
+# Otherwise writes popup-hotkey-skip.txt, prints skipped, and exits 3.
+# $1 is this drive's pid. $2 is the evidence directory.
+guard_popup_hotkey_send() {
+  local own="${1:-}"
+  local dir="${2:-}"
+  local foreign
+  foreign="$(foreign_cookieagent_pids "$own" | tr '\n' ' ')"
+  if [[ -z "${foreign// /}" ]]; then
+    return 0
+  fi
+  if [[ -n "$dir" ]]; then
+    mkdir -p "$dir"
+    {
+      printf '%s\n' "popup-hotkey skipped"
+      printf '%s\n' "reason=a CookieAgent appeared after launch"
+      printf '%s\n' "pids=${foreign}"
+      printf '%s\n' "signaled=none"
+    } >"$dir/popup-hotkey-skip.txt"
+    if [[ -f "$dir/command.txt" ]]; then
+      printf '%s\n' "popup-hotkey=skipped" >>"$dir/command.txt"
+    fi
+  fi
+  printf '%s\n' "popup-hotkey skipped: a CookieAgent appeared after launch (pid ${foreign}); not sending option-space"
+  printf '%s\n' "skipped"
+  exit 3
+}
+
 process_comm_name() {
   local pid="$1"
   # The whole line is the comm value. It may be a full path with spaces.

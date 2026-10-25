@@ -393,6 +393,7 @@ toggle_hotkey() {
   local want="$1"
   local why="$2"
   local attempt state
+  guard_popup_hotkey_send "${APP_PID:-}" "${evidence:-}"
   send_key_code 49 option hotkey
   for attempt in $(seq 1 20); do
     state="$(popup_is_open)"
