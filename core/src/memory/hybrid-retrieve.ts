@@ -86,8 +86,9 @@ interface FactRow {
  * Those columns are on `facts` in migration 001.
  * When the store exposes `forgottenTurnIds()`, turns with those ids, chunks
  * derived from them, and session summaries derived from them are removed
- * in both legs before fusion as well. The vector leg over-fetches so a
- * forgotten row does not consume k.
+ * in both legs before fusion as well. A fact whose `source_turn` is one
+ * of those ids is removed in both legs too. The vector leg over-fetches
+ * so a forgotten row does not consume k.
  */
 export class HybridRetriever {
   private readonly db: Database.Database;
@@ -167,7 +168,9 @@ export class HybridRetriever {
       }
       if (embedding !== undefined) {
         try {
-          vectorFacts.push(...(await this.vectorFacts(embedding, now)));
+          vectorFacts.push(
+            ...(await this.vectorFacts(embedding, now, forgotten)),
+          );
         } catch {
           // A facts kNN failure must not drop the chunk list.
         }
@@ -234,6 +237,13 @@ export class HybridRetriever {
            AND f.superseded_by IS NULL
            AND (f.valid_until IS NULL OR f.valid_until > ?)
            AND (f.subject IS NULL OR f.subject != ?)
+           AND (
+             f.source_turn IS NULL
+             OR NOT EXISTS (
+               SELECT 1 FROM forgotten_turns forgotten
+               WHERE forgotten.turn_id = f.source_turn
+             )
+           )
          ORDER BY bm25(facts_fts), f.created_at, f.id
          LIMIT ?`,
       )
@@ -304,14 +314,19 @@ export class HybridRetriever {
   private async vectorFacts(
     embedding: Float32Array,
     now: number,
+    forgotten: ReadonlySet<string>,
   ): Promise<Memory[]> {
     const hits = await this.knnUntil(embedding, "vec_facts", (id) => {
       const row = this.db
         .prepare(
-          "SELECT id, text, subject, superseded_by, valid_until FROM facts WHERE id = ?",
+          `SELECT id, text, subject, superseded_by, valid_until, source_turn
+           FROM facts WHERE id = ?`,
         )
-        .get(id) as FactRow | undefined;
+        .get(id) as (FactRow & { source_turn: string | null }) | undefined;
       if (row === undefined || !liveFact(row, now)) {
+        return null;
+      }
+      if (row.source_turn !== null && forgotten.has(row.source_turn)) {
         return null;
       }
       return memoryFrom(row.id, row.text, "fact");

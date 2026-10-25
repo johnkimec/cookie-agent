@@ -114,7 +114,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolSet {
     }),
     [MEMORY_FORGET_TOOL]: tool({
       description:
-        "Forget a fact John asked to drop. Deletes that fact and derived rows built from its source turn. An unpinned profile row is dropped when the fact text equals its key or value. A pinned row is dropped only when its value contains a secret number, or when the request itself names that key or value. An unpinned row whose source turn was forgotten is dropped. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way, and a chunk marks every turn it covers. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
+        "Forget a fact John asked to drop. Deletes that fact and derived rows built from its source turn. An unpinned profile row is dropped when the fact text equals its key or value. A pinned row is dropped only when its value contains a secret number, when the request names that value, or when the request is the key with a possessive such as my name. Forgotten fact text does not drop a pinned row. An unpinned row whose source turn was forgotten is dropped. A fact-path forget marks that source turn, its reply, and the request, not every turn that contains the needle. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way. A user turn and its reply count as one candidate, and facts sourced from those turns are deleted. A chunk marks every turn it covers. A secret number that appears only in the request is ignored. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
       inputSchema: forgetInput,
       execute: (input) => forgetFact(deps, input),
     }),
@@ -251,7 +251,7 @@ async function forgetFact(
     deps,
     facts,
     keys,
-    turnsToForget(deps, facts, keys),
+    turnsToForget(deps, facts),
     now,
     match.candidates,
     input.text ?? "",
@@ -278,9 +278,18 @@ async function commitForget(
     ...facts.map((fact) => fact.text),
     ...(facts.length === 0 ? keys : []),
   ];
-  const doomed = deps.derived
-    .listFacts()
-    .filter((fact) => copyOfForgotten(fact, facts, keys, now));
+  // Fact path keeps an active sibling that shares the source turn.
+  // Turn and chunk fallback pass no matched facts, and then every fact
+  // sourced from a forgotten turn goes, with its vector and embed row.
+  const onFallback = facts.length === 0;
+  const doomed = deps.derived.listFacts().filter((fact) => {
+    if (copyOfForgotten(fact, facts, keys, now)) {
+      return true;
+    }
+    return (
+      onFallback && fact.sourceTurn !== null && turnIds.has(fact.sourceTurn)
+    );
+  });
   const vectorIds = doomed.map((fact) => fact.id);
   const chunks = deps.derived
     .listChunks()
@@ -395,10 +404,12 @@ type TurnFallback =
 
 /**
  * No fact matched. The same exact / unique / ambiguous rule applies to
- * earlier turns, and then to chunks. The forget-request turn and its
- * reply are never a match. A request-only hit forgets nothing. A chosen
- * chunk marks every turn in its span. More than FORGET_TURN_CAP distinct
- * texts is ambiguous.
+ * earlier turns, and then to chunks. A user turn and its paired
+ * assistant reply count as one candidate. The forget-request turn and
+ * its reply are never a match. A request-only hit forgets nothing. A
+ * chosen chunk marks every turn in its span. Secret tokens that appear
+ * only in the request text are dropped when that span includes the
+ * request. More than FORGET_TURN_CAP distinct candidates is ambiguous.
  */
 function locateTurnOrChunk(
   deps: MemoryToolDeps,
@@ -427,7 +438,9 @@ function locateTurnOrChunk(
       others.push({ id: turn.id, text: turn.content });
     }
   }
-  const turnClass = classifyTextHits(others, needle);
+  const turnClass = classifyTextHits(others, needle, (hit) =>
+    fallbackGroupKey(deps, hit, others),
+  );
   if (turnClass.kind === "ambiguous") {
     return { kind: "ambiguous", candidates: turnClass.candidates };
   }
@@ -488,7 +501,13 @@ function locateTurnOrChunk(
     keys,
     turnIds,
     candidates: chunkClass.candidates,
-    secretTexts,
+    secretTexts: withoutRequestOnlySecrets(
+      deps,
+      chunks,
+      chunkClass.chosen,
+      blocked,
+      secretTexts,
+    ),
     sourceTurns,
   };
 }
@@ -503,6 +522,8 @@ function pushKey(keys: string[], text: string): void {
 function classifyTextHits(
   hits: ForgetCandidate[],
   needle: string,
+  groupKey: (hit: ForgetCandidate) => string = (hit) =>
+    hit.text.trim().toLowerCase(),
 ):
   | { kind: "chosen"; chosen: ForgetCandidate[]; candidates: ForgetCandidate[] }
   | { kind: "ambiguous"; candidates: ForgetCandidate[] }
@@ -512,7 +533,7 @@ function classifyTextHits(
   }
   const groups = new Map<string, ForgetCandidate[]>();
   for (const hit of hits) {
-    const key = hit.text.trim().toLowerCase();
+    const key = groupKey(hit);
     const group = groups.get(key);
     if (group === undefined) {
       groups.set(key, [hit]);
@@ -662,16 +683,14 @@ function pairReplies(store: MemoryStore, turnIds: Set<string>): void {
 }
 
 /**
- * Once a fact is selected, every structural turn is marked: the source
- * turn, the assistant reply paired with it, the forget-request turn,
- * and that request's reply when it is already stored. Any other turn
- * whose text contains a key string is marked too. Several turns never
- * refuse the forget. Ambiguity stays a fact-selection concern.
+ * Once a fact is selected, mark its source turn, the assistant reply
+ * paired with that turn, and the forget-request turn (plus that
+ * request's reply when it is already stored). Other turns that merely
+ * contain the needle stay. Ambiguity stays a fact-selection concern.
  */
 function turnsToForget(
   deps: MemoryToolDeps,
   facts: readonly FactRecord[],
-  keys: readonly string[],
 ): Set<string> {
   const turnIds = new Set<string>();
   const mark = (turnId: string | null): void => {
@@ -688,14 +707,107 @@ function turnsToForget(
     mark(fact.sourceTurn);
   }
   mark(deps.state.sourceTurnId);
-  for (const session of deps.store.listSessions()) {
-    for (const turn of deps.store.recentTurns(session.id, 10_000)) {
-      if (containsKey(turn.content, keys)) {
-        turnIds.add(turn.id);
+  return turnIds;
+}
+
+/**
+ * Assistant hits join their user turn, so an echoing reply is not a
+ * second candidate. A user hit keeps its own text.
+ */
+function fallbackGroupKey(
+  deps: MemoryToolDeps,
+  hit: ForgetCandidate,
+  hits: readonly ForgetCandidate[],
+): string {
+  const own = hit.text.trim().toLowerCase();
+  const userId = pairedUser(deps.store, hit.id);
+  if (userId === null) {
+    return own;
+  }
+  const user = hits.find((item) => item.id === userId);
+  return user === undefined ? own : user.text.trim().toLowerCase();
+}
+
+/** The user turn that this assistant reply answers, if this id is one. */
+function pairedUser(store: MemoryStore, turnId: string): string | null {
+  for (const session of store.listSessions()) {
+    const turns = store.recentTurns(session.id, 10_000);
+    const index = turns.findIndex((turn) => turn.id === turnId);
+    if (index < 0) {
+      continue;
+    }
+    const turn = turns[index];
+    if (turn === undefined || turn.role !== "assistant") {
+      return null;
+    }
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const previous = turns[cursor];
+      if (previous === undefined) {
+        continue;
+      }
+      if (previous.role === "user") {
+        return previous.id;
+      }
+      if (previous.role === "assistant") {
+        return null;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * A chunk that spans the request can quote a number that exists only in
+ * that request. Those secret tokens are not a reason to drop a profile row.
+ */
+function withoutRequestOnlySecrets(
+  deps: MemoryToolDeps,
+  chunks: readonly ChunkRecord[],
+  chosen: readonly ForgetCandidate[],
+  blocked: ReadonlySet<string>,
+  secretTexts: readonly string[],
+): string[] {
+  const requestParts: string[] = [];
+  const otherParts: string[] = [];
+  let spansRequest = false;
+  for (const hit of chosen) {
+    const chunk = chunks.find((item) => item.chunkId === hit.id);
+    if (chunk === undefined) {
+      continue;
+    }
+    for (const turn of turnsCovered(deps.store, chunk)) {
+      if (blocked.has(turn.id)) {
+        spansRequest = true;
+        requestParts.push(turn.content);
+      } else {
+        otherParts.push(turn.content);
       }
     }
   }
-  return turnIds;
+  if (!spansRequest) {
+    return [...secretTexts];
+  }
+  const elsewhere = otherParts.join("\n");
+  const only = secretTokens(requestParts.join("\n")).filter(
+    (token) => !secretAppears(elsewhere, token),
+  );
+  if (only.length === 0) {
+    return [...secretTexts];
+  }
+  return secretTexts.map((text) => stripSecretTokens(text, only));
+}
+
+function secretAppears(text: string, token: string): boolean {
+  return new RegExp(`(^|\\D)${token}(\\D|$)`).test(text);
+}
+
+function stripSecretTokens(text: string, tokens: readonly string[]): string {
+  let next = text;
+  for (const token of tokens) {
+    next = next.replace(new RegExp(`(^|\\D)${token}(?=\\D|$)`, "g"), "$1");
+  }
+  return next;
 }
 
 function pairedAssistant(
@@ -948,10 +1060,11 @@ function dropProfileFor(
 }
 
 /**
- * A pinned row drops only for a secret number, or when the forget
- * needle itself equals the key or the value. Fact text that equals
- * the key or the value drops an unpinned row only. An unpinned row
- * also drops when its source turn was forgotten.
+ * A pinned row drops only for a secret number, when the forget needle
+ * equals the value, or when the needle is the key with a possessive
+ * (`my name`). Forgotten fact text never drops a pinned row. An
+ * unpinned row drops when the needle or a forgotten fact equals the
+ * key or the value, or when its source turn was forgotten.
  */
 export function profileRowDropped(
   row: ProfileRecord,
@@ -963,15 +1076,28 @@ export function profileRowDropped(
   if (valueHasSecret(row.value, secretTexts)) {
     return true;
   }
+  if (row.pinned) {
+    return namesPinned(row, needle);
+  }
   if (namesRow(row, needle)) {
     return true;
   }
-  if (!row.pinned && facts.some((fact) => namesRow(row, fact.text))) {
+  if (facts.some((fact) => namesRow(row, fact.text))) {
     return true;
   }
-  return (
-    !row.pinned && row.sourceTurn !== null && sourceTurns.has(row.sourceTurn)
-  );
+  return row.sourceTurn !== null && sourceTurns.has(row.sourceTurn);
+}
+
+/** Value equality, or `my <key>`. A bare key such as `name` does not match. */
+function namesPinned(row: ProfileRecord, needle: string): boolean {
+  const named = normalizeLabel(needle);
+  if (named.length === 0) {
+    return false;
+  }
+  if (row.value.trim().toLowerCase() === needle.trim().toLowerCase()) {
+    return true;
+  }
+  return named === `my ${normalizeLabel(row.key)}`;
 }
 
 function namesRow(row: ProfileRecord, needle: string): boolean {
