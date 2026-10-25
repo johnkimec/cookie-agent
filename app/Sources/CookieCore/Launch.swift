@@ -10,8 +10,11 @@ public struct CoreLaunch: Equatable, Sendable {
     /// The core command's first token resolved to an executable file.
     public var commandReady: Bool
 
-    /// `core/package.json` script `start` (`src/index.ts`). `fake-core` is
-    /// selected only by `COOKIE_CORE_COMMAND`.
+    /// `core/package.json` script `start` (`src/index.ts`). That script is
+    /// `node --experimental-strip-types --disable-warning=ExperimentalWarning`,
+    /// so the real core child's stderr stays free of Node's type-stripping
+    /// warning. `fake-core` is selected only by `COOKIE_CORE_COMMAND`, and
+    /// that script carries the same flag.
     public static let defaultCommand = "pnpm --filter @cookie-agent/core start"
     /// Product default is 8080, applied by the core when this variable is
     /// absent (contract decision 8). The shell must not substitute the

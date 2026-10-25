@@ -379,6 +379,39 @@ final class LaunchTests: XCTestCase {
         XCTAssertTrue(launch.coreRootReady)
         XCTAssertTrue(CoreLaunch.hasCorePackage(launch.workingDirectory))
     }
+
+    /// The real launch is `pnpm --filter @cookie-agent/core start`. Node's
+    /// `--disable-warning=ExperimentalWarning` lives on that script, not in
+    /// the child's environment.
+    func testDefaultCommandUsesStartScriptThatDisablesTypeStripWarning() throws {
+        let here = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let launch = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: here,
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            toolSearchPaths: []
+        )
+        XCTAssertEqual(launch.executable, "pnpm")
+        XCTAssertEqual(launch.arguments, ["--filter", "@cookie-agent/core", "start"])
+        XCTAssertNil(launch.environment["COOKIE_CORE_COMMAND"])
+        XCTAssertNil(launch.environment["NODE_OPTIONS"])
+        XCTAssertTrue(launch.supervisesRuntime)
+
+        let repo = try XCTUnwrap(CoreLaunch.findRepo(from: here))
+        let packageURL = repo
+            .appendingPathComponent("core", isDirectory: true)
+            .appendingPathComponent("package.json")
+        let data = try Data(contentsOf: packageURL)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let scripts = try XCTUnwrap(json["scripts"] as? [String: String])
+        let start = try XCTUnwrap(scripts["start"])
+        XCTAssertEqual(
+            start,
+            "node --experimental-strip-types --disable-warning=ExperimentalWarning src/index.ts"
+        )
+        let fake = try XCTUnwrap(scripts["fake-core"])
+        XCTAssertTrue(fake.contains("--disable-warning=ExperimentalWarning"))
+    }
 }
 
 final class TerminationHopTests: XCTestCase {
