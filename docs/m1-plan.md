@@ -1,6 +1,6 @@
 # M1 plan: Memory
 
-**Status:** draft - awaiting approval
+**Status:** approved by John on 2026-10-25. He accepted all recommendations (see "John's answers" below).
 
 This is the build plan for M1. It adds no scope to [cookie-agent.md](./cookie-agent.md). It turns that doc's M1 row into tasks, feature-map entries and checks. Nothing in M1 is built until John merges this doc. The decisions below go into the design doc's decision log as `D-2026-10-2x-NN` entries once John picks them.
 
@@ -204,6 +204,25 @@ M1 is the memory and retrieval milestone, so these come up at implementation tim
 7. The design doc says the eval tasks come from two weeks of your own use, which doesn't exist yet. OK to write 10 fixture tasks now (I draft, you edit), swap in real ones later, and set the bar at 8 of 10 answers containing the fact, with recall@8 reported alongside?
 8. Nightly consolidation is meant to run on AC power, but power state is M5. OK to run it on demand and once a day at the first idle in M1, and add the AC check in M5?
 9. The design doc's open question 4 matters now, because M1 creates `cookie.db`: encrypt it at rest beyond FileVault, or not? My recommendation is FileVault only for M1, and revisit before packaging.
+
+## John's answers (2026-10-25)
+
+John approved every recommendation as written:
+
+- **D1:** `node:sqlite`, as long as the step 0 spike confirms it supports WAL, FTS5 and loading sqlite-vec.
+- **D2:** a second `llama-server --embeddings` process.
+- **D3:** "remember" and "forget" are `memory.*` tools.
+- **D4:** the reflect job waits until chat is idle.
+- **D5:** the database lives at `<COOKIE_DATA_DIR>/cookie.db`.
+- **Stop control:** ⏎ becomes Stop while a reply is arriving. Esc stops the reply first and closes the panel on a second press.
+- **Copy:** the strings stay as written.
+- **Session boundary:** a new session starts after ⌘K or once the popup has been closed for 10 minutes.
+- **Memory viewer:** none in M1. Use the read-only `pnpm memory dump` instead, and stay on protocol 0.1.
+- **Eval:** 10 fixture tasks, drafted by Sergey and edited by John. The bar is 8 of 10, with recall@8 reported alongside.
+- **Consolidation:** on demand, plus once a day at the first idle. The AC-power check waits for M5.
+- **Encryption:** FileVault only in M1. Revisit before packaging.
+
+Still open: John's top popup issues for the polish sub-track.
 
 ## Change history
 
