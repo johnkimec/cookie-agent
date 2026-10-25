@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentCore } from "../agent-core.ts";
 import type { ModelProvider, ModelStream } from "../model/provider.ts";
 import {
@@ -232,6 +232,54 @@ describe("chat log wired into the core", () => {
       .all() as Array<{ entry: string }>;
     expect(rows.map((row) => row.entry)).toEqual(["reflected conv-a"]);
     expect(reflected).toEqual([{ id: "conv-a", opts: undefined }]);
+    store.close();
+  });
+
+  it("keeps the chat when reflect throws and retries that session later", async () => {
+    const path = tempDbPath();
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
+    const calls: string[] = [];
+    let fail = true;
+    const reflector: Reflector = {
+      async reflect(sessionId) {
+        calls.push(sessionId);
+        if (fail) {
+          throw new Error("reflect down");
+        }
+      },
+    };
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        lines.push(String(chunk));
+        return true;
+      });
+    try {
+      const harness = coreFor(
+        new ChatLog(store, null, null, { reflector }),
+        seen,
+        () => 2_000,
+      );
+      await ready(harness.core, harness.messages);
+      send(harness.core, chat("2", "conv-a", "keep this"));
+      await untilDone(harness.messages, "msg-1");
+      send(harness.core, chat("3", "conv-b", "new chat"));
+      await untilDone(harness.messages, "msg-2");
+      expect(calls).toEqual(["conv-a"]);
+      expect(lines.join("")).toContain(
+        "cookie-core: reflect failed: reflect down",
+      );
+      const rows = store.database().prepare("SELECT id FROM journal").all();
+      expect(rows).toEqual([]);
+      fail = false;
+      send(harness.core, chat("4", "conv-c", "later"));
+      await untilDone(harness.messages, "msg-3");
+      expect(calls).toEqual(["conv-a", "conv-a", "conv-b"]);
+    } finally {
+      spy.mockRestore();
+    }
     store.close();
   });
 

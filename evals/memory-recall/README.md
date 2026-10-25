@@ -31,6 +31,6 @@ The bar is 8 of 10 on `pnpm eval memory --real`. That command needs an explicit 
 
 `COOKIE_REFLECT_IDLE_MS=0` makes the core call `Reflector` when a new conversation ends the previous session, before that turn is retrieved. The call is the session id only. Protocol 0.1 has no reflect message. The current reflector records a journal row. When #18 is on main, that body becomes `runtime.reflector` (the same `LocalReflector` the idle scheduler uses) and this runner drops its copy of `readReflectIdleMs`.
 
-`COOKIE_LOOPBACK_ONLY=1` refuses a TCP connect whose host is not `127.0.0.1` or `::1`. The core prints `cookie-core: loopback guard active` on stderr. A missing line fails the run, and so does a blocked connect.
+`COOKIE_LOOPBACK_ONLY=1` refuses a TCP connect whose host is not `127.0.0.1` or `::1`. After that patch refuses a connect to `192.0.2.1`, the core prints `cookie-core: loopback guard active <COOKIE_LOOPBACK_NONCE>` as one stderr line. The runner requires that exact line. A missing line fails the task, and so does a blocked connect. A reflect error is logged and does not fail the chat turn. A throw from `forgottenTurnIds()` fails only task 06.
 
 Evidence is written under `verify-evidence/m1-recall/` (gitignored): `summary.txt`, `report.json`, and one JSON file per task. That directory is not feature-verification evidence. `memory-recall` stays `planned` until a verify-cookie drive records it.

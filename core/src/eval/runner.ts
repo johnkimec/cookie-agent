@@ -8,6 +8,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
@@ -16,7 +17,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { LOOPBACK_GUARD_LINE } from "../loopback-guard.ts";
+import { loopbackGuardLine } from "../loopback-guard.ts";
 import { SqliteMemoryStore } from "../memory/sqlite-store.ts";
 import { TYPE_STRIP_NODE_ARGS } from "../node-launch.ts";
 import { isRecord } from "../protocol/validate.ts";
@@ -154,13 +155,24 @@ export async function completeAtTemperatureZero(
     throw new Error(`llama-server status ${response.status}`);
   }
   const parsed = (await response.json()) as {
-    choices?: Array<{ message?: { content?: unknown } }>;
+    choices?: Array<{
+      message?: { content?: unknown; tool_calls?: unknown };
+    }>;
   };
-  const content = parsed.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error("llama-server reply has no content");
+  const message = parsed.choices?.[0]?.message;
+  const content = message?.content;
+  if (typeof content === "string") {
+    return content;
   }
-  return content;
+  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    return "";
+  }
+  throw new Error("llama-server reply has no content");
+}
+
+/** True when `line` is one full stderr line, not a substring of a longer one. */
+export function stderrHasExactLine(stderr: string, line: string): boolean {
+  return stderr.split(/\r?\n/).some((row) => row === line);
 }
 
 /** Save `/props` and `/v1/models` for one real server. A 404 is still saved. */
@@ -442,6 +454,7 @@ async function runTask(
   const clockFile = join(dataDir, "clock");
   const traceFile = join(dataDir, "retrieval.jsonl");
   const egressLog = join(dataDir, "egress.log");
+  const loopbackNonce = randomBytes(16).toString("hex");
   writeFileSync(clockFile, "0\n");
   writeFileSync(egressLog, "");
   const child = new CoreChild(
@@ -452,6 +465,7 @@ async function runTask(
       clockFile,
       traceFile,
       egressLog,
+      loopbackNonce,
     }),
     clockFile,
   );
@@ -484,13 +498,12 @@ async function runTask(
   if (egress !== null) {
     error = error === null ? egress : `${error}; ${egress}`;
   }
-  if (!stderr.includes(LOOPBACK_GUARD_LINE)) {
+  if (!stderrHasExactLine(stderr, loopbackGuardLine(loopbackNonce))) {
     const missing = "loopback guard was not reported";
     error = error === null ? missing : `${error}; ${missing}`;
   }
   const journalRows = countJournal(dataDir);
-  const forgotten =
-    task.id === FORGET_TASK_ID ? probeForgottenTurnIds(dataDir) : undefined;
+  const forgotten = forgottenProbeFor(task.id, dataDir);
   if (!options.keepData) {
     rmSync(dataDir, { recursive: true, force: true });
     const at = owned.indexOf(dataDir);
@@ -586,6 +599,7 @@ export function coreEvalEnv(input: {
   clockFile: string;
   traceFile: string;
   egressLog: string;
+  loopbackNonce: string;
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.COOKIE_RERANK;
@@ -598,6 +612,7 @@ export function coreEvalEnv(input: {
   env.COOKIE_RETRIEVAL_TRACE = input.traceFile;
   env.COOKIE_EGRESS_LOG = input.egressLog;
   env.COOKIE_LOOPBACK_ONLY = "1";
+  env.COOKIE_LOOPBACK_NONCE = input.loopbackNonce;
   env.COOKIE_REFLECT_IDLE_MS = "0";
   env.COOKIE_INDEX_BEFORE_DONE = "1";
   return env;
@@ -767,6 +782,25 @@ function expectIds(
     return `tasks are ${ids.join(", ")}`;
   }
   return null;
+}
+
+/**
+ * Forgotten ids for task 06. A throw fails that task only:
+ * null is the known-blocked result, and other tasks do not call the probe.
+ */
+export function forgottenProbeFor(
+  taskId: string,
+  dataDir: string,
+  probe: (dir: string) => string[] | null = probeForgottenTurnIds,
+): string[] | null | undefined {
+  if (taskId !== FORGET_TASK_ID) {
+    return undefined;
+  }
+  try {
+    return probe(dataDir);
+  } catch {
+    return null;
+  }
 }
 
 /**
