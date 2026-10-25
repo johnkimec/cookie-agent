@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openMemoryDatabase } from "./migrate.ts";
-import { SESSION_CLOSED_MS, SqliteMemoryStore } from "./sqlite-store.ts";
+import { SqliteMemoryStore } from "./sqlite-store.ts";
 import type { TurnRecord } from "./types.ts";
 
 const dirs: string[] = [];
@@ -134,50 +134,19 @@ describe("sqlite memory store", () => {
     store.close();
   });
 
-  it("ends a session 10 minutes after the window closes, and not before", () => {
+  it("keeps the same conversation open when the clock moves", () => {
     let clock = 0;
     const store = SqliteMemoryStore.open(tempDbPath(), {
       now: () => clock,
     });
     store.beginConversation("conv-1");
     store.appendTurn(turn("t1", "conv-1", "still here", 0));
-    store.noteWindow("conv-1", "closed");
-
-    clock = 1_000;
-    store.noteWindow("conv-1", "closed");
-    clock = SESSION_CLOSED_MS - 1;
-    expect(store.sweep()).toEqual([]);
+    clock = 10 * 60 * 1000;
+    store.beginConversation("conv-1");
     expect(store.session("conv-1")?.endedAt).toBeNull();
-
-    clock = SESSION_CLOSED_MS;
-    expect(store.sweep()).toEqual(["conv-1"]);
-    expect(store.session("conv-1")?.endedAt).toBe(SESSION_CLOSED_MS);
     expect(store.recentTurns("conv-1", 10).map((row) => row.content)).toEqual([
       "still here",
     ]);
-    store.close();
-  });
-
-  it("cancels the close timer when the window opens or the same conversation continues", () => {
-    let clock = 0;
-    const store = SqliteMemoryStore.open(tempDbPath(), {
-      now: () => clock,
-    });
-    store.beginConversation("conv-open");
-    store.noteWindow("conv-open", "closed");
-    clock = 1_000;
-    store.noteWindow("conv-open", "open");
-    clock = SESSION_CLOSED_MS + 5_000;
-    expect(store.sweep()).toEqual([]);
-    expect(store.session("conv-open")?.endedAt).toBeNull();
-
-    clock = SESSION_CLOSED_MS + 6_000;
-    store.noteWindow("conv-open", "closed");
-    clock = SESSION_CLOSED_MS + 7_000;
-    store.beginConversation("conv-open");
-    clock = SESSION_CLOSED_MS + 7_000 + SESSION_CLOSED_MS;
-    expect(store.sweep()).toEqual([]);
-    expect(store.session("conv-open")?.endedAt).toBeNull();
     store.close();
   });
 

@@ -27,7 +27,6 @@ import {
   PROTOCOL_VERSION,
   type RuntimeState,
   type RuntimeStatus,
-  type SessionWindowParams,
 } from "./protocol/types.ts";
 import {
   isCookieMessage,
@@ -245,10 +244,6 @@ export class AgentCore {
   private handleNotification(method: string, params: unknown): void {
     if (this.phase !== "ready") {
       this.logLine(`ignored ${method} before initialize`);
-      return;
-    }
-    if (method === "session.window") {
-      this.onSessionWindow(params);
       return;
     }
     if (method !== "runtime.status") {
@@ -711,17 +706,6 @@ export class AgentCore {
       return;
     }
     this.emitMessage(message);
-  }
-
-  private onSessionWindow(params: unknown): void {
-    if (!paramsAreValid("sessionWindowParams", params)) {
-      this.logLine(
-        `ignored session.window ${paramsErrors("sessionWindowParams", params)}`,
-      );
-      return;
-    }
-    const body = params as SessionWindowParams;
-    this.history.noteWindow(body.conversationId, body.state);
   }
 
   private commitFlight(flight: Flight, usage: ModelUsage): void {

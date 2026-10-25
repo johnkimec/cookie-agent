@@ -9,12 +9,6 @@ import type {
   TurnRole,
 } from "./types.ts";
 
-/**
- * How long the popup must stay closed before the open session ends.
- * John's M1 answer: the same 10 minutes the draft is kept.
- */
-export const SESSION_CLOSED_MS = 10 * 60 * 1000;
-
 const SURFACES = new Set<SessionSurface>([
   "popup",
   "menubar",
@@ -75,20 +69,15 @@ export interface SqliteMemoryStoreOptions {
  * insert trigger writes `turns_fts`. This class also installs triggers
  * that abort UPDATE and DELETE on `turns`.
  *
- * A session ends in two ways:
- * - `beginConversation` with a different id (the protocol's new-chat
- *   signal: `chat.send` `conversationId`).
- * - `noteWindow(id, "closed")` and {@link SESSION_CLOSED_MS} on the
- *   injected clock, unless `open` or another `beginConversation` for
- *   that id lands first.
- *
- * The close timer is process memory. `shutdown` does not end a session,
- * so a relaunch still has the turns.
+ * A session ends when `beginConversation` is called with a different id.
+ * That id is `chat.send` `conversationId`. The app mints a new one for
+ * a new chat and after the popup has been closed for 10 minutes. This
+ * store does not time the window. `shutdown` does not end a session, so
+ * a relaunch still has the turns.
  */
 export class SqliteMemoryStore implements MemoryStore {
   private readonly now: () => number;
   private readonly db: ReturnType<typeof openMemoryDatabase>;
-  private readonly closedAt = new Map<string, number>();
   private closed = false;
 
   private constructor(
@@ -234,21 +223,18 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   /**
-   * `chat.send` `conversationId`. The same id continues the open session
-   * and cancels a pending close. A different id ends every other open
-   * session first. An id whose session already ended is returned as-is
-   * and is not reopened.
+   * `chat.send` `conversationId`. The same id continues the open session.
+   * A different id ends every other open session first. An id whose
+   * session already ended is returned as-is and is not reopened.
    */
   beginConversation(
     conversationId: string,
     surface: SessionSurface = "popup",
   ): SessionRecord {
     this.requireOpen();
-    this.sweep();
     const existing = this.readSession(conversationId);
     if (existing !== null) {
       if (existing.endedAt === null) {
-        this.closedAt.delete(conversationId);
         this.endOtherOpenSessions(conversationId);
       }
       return this.readSession(conversationId) ?? existing;
@@ -266,48 +252,6 @@ export class SqliteMemoryStore implements MemoryStore {
       throw new Error(`session missing after insert: ${conversationId}`);
     }
     return created;
-  }
-
-  /**
-   * Popup visibility. `closed` starts the 10-minute timer once.
-   * A second `closed` does not move it. `open` cancels it.
-   * No session yet: ignored.
-   */
-  noteWindow(conversationId: string, state: "open" | "closed"): void {
-    this.requireOpen();
-    this.sweep();
-    const session = this.readSession(conversationId);
-    if (session === null || session.endedAt !== null) {
-      return;
-    }
-    if (state === "open") {
-      this.closedAt.delete(conversationId);
-      return;
-    }
-    if (!this.closedAt.has(conversationId)) {
-      this.closedAt.set(conversationId, this.now());
-    }
-    this.sweep();
-  }
-
-  /** End sessions whose window has been closed for {@link SESSION_CLOSED_MS}. */
-  sweep(): string[] {
-    this.requireOpen();
-    const ended: string[] = [];
-    const now = this.now();
-    for (const [id, closed] of this.closedAt) {
-      if (now - closed < SESSION_CLOSED_MS) {
-        continue;
-      }
-      const session = this.readSession(id);
-      this.closedAt.delete(id);
-      if (session === null || session.endedAt !== null) {
-        continue;
-      }
-      this.endSession(id, now);
-      ended.push(id);
-    }
-    return ended;
   }
 
   /** FTS5 over turn text. Migration 001's insert trigger keeps the index. */
@@ -336,7 +280,6 @@ export class SqliteMemoryStore implements MemoryStore {
       .all(exceptId) as Array<{ id: string }>;
     for (const row of rows) {
       this.endSession(row.id, now);
-      this.closedAt.delete(row.id);
     }
   }
 

@@ -54,4 +54,4 @@ Preconditions:
 - Do not point `COOKIE_DATA_DIR` at `~/Library/Application Support/com.johnkimec.cookie-agent`.
 - `memory-no-egress` is not a separate drive. It is the loopback and `egress = 0` assertion on every drive above, plus the real-Qwen eval run.
 - Protocol stays `0.1`. There is no memory viewer in M1. Forgetting is something John says. `pnpm memory dump` is the read-only look at `cookie.db`. It is not a drive. `db.txt` in the persist evidence is that dump.
-- A new chat is a different `conversationId` on `chat.send`. The shortcut that mints the id is the app's. `session.window` is a proposed optional notification for the popup opening and closing. This drive does not send it. `shutdown` does not end the session.
+- A new chat is a different `conversationId` on `chat.send`. The app also mints a new id after the popup has been closed for 10 minutes. The core does not time that window and protocol 0.1 has no message for it. `shutdown` does not end the session.

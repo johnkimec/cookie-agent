@@ -1,6 +1,5 @@
 import type { ModelMessage } from "ai";
 import type { ModelUsage } from "./model/provider.ts";
-import type { SessionWindowState } from "./protocol/types.ts";
 
 /**
  * One committed exchange. `egress` stays false on the SQLite path:
@@ -23,7 +22,6 @@ export interface ChatTurnCommit {
 export interface ConversationHistory {
   messagesFor(conversationId: string, userText: string): ModelMessage[];
   commit(turn: ChatTurnCommit): void;
-  noteWindow(conversationId: string, state: SessionWindowState): void;
   close(): void;
 }
 
@@ -45,10 +43,6 @@ export class ConversationMemory implements ConversationHistory {
       next.push({ role: "assistant", content: turn.assistantText });
     }
     this.turns.set(turn.conversationId, next);
-  }
-
-  noteWindow(): void {
-    // The in-memory stand-in has no popup and no session rows.
   }
 
   close(): void {}

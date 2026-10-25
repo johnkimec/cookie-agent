@@ -24,8 +24,6 @@ The core is the JSON-RPC server. The shell spawns it and is the client. Either s
 
 `protocolVersion` is a `MAJOR.MINOR` string. The only version this schema accepts in a result is `0.1`. A well-formed different version fails `initialize` with code `-32000` and does not complete the handshake. Adding or renaming a field or method requires a new version and a schema change.
 
-`session.window` is a proposed exception to that rule, not a version bump. It is an optional shell-to-core notification. A `0.2` result would fail the shell's `initialize`, which still sends `0.1`. Shells that never send `session.window` behave as before. The core does not send it. Rejecting the proposal means dropping the notification from the schema and the core handler. The store's session rules do not depend on the schema entry.
-
 ## Methods
 
 | Method | Direction | Kind |
@@ -37,7 +35,6 @@ The core is the JSON-RPC server. The shell spawns it and is the client. Either s
 | `chat.delta` | core → shell | notification |
 | `chat.done` | core → shell | notification |
 | `runtime.status` | either direction | notification, and shell → core query |
-| `session.window` | shell → core | notification, proposed, optional |
 
 Later design-doc methods are not in this schema: `tool.call`, `tool.list`, `fm.classify`, `ui.approval_request`, `ui.stream_delta`, `ui.egress_notice`, `approval.respond`, `checkin.trigger`, `power.state`, `config.set`.
 
@@ -118,16 +115,6 @@ The product model id is `Qwen3.6-35B-A3B`. The menu status line in the UI spec s
 
 Order after `initialize`: the result line, then the core's `runtime.status` notification.
 
-### `session.window` (proposed)
-
-Optional notification. No `id`. Params are `conversationId` (the same id as `chat.send`) and `state` (`open` or `closed`).
-
-The shell sends `closed` when the popup closes and `open` when it opens. The core starts a 10-minute timer on `closed` and cancels it on `open`. A second `closed` does not move the timer. When the timer fires, that session's `ended_at` is set. A `chat.send` for the same id before the timer fires also cancels it.
-
-A new chat is not this notification. It is a `chat.send` whose `conversationId` is a different id. That id is the session id. The key that mints a new id lives in the app. `shutdown` does not end the session: quit and relaunch keep the turns.
-
-The fake core ignores this notification and logs it. The real core records it. Current shells do not send it.
-
 ## Errors
 
 | Code | Message | When |
@@ -153,7 +140,7 @@ These are process environment variables, not JSON-RPC fields.
 | --- | --- |
 | `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). The shell leaves an unset or empty value unset so the core can apply that default. Verification sets `18080` and must not use `8080`. |
 | `COOKIE_THINKING` | Real core only. `0` or `1`. Default `0`. `0` turns Qwen thinking off (`reasoning` `none`, and `chat_template_kwargs.enable_thinking` false). `1` leaves thinking on. Any other value makes the process exit 1 before it speaks protocol. |
-| `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. The real core opens `<COOKIE_DATA_DIR>/cookie.db` there (WAL). When the variable is unset, the directory is `~/Library/Application Support/com.johnkimec.cookie-agent`. |
+| `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. The real core does not read it in M0. |
 | `COOKIE_FAKE_DELTA_MS` | Fake core only. Milliseconds to wait between deltas so `chat.cancel` can land. `0`–`10000`. Default `0`. |
 
 The fake core opens no sockets and does not dial `llama-server`, whatever the port is. The real core dials `http://127.0.0.1:$COOKIE_LLAMA_PORT` and only that host.
@@ -180,7 +167,7 @@ That text is a stub so task B can render a stream. It is not a model reply. `ser
 pnpm core
 ```
 
-`serverInfo.name` is `cookie-core`. It stores turns in `<COOKIE_DATA_DIR>/cookie.db`. After `initialize` it probes `GET /health` on the llama port (a 404 falls through to `GET /v1/models`) and sends one `runtime.status`. Reachable is `up` / `Qwen3.6-35B-A3B`. Unreachable is `down` with `modelId` null, and `chat.send` then returns `-32002` instead of waiting. A shell `runtime.status` push still updates the core's view. While that view is `up` and was set in the last 5 seconds, by a shell push or by the core's own probe, `chat.send` does not probe again before the ack. An older `up` is probed again. While ready, the core probes again about every 500 ms and sends `runtime.status` only when `state` or `modelId` changes. A shell push is left alone for those same 5 seconds, so the watch does not override it while the window is open. After the window, the watch reports what `/health` says. A llama-server restart with no shell push is `up`, then `down` (the process is gone), then `loading` (`/health` 503), then `up`. A connection error on an in-flight chat sets status to `down` when it was not already down, and ends that chat with `chat.done` `finishReason` `error` and usage zeros. That includes a failure before the first delta. One reply at a time: a second `chat.send` is `-32003`. `chat.cancel` aborts the HTTP request. A completion that succeeds with no text is `chat.done` `stop` and no deltas. `error` is not used for an empty success. Thinking follows `COOKIE_THINKING` (default off). Every request sends `chat_template_kwargs.enable_thinking` false unless `COOKIE_THINKING=1`.
+`serverInfo.name` is `cookie-core`. After `initialize` it probes `GET /health` on the llama port (a 404 falls through to `GET /v1/models`) and sends one `runtime.status`. Reachable is `up` / `Qwen3.6-35B-A3B`. Unreachable is `down` with `modelId` null, and `chat.send` then returns `-32002` instead of waiting. A shell `runtime.status` push still updates the core's view. While that view is `up` and was set in the last 5 seconds, by a shell push or by the core's own probe, `chat.send` does not probe again before the ack. An older `up` is probed again. While ready, the core probes again about every 500 ms and sends `runtime.status` only when `state` or `modelId` changes. A shell push is left alone for those same 5 seconds, so the watch does not override it while the window is open. After the window, the watch reports what `/health` says. A llama-server restart with no shell push is `up`, then `down` (the process is gone), then `loading` (`/health` 503), then `up`. A connection error on an in-flight chat sets status to `down` when it was not already down, and ends that chat with `chat.done` `finishReason` `error` and usage zeros. That includes a failure before the first delta. One reply at a time: a second `chat.send` is `-32003`. `chat.cancel` aborts the HTTP request. A completion that succeeds with no text is `chat.done` `stop` and no deltas. `error` is not used for an empty success. Thinking follows `COOKIE_THINKING` (default off). Every request sends `chat_template_kwargs.enable_thinking` false unless `COOKIE_THINKING=1`.
 
 ## TypeScript
 

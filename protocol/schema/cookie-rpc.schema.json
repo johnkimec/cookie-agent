@@ -205,30 +205,6 @@
         }
       ]
     },
-    "sessionWindowState": {
-      "enum": ["open", "closed"]
-    },
-    "sessionWindowParams": {
-      "description": "PROPOSED optional notification params. Protocol version stays 0.1. Shells that omit session.window behave as before.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["conversationId", "state"],
-      "properties": {
-        "conversationId": { "$ref": "#/$defs/entityId" },
-        "state": { "$ref": "#/$defs/sessionWindowState" }
-      }
-    },
-    "sessionWindowNotification": {
-      "description": "PROPOSED shell-to-core notification. Not a version bump. The core does not send it.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["jsonrpc", "method", "params"],
-      "properties": {
-        "jsonrpc": { "const": "2.0" },
-        "method": { "const": "session.window" },
-        "params": { "$ref": "#/$defs/sessionWindowParams" }
-      }
-    },
     "errorData": {
       "type": "object",
       "additionalProperties": false,
@@ -503,7 +479,6 @@
     { "$ref": "#/$defs/runtimeStatusNotification" },
     { "$ref": "#/$defs/runtimeStatusRequest" },
     { "$ref": "#/$defs/runtimeStatusResultMessage" },
-    { "$ref": "#/$defs/sessionWindowNotification" },
     { "$ref": "#/$defs/errorResponse" }
   ]
 }

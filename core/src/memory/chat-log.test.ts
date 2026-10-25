@@ -11,7 +11,7 @@ import {
   messageErrors,
 } from "../protocol/validate.ts";
 import { ChatLog } from "./chat-log.ts";
-import { SESSION_CLOSED_MS, SqliteMemoryStore } from "./sqlite-store.ts";
+import { SqliteMemoryStore } from "./sqlite-store.ts";
 
 const dirs: string[] = [];
 
@@ -196,64 +196,6 @@ describe("chat log wired into the core", () => {
     expect(seen[1]?.map((message) => message.content)).toEqual(["new chat"]);
     expect(store.recentTurns("conv-a", 10).map((row) => row.content)).toContain(
       "keep this",
-    );
-    store.close();
-  });
-
-  it("ends the session 10 minutes after session.window closed", async () => {
-    const path = tempDbPath();
-    const seen: ModelMessage[][] = [];
-    let clock = 10_000;
-    const store = SqliteMemoryStore.open(path, { now: () => clock });
-    const logs: string[] = [];
-    const messages: unknown[] = [];
-    const core = new AgentCore({
-      provider: provider(seen),
-      now: () => clock,
-      history: new ChatLog(store),
-      emit: (message) => {
-        expect(isCookieMessage(message), messageErrors(message)).toBe(true);
-        messages.push(message);
-      },
-      log: (line) => {
-        logs.push(line);
-      },
-      exit: () => undefined,
-    });
-    await ready(core, messages);
-    send(core, chat("2", "conv-1", "before close"));
-    await untilDone(messages, "msg-1");
-    send(core, {
-      jsonrpc: "2.0",
-      method: "session.window",
-      params: { conversationId: "conv-1", state: "closed" },
-    });
-    expect(logs).toEqual([]);
-    expect(store.session("conv-1")?.endedAt).toBeNull();
-
-    clock = 10_000 + SESSION_CLOSED_MS - 1;
-    send(core, {
-      jsonrpc: "2.0",
-      method: "session.window",
-      params: { conversationId: "conv-1", state: "closed" },
-    });
-    expect(store.session("conv-1")?.endedAt).toBeNull();
-
-    clock = 10_000 + SESSION_CLOSED_MS;
-    send(core, {
-      jsonrpc: "2.0",
-      method: "session.window",
-      params: { conversationId: "conv-1", state: "closed" },
-    });
-    expect(store.session("conv-1")?.endedAt).toBe(10_000 + SESSION_CLOSED_MS);
-
-    send(core, chat("3", "conv-1", "after the window"));
-    await untilDone(messages, "msg-2");
-    expect(seen.at(-1)?.map((message) => message.content)).toEqual([
-      "after the window",
-    ]);
-    expect(store.recentTurns("conv-1", 10).map((row) => row.content)).toContain(
-      "before close",
     );
     store.close();
   });

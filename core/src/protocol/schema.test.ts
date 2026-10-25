@@ -49,8 +49,6 @@ describe("protocol golden messages", () => {
       "runtime.status.notification.up.json",
       "runtime.status.request.json",
       "runtime.status.result.json",
-      "session.window.closed.json",
-      "session.window.open.json",
       "shutdown.request.json",
       "shutdown.result.json",
     ]);

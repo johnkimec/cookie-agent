@@ -80,10 +80,6 @@ export class ChatLog implements ConversationHistory {
     });
   }
 
-  noteWindow(conversationId: string, state: "open" | "closed"): void {
-    this.store.noteWindow(conversationId, state);
-  }
-
   close(): void {
     this.store.close();
   }
