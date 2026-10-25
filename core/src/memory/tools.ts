@@ -222,12 +222,17 @@ async function forgetFact(
   const sessions = sessionsTouching(deps.store, turnIds, texts, deps.derived);
   const factIds = facts.map((fact) => fact.id);
   const forgottenAt = new Date(now).toISOString();
-  // TODO: a hard-erase option deletes the raw turn as well. John wants
-  // to test this flow first. Until then the turn stays in `turns`, is
-  // kept as a dated entry, and is never recalled.
+  const forgottenTurns = new Set<string>([
+    ...deps.derived.forgottenTurnIds(),
+    ...turnIds,
+  ]);
+  // TODO: a hard-erase option deletes the raw turn as well, including
+  // its `turns_fts` row. John wants to test this flow first. Until then
+  // the turn stays in `turns` and `turns_fts`, is kept as a dated entry,
+  // and is never recalled. Retrieval filters the forgotten ids.
   let vectorDelete: Promise<void> = Promise.resolve();
   deps.derived.transaction(() => {
-    dropProfileFor(deps.derived, facts, keys);
+    dropProfileFor(deps.derived, facts, keys, forgottenTurns);
     for (const fact of doomed) {
       deps.derived.deleteFact(fact.id);
     }
@@ -237,9 +242,14 @@ async function forgetFact(
     for (const chunk of chunks) {
       deps.derived.deleteChunk(chunk.chunkId);
     }
+    deleteEmbedIndex(
+      deps.store,
+      turnIds,
+      doomed.map((fact) => fact.id),
+    );
     for (const sessionId of sessions) {
       deps.derived.deleteJournal(sessionId);
-      regenerateSummary(deps, sessionId, turnIds);
+      regenerateSummary(deps, sessionId);
     }
     vectorDelete = deps.vectors.delete(vectorIds);
   });
@@ -499,11 +509,11 @@ function sessionsTouching(
   return [...sessions];
 }
 
-function regenerateSummary(
-  deps: MemoryToolDeps,
-  sessionId: string,
-  forgotten: ReadonlySet<string>,
-): void {
+function regenerateSummary(deps: MemoryToolDeps, sessionId: string): void {
+  // Every forgotten turn, including ones an earlier forget in this
+  // session already marked. This call's ids are in the table because
+  // `forgetTurn` runs first in the same transaction.
+  const forgotten = new Set(deps.derived.forgottenTurnIds());
   const remaining = deps.store
     .recentTurns(sessionId, 10_000)
     .filter((turn) => !forgotten.has(turn.id) && !isSecret(turn.content));
@@ -577,10 +587,11 @@ function dropProfileFor(
   derived: DerivedMemoryStore,
   facts: readonly FactRecord[],
   keys: readonly string[],
+  forgottenTurns: ReadonlySet<string>,
 ): void {
   const next = derived
     .listProfile()
-    .filter((row) => !profileHoldsKey(row, facts, keys));
+    .filter((row) => !profileHoldsKey(row, facts, keys, forgottenTurns));
   if (next.length === derived.listProfile().length) {
     return;
   }
@@ -588,23 +599,172 @@ function dropProfileFor(
 }
 
 /**
- * A profile row matches when its value contains a key string, or when
- * the value itself (at least 4 characters) is contained in a forgotten
- * fact. An unrelated row on the same turn stays.
+ * A profile row matches when its value contains a key string, when the
+ * value itself (at least 4 characters) is contained in a forgotten
+ * fact, when the value shares a distinctive token with a forgotten
+ * fact, or when `source_turn` is already forgotten. A row with another
+ * source, or no source, stays when its value does not match. An active
+ * sibling fact on that turn still stays.
  */
 function profileHoldsKey(
   row: ProfileRecord,
   facts: readonly FactRecord[],
   keys: readonly string[],
+  forgottenTurns: ReadonlySet<string>,
 ): boolean {
+  if (row.sourceTurn !== null && forgottenTurns.has(row.sourceTurn)) {
+    return true;
+  }
   const value = row.value.trim().toLowerCase();
   if (containsKey(value, keys)) {
     return true;
   }
-  if (value.length < MIN_FORGET_TEXT) {
+  if (
+    value.length >= MIN_FORGET_TEXT &&
+    facts.some((fact) => fact.text.toLowerCase().includes(value))
+  ) {
+    return true;
+  }
+  return facts.some((fact) => sharesDistinctiveToken(value, fact.text));
+}
+
+const PROFILE_STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "and",
+  "or",
+  "of",
+  "to",
+  "in",
+  "on",
+  "for",
+  "with",
+  "is",
+  "it",
+  "my",
+  "your",
+  "his",
+  "her",
+  "our",
+  "their",
+  "this",
+  "that",
+  "was",
+  "be",
+  "as",
+  "at",
+  "by",
+  "from",
+  "has",
+  "have",
+  "had",
+  "not",
+  "but",
+  "if",
+  "so",
+  "than",
+  "then",
+  "too",
+  "very",
+  "can",
+  "will",
+  "just",
+  "about",
+  "into",
+  "over",
+  "after",
+  "before",
+  "between",
+  "out",
+  "up",
+  "down",
+  "off",
+  "no",
+  "yes",
+  "do",
+  "does",
+  "did",
+  "done",
+  "i",
+  "me",
+  "we",
+  "you",
+  "he",
+  "she",
+  "they",
+  "them",
+  "what",
+  "when",
+  "where",
+  "who",
+  "how",
+  "which",
+  "there",
+  "here",
+]);
+
+/**
+ * Digits, or a letter-token of 4 or more characters that is not a
+ * stopword. Shared tokens drop a paraphrased profile value.
+ */
+export function sharesDistinctiveToken(left: string, right: string): boolean {
+  const tokens = distinctiveTokens(left);
+  if (tokens.size === 0) {
     return false;
   }
-  return facts.some((fact) => fact.text.toLowerCase().includes(value));
+  for (const token of distinctiveTokens(right)) {
+    if (tokens.has(token)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function distinctiveTokens(text: string): Set<string> {
+  const tokens = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const out = new Set<string>();
+  for (const token of tokens) {
+    if (/^\d+$/.test(token)) {
+      out.add(token);
+      continue;
+    }
+    if (token.length >= MIN_FORGET_TEXT && !PROFILE_STOPWORDS.has(token)) {
+      out.add(token);
+    }
+  }
+  return out;
+}
+
+type SqlStatement = { run: (param: string) => unknown };
+type SqlDatabase = { prepare: (sql: string) => SqlStatement };
+
+/**
+ * Drop `embed_index` rows for forgotten turns and deleted facts.
+ * In-memory stores have no index table.
+ */
+function deleteEmbedIndex(
+  store: MemoryStore,
+  turnIds: ReadonlySet<string>,
+  factIds: readonly string[],
+): void {
+  const open = (store as { database?: () => SqlDatabase }).database;
+  if (typeof open !== "function") {
+    return;
+  }
+  const db = open.call(store);
+  const dropTurn = db.prepare(
+    "DELETE FROM embed_index WHERE source = 'turn' AND source_id = ?",
+  );
+  const dropFact = db.prepare(
+    "DELETE FROM embed_index WHERE source = 'fact' AND source_id = ?",
+  );
+  for (const id of turnIds) {
+    dropTurn.run(id);
+  }
+  for (const id of factIds) {
+    dropFact.run(id);
+  }
 }
 
 function profileKeyFor(

@@ -304,12 +304,14 @@ describe("memory.remember and memory.forget", () => {
     ).toBe(false);
     expect(derived.forgottenTurnIds()).toEqual(["t1"]);
     expect(derived.listChunks()).toEqual([]);
+    // `linked` shares t1, which this forget marks, so the profile row goes.
+    // The sibling fact on t1 stays.
     expect(
       derived
         .listProfile()
         .map((row) => row.key)
         .sort(),
-    ).toEqual(["kept", "linked"]);
+    ).toEqual(["kept"]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
   });
 
