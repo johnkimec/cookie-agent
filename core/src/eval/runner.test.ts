@@ -19,6 +19,7 @@ import {
   completeAtTemperatureZero,
   coreEvalEnv,
   evalExitCode,
+  FAKE_RETRIEVAL_BAR,
   FAKE_RETRIEVAL_TOP,
   forgottenProbeFor,
   REAL_PORTS_REQUIRED,
@@ -62,19 +63,23 @@ describe("memory recall runner", () => {
     ).toBe("no retrieved context");
   });
 
-  it("keeps --fake green below the bar and fails --real", () => {
+  it("fails --fake below 8/9 and fails --real below its bar", () => {
     const low = {
       mode: "fake" as const,
-      passed: 1,
-      total: 10,
-      bar: 8,
+      passed: 7,
+      total: 9,
+      bar: FAKE_RETRIEVAL_BAR,
       egressViolation: false,
       plumbingError: false,
       tasks: [],
       text: "",
     };
-    expect(evalExitCode(low)).toBe(0);
-    expect(evalExitCode({ ...low, mode: "real" })).toBe(1);
+    expect(FAKE_RETRIEVAL_BAR).toBe(8);
+    expect(evalExitCode(low)).toBe(1);
+    expect(evalExitCode({ ...low, passed: 8 })).toBe(0);
+    expect(evalExitCode({ ...low, mode: "real", passed: 7, total: 10 })).toBe(
+      1,
+    );
     expect(evalExitCode({ ...low, egressViolation: true })).toBe(1);
   });
 
@@ -117,6 +122,26 @@ describe("memory recall runner", () => {
     const buried = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "fact"];
     expect(retrievalHit(buried, expected, [])).toBe(false);
     expect(FAKE_RETRIEVAL_TOP).toBe(8);
+    const required = ["marcus", "marcus-reply"];
+    expect(
+      retrievalHit(
+        ["marcus", "bahen", "marcus-reply"],
+        ["bahen"],
+        [],
+        required,
+      ),
+    ).toBe(true);
+    expect(retrievalHit(["marcus", "bahen"], ["bahen"], [], required)).toBe(
+      false,
+    );
+    expect(
+      retrievalHit(
+        ["old", "marcus", "bahen", "marcus-reply"],
+        ["bahen"],
+        ["old"],
+        required,
+      ),
+    ).toBe(false);
   });
 
   it("replays a task through chat.send and reflects between sessions", async () => {

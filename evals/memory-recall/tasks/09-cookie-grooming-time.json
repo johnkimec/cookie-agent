@@ -3,7 +3,10 @@
   "question": "What time is my dog Cookie's grooming appointment?",
   "expectedFact": "10:30",
   "accept": ["10:30am"],
-  "expectedIds": ["ses-2026-10-13-1250-menubar-1-user"],
+  "expectedIds": [
+    "ses-2026-10-13-1250-menubar-1-user",
+    "ses-2026-10-13-1250-menubar-2-assistant"
+  ],
   "distractorIds": [],
   "tests": "Date/time: an absolute appointment time for John's dog Cookie (not the assistant).",
   "mustNotContain": [],

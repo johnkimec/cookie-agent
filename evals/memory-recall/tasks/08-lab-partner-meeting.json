@@ -2,8 +2,16 @@
   "id": "08-lab-partner-meeting",
   "question": "Where am I meeting Marcus this week?",
   "expectedFact": "Bahen",
-  "expectedIds": ["ses-2026-10-20-0205-popup-1-user"],
-  "distractorIds": ["ses-2026-10-07-2040-popup-1-user"],
+  "accept": ["Marcus Lee"],
+  "expectedIds": [
+    "ses-2026-10-20-0205-popup-1-user",
+    "ses-2026-10-20-0205-popup-2-assistant"
+  ],
+  "requiredIds": [
+    "ses-2026-10-07-2040-popup-1-user",
+    "ses-2026-10-07-2040-popup-2-assistant"
+  ],
+  "distractorIds": [],
   "tests": "Multi-hop: S1 names the lab partner, S2 gives the meeting place without the name; the answer needs both.",
   "mustNotContain": [],
   "setup": "S1 partner = Marcus, S2 meeting with 'my lab partner' (no name); ask in S3",

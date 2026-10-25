@@ -24,6 +24,10 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     },
+    "requiredIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
     "realOnly": { "type": "boolean" },
     "tests": { "type": "string", "minLength": 1 },
     "setup": { "type": "string", "minLength": 1 },

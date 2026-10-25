@@ -2,7 +2,10 @@
   "id": "03-digikey-part-number",
   "question": "What was the Digi-Key part number for the shift register I ordered?",
   "expectedFact": "296-1600-1-ND",
-  "expectedIds": ["ses-2026-10-07-0110-popup-1-user"],
+  "expectedIds": [
+    "ses-2026-10-07-0110-popup-1-user",
+    "ses-2026-10-07-0110-popup-2-assistant"
+  ],
   "distractorIds": [],
   "tests": "Exact code: an arbitrary part number only lexical (BM25) recall can return verbatim.",
   "mustNotContain": [],

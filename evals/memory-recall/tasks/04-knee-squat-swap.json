@@ -3,7 +3,10 @@
   "question": "Which leg exercise did I switch to because of my old injury?",
   "expectedFact": "box squats",
   "accept": ["box squat"],
-  "expectedIds": ["ses-2026-09-29-2220-popup-1-user"],
+  "expectedIds": [
+    "ses-2026-09-29-2220-popup-1-user",
+    "ses-2026-09-29-2220-popup-2-assistant"
+  ],
   "distractorIds": [],
   "realOnly": true,
   "tests": "Paraphrase: the question shares no content words with the stored turn, so the vector leg must find it.",

@@ -28,10 +28,12 @@ import {
   FORGET_TASK_ID,
   KNOWN_BLOCKED_REASON,
   loadTasks,
-  type RecallSession,
   type RecallTask,
   SCORED_TASK_IDS,
+  storedTurnId,
 } from "./tasks.ts";
+
+export { storedTurnId };
 
 export const RECALL_BAR = 8;
 
@@ -40,6 +42,12 @@ export const RECALL_BAR = 8;
  * distractor is ranked above it. The cutoff is fixed. It is not an env knob.
  */
 export const FAKE_RETRIEVAL_TOP = 8;
+
+/**
+ * `--fake` exits 1 below this many passes.
+ * The denominator is 9: tasks 03–12, with 04 real-only.
+ */
+export const FAKE_RETRIEVAL_BAR = 8;
 
 /** Reflect JSON `parseReflectExtraction` accepts with no facts. */
 export const EMPTY_REFLECT_REPLY =
@@ -251,45 +259,22 @@ export function attachEvalDataCleanup(
 }
 
 /**
- * Turn id `ChatLog` writes for a fixture user line.
- * The count matches replay: a user turn, then its assistant line.
- */
-export function storedTurnId(
-  sessions: readonly RecallSession[],
-  userContent: string,
-): string | null {
-  for (const session of sessions) {
-    let count = 0;
-    for (let index = 0; index < session.turns.length; index += 1) {
-      const turn = session.turns[index];
-      if (turn === undefined || turn.role !== "user") {
-        continue;
-      }
-      const next = session.turns[index + 1];
-      count += 1;
-      const id = `${session.id}-${count}-user`;
-      if (turn.content.includes(userContent)) {
-        return id;
-      }
-      if (next?.role === "assistant") {
-        count += 1;
-        index += 1;
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * True when some expected id is in the top {@link FAKE_RETRIEVAL_TOP}
- * and every distractor is absent or ranked below that id.
+ * True when some expected id is in the top {@link FAKE_RETRIEVAL_TOP},
+ * every required id is in that top, and no distractor ranks above the
+ * best expected id or above any required id.
  */
 export function retrievalHit(
   ids: readonly string[],
   expected: readonly string[],
   distractors: readonly string[],
+  required: readonly string[] = [],
 ): boolean {
   const top = ids.slice(0, FAKE_RETRIEVAL_TOP);
+  for (const id of required) {
+    if (!top.includes(id)) {
+      return false;
+    }
+  }
   let best = -1;
   for (const id of expected) {
     const at = top.indexOf(id);
@@ -302,8 +287,17 @@ export function retrievalHit(
   }
   for (const id of distractors) {
     const at = top.indexOf(id);
-    if (at >= 0 && at < best) {
+    if (at < 0) {
+      continue;
+    }
+    if (at < best) {
       return false;
+    }
+    for (const requiredId of required) {
+      const requiredAt = top.indexOf(requiredId);
+      if (requiredAt >= 0 && at < requiredAt) {
+        return false;
+      }
     }
   }
   return true;
@@ -313,7 +307,10 @@ export function evalExitCode(report: EvalReport): number {
   if (report.egressViolation || report.plumbingError) {
     return 1;
   }
-  if (report.mode === "real" && report.passed < report.bar) {
+  if (report.mode === "fake") {
+    return report.passed < FAKE_RETRIEVAL_BAR ? 1 : 0;
+  }
+  if (report.passed < report.bar) {
     return 1;
   }
   return 0;
@@ -364,7 +361,7 @@ export async function runMemoryEval(
     mode: options.mode,
     passed,
     total: counted.length,
-    bar: RECALL_BAR,
+    bar: options.mode === "fake" ? FAKE_RETRIEVAL_BAR : RECALL_BAR,
     egressViolation,
     plumbingError,
     tasks: results,
@@ -564,6 +561,7 @@ async function runTask(
     ids,
     task.expectedIds ?? [],
     task.distractorIds ?? [],
+    task.requiredIds ?? [],
   );
   const realOnly = task.realOnly === true && options.mode === "fake";
   let knownBlocked = false;
@@ -770,7 +768,7 @@ function formatReport(report: EvalReport, setupError: string | null): string {
   const lines = [
     `mode ${report.mode}`,
     `score ${report.passed}/${report.total}`,
-    `bar ${report.bar}/10`,
+    `bar ${report.bar}/${report.total}`,
     report.mode === "fake"
       ? "denominator excludes 04-knee-squat-swap (real-only). The gate is the top 8, fixed."
       : "denominator 10 (tasks 03-12)",

@@ -61,6 +61,11 @@ export function acceptIssue(check: AnswerCheck, entry: string): string | null {
   return null;
 }
 
+/** Boundary match of `needle` inside `haystack`. Both sides are normalized. */
+export function textContains(haystack: string, needle: string): boolean {
+  return contains(normalizeMatchText(haystack), needle);
+}
+
 function contains(haystack: string, needle: string): boolean {
   const normalized = normalizeMatchText(needle);
   if (normalized.length === 0) {
