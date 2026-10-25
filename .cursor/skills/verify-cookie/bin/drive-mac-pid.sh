@@ -65,6 +65,20 @@ print(value)
 PY
 }
 
+plist_bool() {
+  python3 - "$1" "$2" <<'PY'
+import plistlib
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+with open(path, "rb") as handle:
+    data = plistlib.load(handle)
+if data.get(key) is not True:
+    sys.exit(1)
+print("true")
+PY
+}
+
 # Print the txt path whose real path is $2. With no $2, the CookieAgent txt, else the first txt.
 process_executable() {
   local pid="$1"
@@ -256,6 +270,57 @@ status_open_fields() {
     "$(status_field "$line" 3)" \
     "$(status_field "$line" 4)" \
     "$(status_field "$line" 5)"
+}
+
+# LaunchServices binary. Cleanup unregisters a drive bundle before deleting it.
+LSREGISTER_PATH="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+# $2 overrides the tool in tests. A missing tool does not block the delete.
+unregister_drive_root() {
+  local root="$1"
+  local tool="${2:-$LSREGISTER_PATH}"
+  local app
+  [[ -d "$root" ]] || return 0
+  for app in "$root"/*.app; do
+    [[ -d "$app" ]] || continue
+    if [[ -x "$tool" ]]; then
+      "$tool" -u "$app" || true
+    fi
+  done
+}
+
+# Drive bundles use their bundle id as the Application Support folder.
+# The product id is refused so open-clean cannot select John's folder.
+drive_support_folder() {
+  local bundle_id="$1"
+  case "$bundle_id" in
+    *[/\\]*|*..*)
+      return 1
+      ;;
+    com.johnkimec.cookie-agent.drive.[0-9a-f]*)
+      printf '%s\n' "$bundle_id"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Bash 3.2 does not abort when a command substitution fails, and exit inside
+# it only leaves the subshell. Call this in the current shell, never from $(...).
+# $1 is the caller's variable name. The rest is the command.
+assign_or_fail() {
+  local __dest="$1"
+  shift
+  local __out __status
+  set +e
+  __out="$("$@")"
+  __status=$?
+  set -e
+  if [[ "$__status" -ne 0 ]]; then
+    fail "$* exited $__status"
+  fi
+  printf -v "$__dest" '%s' "$__out"
 }
 
 # Self-check deletes only its own /tmp/cookie-m0.<token> directory.

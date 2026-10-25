@@ -46,11 +46,42 @@ public struct CoreLaunch: Equatable, Sendable {
     /// Stable product default. Verification sets `COOKIE_DATA_DIR` itself.
     public static let applicationSupportFolder = "com.johnkimec.cookie-agent"
 
-    public static func defaultDataDirectory(home: URL) -> URL {
+    /// Info.plist `CookieApplicationSupportFolder` on a drive bundle.
+    /// A missing, empty, or path-like value keeps the product folder.
+    public static func applicationSupportFolderName(override: String?) -> String {
+        guard let override else { return applicationSupportFolder }
+        let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.contains("/") || trimmed.contains("\\") || trimmed.contains("..") {
+            return applicationSupportFolder
+        }
+        return trimmed
+    }
+
+    public static func dataDirectory(home: URL, supportFolder override: String? = nil) -> URL {
         home
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent(applicationSupportFolder, isDirectory: true)
+            .appendingPathComponent(applicationSupportFolderName(override: override), isDirectory: true)
+    }
+
+    public static func defaultDataDirectory(home: URL) -> URL {
+        dataDirectory(home: home)
+    }
+
+    /// Info.plist `CookieSkipHotkey`. True means this bundle must not register ⌥Space.
+    public static func skipsHotkey(plistValue: Any?) -> Bool {
+        if let flag = plistValue as? Bool {
+            return flag
+        }
+        if let text = plistValue as? String {
+            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes":
+                return true
+            default:
+                return false
+            }
+        }
+        return false
     }
 
     public static func resolve(
@@ -59,11 +90,12 @@ public struct CoreLaunch: Equatable, Sendable {
         homeDirectory: URL,
         plistRepoRoot: String? = nil,
         bundleURL: URL? = nil,
-        toolSearchPaths: [String]? = nil
+        toolSearchPaths: [String]? = nil,
+        supportFolder: String? = nil
     ) -> CoreLaunch {
         var env = environment
         if env["COOKIE_DATA_DIR"]?.isEmpty ?? true {
-            env["COOKIE_DATA_DIR"] = defaultDataDirectory(home: homeDirectory).path
+            env["COOKIE_DATA_DIR"] = dataDirectory(home: homeDirectory, supportFolder: supportFolder).path
         }
         if env["COOKIE_LLAMA_PORT"]?.isEmpty ?? false {
             env.removeValue(forKey: "COOKIE_LLAMA_PORT")

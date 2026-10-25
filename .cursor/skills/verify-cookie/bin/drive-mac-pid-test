@@ -319,4 +319,151 @@ case "$observe" in
     ;;
 esac
 
+if [[ "$(drive_support_folder com.johnkimec.cookie-agent.drive.abcd1234)" != "com.johnkimec.cookie-agent.drive.abcd1234" ]]; then
+  printf 'drive support folder was not the bundle id\n' >&2
+  exit 1
+fi
+if drive_support_folder com.johnkimec.cookie-agent >/dev/null; then
+  printf 'product bundle id was accepted as a support folder\n' >&2
+  exit 1
+fi
+if drive_support_folder 'com.johnkimec.cookie-agent.drive.abcd/../x' >/dev/null; then
+  printf 'support folder with a slash was accepted\n' >&2
+  exit 1
+fi
+
+root="$FIXTURE/cookie-drive-app.abc"
+mkdir -p "$root/CDrv.app"
+cat >"$FIXTURE/lsregister" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$FIXTURE/ls-args"
+EOF
+chmod +x "$FIXTURE/lsregister"
+unregister_drive_root "$root" "$FIXTURE/lsregister"
+if ! grep -q -- "-u $root/CDrv.app" "$FIXTURE/ls-args"; then
+  printf 'lsregister was not called with -u on the bundle\n' >&2
+  exit 1
+fi
+unregister_drive_root "$root" "$FIXTURE/missing-lsregister"
+if [[ "$(wc -l <"$FIXTURE/ls-args" | tr -d ' ')" -ne 1 ]]; then
+  printf 'a missing lsregister still ran\n' >&2
+  exit 1
+fi
+if [[ "$LSREGISTER_PATH" != "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" ]]; then
+  printf 'lsregister path is not the LaunchServices framework binary\n' >&2
+  exit 1
+fi
+
+cleanup_body="$(awk '
+  /^cleanup\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$BIN_DIR/drive-mac")"
+case "$cleanup_body" in
+  *'unregister_drive_root'*'rm -rf "$root"'*) ;;
+  *)
+    printf 'cleanup deletes the bundle before lsregister -u\n' >&2
+    exit 1
+    ;;
+esac
+
+python3 - "$FIXTURE/skip.plist" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "wb") as handle:
+    plistlib.dump(
+        {
+            "CookieSkipHotkey": True,
+            "CookieApplicationSupportFolder": "com.johnkimec.cookie-agent.drive.abcd1234",
+        },
+        handle,
+    )
+PY
+if [[ "$(plist_bool "$FIXTURE/skip.plist" CookieSkipHotkey)" != "true" ]]; then
+  printf 'plist bool true was not read\n' >&2
+  exit 1
+fi
+if plist_bool "$FIXTURE/skip.plist" CookieApplicationSupportFolder >/dev/null; then
+  printf 'a string plist value was accepted as bool\n' >&2
+  exit 1
+fi
+
+for site in \
+  'assign_or_fail clicked_raw' \
+  'assign_or_fail before_raw' \
+  'assign_or_fail popup_state' \
+  'assign_or_fail support' \
+  'dismiss_status_menu'
+do
+  if ! grep -q "$site" "$BIN_DIR/drive-mac"; then
+    printf 'missing %s\n' "$site" >&2
+    exit 1
+  fi
+done
+code_word="key"" code"
+stroke_word="key""stroke"
+down_word="key"" down"
+send_word="send_""key_code"
+if grep -E -n "${code_word}|${stroke_word}|${down_word}|${send_word}" "$BIN_DIR/drive-mac"; then
+  printf 'drive-mac still sends a key\n' >&2
+  exit 1
+fi
+
+fail() {
+  printf 'FAIL %s\n' "$*" >&2
+  exit 1
+}
+assign_local() {
+  local got=""
+  assign_or_fail got printf '%s' 'hello'
+  [[ "$got" == "hello" ]]
+}
+assign_local
+inner_fail() { exit 9; }
+capture_status=0
+(
+  set -e
+  got=""
+  assign_or_fail got inner_fail
+  printf 'CONTINUED\n'
+) >"$FIXTURE/cap.out" 2>"$FIXTURE/cap.err" || capture_status=$?
+if [[ "$capture_status" -eq 0 ]] || grep -q CONTINUED "$FIXTURE/cap.out"; then
+  printf 'a failing command substitution continued the caller\n' >&2
+  exit 1
+fi
+if ! grep -q 'exited 9' "$FIXTURE/cap.err"; then
+  printf 'assign_or_fail did not report the subshell status\n' >&2
+  cat "$FIXTURE/cap.err" >&2
+  exit 1
+fi
+
+PYTHONDONTWRITEBYTECODE=1 python3 - "$BIN_DIR/drive-mac-ax.py" <<'PY'
+import importlib.util
+import sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("drive_mac_ax", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+point = module.cg_point_from_ax(10, 0, 24, 24, 1000)
+assert point == (22.0, 988.0), point
+try:
+    module.cg_point_from_ax(10, 0, 0, 24, 1000)
+except ValueError:
+    pass
+else:
+    raise SystemExit("zero size was accepted")
+
+windows = [
+    {"pid": 19527, "name": "Ask Cookie…", "id": 7, "layer": 3},
+    {"pid": 18332, "name": "Ask Cookie…", "id": 8, "layer": 0},
+    {"pid": 19527, "name": "Other", "id": 9, "layer": 0},
+]
+assert module.select_window(windows, 19527, "Ask Cookie…") == 7
+assert module.select_window(windows, 18332, "Ask Cookie…") == 8
+assert module.select_window(windows + [{"pid": 19527, "name": "Ask Cookie…", "id": 10}], 19527, "Ask Cookie…") is None
+assert module.select_window(windows, 19527, "missing") is None
+PY
+
 printf '%s\n' "drive-mac pid test ok"

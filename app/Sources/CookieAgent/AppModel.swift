@@ -78,12 +78,14 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func start() {
         let plistRoot = Bundle.main.object(forInfoDictionaryKey: "CookieRepoRoot") as? String
+        let supportFolder = Bundle.main.object(forInfoDictionaryKey: "CookieApplicationSupportFolder") as? String
         let launch = CoreLaunch.resolve(
             environment: ProcessInfo.processInfo.environment,
             currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
             plistRepoRoot: plistRoot,
-            bundleURL: Bundle.main.bundleURL
+            bundleURL: Bundle.main.bundleURL,
+            supportFolder: supportFolder
         )
         do {
             try launch.prepareDataDirectory()

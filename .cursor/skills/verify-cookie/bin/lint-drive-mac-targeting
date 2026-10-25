@@ -21,7 +21,7 @@ lint_fail() {
 }
 
 # Per-line bans. An allowed osascript line is the one helper invocation.
-# key down option is the one deferred option-click. Every other key down fails.
+# The drive sends no keystrokes. A window capture must name a window id.
 lint_lines() {
   python3 - "$@" <<'PY'
 import re
@@ -35,8 +35,9 @@ tell_app = re.compile(r"tell\s+(app|application)\b(.*)$")
 system_events = re.compile(r'^"System Events"(\s|$)')
 whose_name = re.compile(r"whose\s+name\b")
 key_down = re.compile(r"\bkey down\b")
-key_down_option = re.compile(r"\bkey down option\b")
+key_code = re.compile(r"\bkey code\b")
 keystroke = re.compile(r"\bkeystroke\b")
+screencapture = re.compile(r"\bscreencapture\b")
 pgrep = re.compile(r"\bpgrep\b")
 pgrep_parent = re.compile(r"\bpgrep\s+-P\b")
 kill_word = re.compile(r"\bkill\b")
@@ -68,10 +69,14 @@ for path in files:
                 add("tell other than System Events", path, number, stripped)
             if whose_name.search(line):
                 add("whose name", path, number, stripped)
-            if key_down.search(line) and not key_down_option.search(line):
+            if key_down.search(line):
                 add("key down", path, number, stripped)
-            if keystroke.search(line) and "refusing keystroke:" not in line:
+            if key_code.search(line):
+                add("key code", path, number, stripped)
+            if keystroke.search(line):
                 add("keystroke is not pid-targeted", path, number, stripped)
+            if screencapture.search(line) and not re.search(r"(?:^|[^\w])-l(?:[^\w]|$)", line):
+                add("screencapture", path, number, stripped)
             if pgrep.search(line):
                 rest = pgrep_parent.sub("", line)
                 if pgrep.search(rest):
@@ -110,18 +115,9 @@ lint_drive_shape() {
     *'COOKIE_DRIVE_PID='*'COOKIE_DRIVE_PROCESS_NAME='*'COOKIE_DRIVE_BUNDLE_ID='*'/usr/bin/osascript'*) ;;
     *) lint_fail "the osascript helper must set COOKIE_DRIVE_PID, COOKIE_DRIVE_PROCESS_NAME, and COOKIE_DRIVE_BUNDLE_ID" || return 1 ;;
   esac
-  local key_lines key_count
-  key_lines="$(grep -n 'key code' "$drive" || true)"
-  key_count=0
-  if [[ -n "$key_lines" ]]; then
-    key_count="$(printf '%s\n' "$key_lines" | wc -l | tr -d ' ')"
-  fi
-  if [[ "$key_count" -ne 1 ]]; then
-    printf '%s\n' "$key_lines" >&2
-    lint_fail "key code must appear once, inside send_key_code (found $key_count)" || return 1
-  fi
-  if ! grep -q 'refusing keystroke: frontmost unix id' "$drive"; then
-    lint_fail "send_key_code must refuse a key when frontmost unix id is not the drive pid" || return 1
+  if grep -n -E 'key code|keystroke|key down' "$drive" >/dev/null; then
+    grep -n -E 'key code|keystroke|key down' "$drive" >&2 || true
+    lint_fail "drive-mac sends a keystroke" || return 1
   fi
   if ! grep -q 'cookieDriveProcess' "$drive"; then
     lint_fail "drive-mac must resolve the process through cookieDriveProcess" || return 1
@@ -142,17 +138,13 @@ self_test() {
 osascript_run() {
   COOKIE_DRIVE_PID="$target_pid" COOKIE_DRIVE_PROCESS_NAME="$target_name" COOKIE_DRIVE_BUNDLE_ID="$target_bundle" /usr/bin/osascript "$tmp"
 }
-send_key_code() {
-  # refusing keystroke: frontmost unix id
-  key code keyCode
-}
 set cookieProc to my cookieDriveProcess()
 kill -0 "$pid"
 kill "$APP_PID"
 kill -9 "$DECOY_PID"
 children="$(pgrep -P "$current")"
 tell application "System Events"
-key down option
+screencapture -l 42 -x /tmp/popup.png
 EOF
   printf '%s\n' 'on cookieDriveProcess()' >"$tmp/good-lib"
   printf '%s\n' 'tell application "System Events"' >>"$tmp/good-lib"
@@ -166,10 +158,6 @@ EOF
     cat >>"$tmp/bad-drive" <<'EOF'
 osascript_run() {
   COOKIE_DRIVE_PID="$target_pid" COOKIE_DRIVE_PROCESS_NAME="$target_name" COOKIE_DRIVE_BUNDLE_ID="$target_bundle" /usr/bin/osascript "$tmp"
-}
-send_key_code() {
-  # refusing keystroke: frontmost unix id
-  key code keyCode
 }
 cookieDriveProcess
 EOF
@@ -198,7 +186,10 @@ EOF
   assert_rejects "osascript outside osascript_run" 'osascript -e "beep"'
   assert_rejects "osascript outside osascript_run" 'osascript -l JavaScript -e "Application(\"System Events\")"'
   assert_rejects "keystroke is not pid-targeted" 'keystroke "hello"'
+  assert_rejects "key code" 'key code 53'
   assert_rejects "key down" 'key down command'
+  assert_rejects "key down" 'key down option'
+  assert_rejects "screencapture" 'screencapture -x /tmp/whole-display.png'
 
   python3 - "$PREPEND" "$LIB" "$tmp/use-src.applescript" "$tmp/use-out.applescript" <<'PY'
 import pathlib, subprocess, sys
@@ -231,18 +222,8 @@ bin_files=()
 while IFS= read -r extra; do
   [[ -n "$extra" ]] || continue
   bin_files+=("$extra")
-done < <(find "$BIN_DIR" -type f ! -name 'lint-drive-mac-targeting' | sort)
+done < <(find "$BIN_DIR" -type f ! -name 'lint-drive-mac-targeting' ! -name '*.pyc' ! -path '*/__pycache__/*' | sort)
 lint_lines "${bin_files[@]}"
-
-option_lines="$(grep -n 'key down' "${bin_files[@]}" || true)"
-option_count=0
-if [[ -n "$option_lines" ]]; then
-  option_count="$(printf '%s\n' "$option_lines" | wc -l | tr -d ' ')"
-fi
-if [[ "$option_count" -ne 1 ]] || ! printf '%s\n' "$option_lines" | grep -q 'key down option'; then
-  printf '%s\n' "$option_lines" >&2
-  fail "key down option must appear once, inside option_click_status (found $option_count)"
-fi
 
 for needle in \
   'whose unix id is drivePid' \
@@ -255,11 +236,20 @@ do
     fail "cookieDriveProcess missing: $needle"
   fi
 done
-if ! grep -q 'frontmost process is not the launched executable' "$DRIVE"; then
-  fail "send_key_code must refuse a key when the frontmost process name is not the drive identity"
+if ! grep -q 'AXCancel' "$DRIVE"; then
+  fail "status menu dismiss must use AXCancel"
 fi
-if ! grep -q 'frontmost bundle id is not the launched app' "$DRIVE"; then
-  fail "send_key_code must refuse a key when the frontmost bundle id is not the drive identity"
+if ! grep -q 'CookieSkipHotkey' "$DRIVE"; then
+  fail "drive bundle must set CookieSkipHotkey"
+fi
+if ! grep -q 'CookieApplicationSupportFolder' "$DRIVE"; then
+  fail "drive bundle must set CookieApplicationSupportFolder"
+fi
+if ! grep -q 'LaunchServices.framework/Support/lsregister' "$PID_SH"; then
+  fail "cleanup must call the LaunchServices lsregister"
+fi
+if ! grep -q 'CGEventPostToPid' "$BIN_DIR/drive-mac-ax.py"; then
+  fail "option-click must post to the drive pid"
 fi
 
 if [[ ! -f "$PID_SH" ]]; then
