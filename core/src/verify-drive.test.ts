@@ -385,9 +385,12 @@ describe("verify-cookie drive-core", () => {
       expect(result.stdout).toContain("profile dropped\n");
       expect(result.stdout).toContain("vectors cleared\n");
       expect(result.stdout).toContain("prompt clean\n");
+      expect(result.stdout).toContain("same conversation clean\n");
+      expect(result.stdout).toContain("second forget clean\n");
       const dbText = await readFile(join(evidence, "db.txt"), "utf8");
       expect(dbText).toContain("Remember the locker code is 4417");
       expect(dbText).toContain("Saved: your locker code is 4417.");
+      expect(dbText).not.toContain("Gym locker #4417");
       expect(dbText).not.toMatch(/^fact .*"4417"/m);
       expect(dbText).toContain("vec_facts ");
       expect(dbText).toContain("embed_index ");

@@ -32,6 +32,9 @@ const REFLECT_MARK = "You extract memory";
 const FORGET_REPLY = "Done. I forgot the locker code 4417.";
 const SAVED_REPLY = "Saved: your locker code is 4417.";
 const ASK_LOCKER = "What is the locker code?";
+const ASK_AGAIN = "what was that code again?";
+const BIKE_FACT = "The bike is a bluefox";
+const GYM_LOCKER = "Gym locker #4417";
 const ASK_MARKER = "What marker did I ask you to keep?";
 
 export const MEMORY_DRIVE_FEATURES = [
@@ -198,7 +201,29 @@ async function runForget(ctx: MemoryDriveContext): Promise<string> {
   }
   await chat(ctx.session, "3", "conv-locker", "Forget that code");
   await settleAfterForget(path);
-  await chat(ctx.session, "4", "conv-locker-ask", ASK_LOCKER);
+  await chat(ctx.session, "4", "conv-locker", ASK_AGAIN);
+  const again = [...ctx.stub.chats]
+    .reverse()
+    .find((record) => lastUser(record) === ASK_AGAIN);
+  if (again === undefined) {
+    throw new Error("stub did not see the same-conversation ask");
+  }
+  if (blob(again).includes(LOCKER)) {
+    throw new Error("same conversation still contains 4417");
+  }
+  await chat(ctx.session, "5", "conv-locker", "Remember the bike is a bluefox");
+  await chat(ctx.session, "6", "conv-locker", "Forget the bike");
+  const afterSecond = derivedDump(path);
+  const summary = jsonLines(afterSecond, "session").find(
+    (row) => row.id === "conv-locker",
+  );
+  if (
+    typeof summary?.summary === "string" &&
+    summary.summary.includes(LOCKER)
+  ) {
+    throw new Error("second forget wrote 4417 back into the summary");
+  }
+  await chat(ctx.session, "7", "conv-locker-ask", ASK_LOCKER);
   const ask = [...ctx.stub.chats]
     .reverse()
     .find((record) => lastUser(record) === ASK_LOCKER);
@@ -208,7 +233,7 @@ async function runForget(ctx: MemoryDriveContext): Promise<string> {
   if (blob(ask).includes(LOCKER)) {
     throw new Error("next prompt still contains 4417");
   }
-  await shutdown(ctx.session, "5");
+  await shutdown(ctx.session, "8");
   const dbText = derivedDump(path);
   assertLockerGone(dbText);
   const echo = jsonLines(dbText, "turn").find(
@@ -232,6 +257,8 @@ async function runForget(ctx: MemoryDriveContext): Promise<string> {
     "profile dropped",
     "vectors cleared",
     "prompt clean",
+    "same conversation clean",
+    "second forget clean",
     "egress 0",
     "",
   ].join("\n");
@@ -408,9 +435,17 @@ function forgetScript(record: StubChatRequest): StubScriptTurn {
     };
   }
   if (hasToolResult(record)) {
-    return lastUser(record).includes("Forget that code")
-      ? { kind: "text", text: FORGET_REPLY }
-      : { kind: "text", text: SAVED_REPLY };
+    const said = lastUser(record);
+    if (said.includes("Forget that code")) {
+      return { kind: "text", text: FORGET_REPLY };
+    }
+    if (said.includes("Forget the bike")) {
+      return { kind: "text", text: "Done." };
+    }
+    if (said.includes("Remember the bike is a bluefox")) {
+      return { kind: "text", text: "Saved." };
+    }
+    return { kind: "text", text: SAVED_REPLY };
   }
   if (lastUser(record).includes("Remember the locker code is 4417")) {
     return {
@@ -422,11 +457,28 @@ function forgetScript(record: StubChatRequest): StubScriptTurn {
       },
     };
   }
+  if (lastUser(record).includes("Remember the bike is a bluefox")) {
+    return {
+      kind: "tool",
+      name: "memory.remember",
+      arguments: {
+        text: BIKE_FACT,
+        kind: "event",
+      },
+    };
+  }
   if (lastUser(record).includes("Forget that code")) {
     return {
       kind: "tool",
       name: "memory.forget",
       arguments: { text: LOCKER_FACT },
+    };
+  }
+  if (lastUser(record).includes("Forget the bike")) {
+    return {
+      kind: "tool",
+      name: "memory.forget",
+      arguments: { text: BIKE_FACT },
     };
   }
   return { kind: "text", text: "I don't have that." };
@@ -543,6 +595,16 @@ function reflectJson(
         {
           key: "locker",
           value: LOCKER,
+          statedByJohn: true,
+          stable: true,
+          sessionsObserved: 1,
+          shareable: false,
+          sensitive: false,
+          pinned: false,
+        },
+        {
+          key: "gym_locker",
+          value: GYM_LOCKER,
           statedByJohn: true,
           stable: true,
           sessionsObserved: 1,
@@ -855,7 +917,10 @@ function derivedCopyHasLocker(dump: string): boolean {
       typeof row.source_turn === "string" &&
       row.source_turn.length > 0,
   );
-  return summary && journal && profile;
+  const paraphrase = jsonLines(dump, "profile").some(
+    (row) => row.key === "gym_locker" && row.value === GYM_LOCKER,
+  );
+  return summary && journal && profile && paraphrase;
 }
 
 function storedProfileIsCapped(path: string): boolean {
