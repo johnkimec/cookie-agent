@@ -48,6 +48,11 @@ if [[ "$runtime" == "fake" && "$port" != "18080" ]]; then
   printf '%s\n' "not-ok" "COOKIE_LLAMA_PORT must be 18080"
   exit 1
 fi
+embed_given="${COOKIE_EMBED_PORT:-}"
+if [[ "$runtime" == "fake" && -n "$embed_given" && "$embed_given" != "18081" ]]; then
+  printf '%s\n' "not-ok" "COOKIE_EMBED_PORT must be 18081"
+  exit 1
+fi
 if [[ -z "$data" || "$data" == *"Application Support"* ]]; then
   printf '%s\n' "not-ok" "COOKIE_DATA_DIR must be a fresh temp directory, not Application Support"
   exit 1
@@ -67,6 +72,7 @@ if [[ "$runtime" == "real" ]]; then
   unset COOKIE_CORE_COMMAND
 else
   export COOKIE_LLAMA_PORT=18080
+  export COOKIE_EMBED_PORT=18081
   export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
 fi
 
@@ -115,7 +121,20 @@ resolved_port() {
   fi
 }
 
+resolved_embed_port() {
+  if [[ "$runtime" == "fake" ]]; then
+    printf '%s\n' "18081"
+    return
+  fi
+  if [[ -z "${COOKIE_EMBED_PORT:-}" ]]; then
+    printf '%s\n' "8081"
+  else
+    printf '%s\n' "$COOKIE_EMBED_PORT"
+  fi
+}
+
 PORT="$(resolved_port)"
+EMBED_PORT="$(resolved_embed_port)"
 
 port_listening() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
@@ -140,6 +159,59 @@ pid_file_pid() {
   local file="$COOKIE_DATA_DIR/logs/llama-server.pid"
   [[ -f "$file" ]] || return 0
   awk 'NF >= 1 { print $1; exit }' "$file"
+}
+
+pid_in_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  awk 'NF >= 1 { print $1; exit }' "$file"
+}
+
+health_ok() {
+  python3 - "$1" <<'PY'
+import sys
+import urllib.request
+port = sys.argv[1]
+url = "http://127.0.0.1:%s/health" % port
+try:
+    with urllib.request.urlopen(url, timeout=2) as response:
+        raise SystemExit(0 if 200 <= response.status < 300 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+wait_health() {
+  local port="$1" attempt
+  for attempt in $(seq 1 40); do
+    if health_ok "$port"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# Real runtime only. Chat port and embed port both answer /health, and both
+# pid files exist. Fake mode returns without checking.
+assert_both_servers() {
+  [[ "$runtime" == "real" ]] || return 0
+  local chat_port="${1:-$PORT}"
+  local embed_port="${2:-$EMBED_PORT}"
+  local dir="${3:-$COOKIE_DATA_DIR}"
+  local chat_pid embed_owned
+  if ! wait_health "$chat_port"; then
+    fail "chat /health not ok on ${chat_port}"
+  fi
+  if ! wait_health "$embed_port"; then
+    fail "embed /health not ok on ${embed_port}"
+  fi
+  chat_pid="$(pid_in_file "$dir/logs/llama-server.pid" || true)"
+  embed_owned="$(pid_in_file "$dir/logs/llama-embed.pid" || true)"
+  if [[ -z "$chat_pid" || -z "$embed_owned" ]]; then
+    fail "pid files missing in ${dir} chat=${chat_pid:-none} embed=${embed_owned:-none}"
+  fi
+  log "both servers health ok chat pid=${chat_pid} port=${chat_port} embed pid=${embed_owned} port=${embed_port}"
 }
 
 pid_alive() {
@@ -659,6 +731,7 @@ if [[ "$runtime" == "real" ]]; then
   fi
   log "runtime up"
   cat /tmp/cookie-drive-mac-menu.txt
+  assert_both_servers
 else
   python3 - <<'PY' || fail "menu strings"
 import pathlib, sys
@@ -755,7 +828,9 @@ if [[ -n "$evidence" ]]; then
     printf '%s\n' "drive-mac $feature --runtime $runtime"
     printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
     printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+    printf '%s\n' "COOKIE_EMBED_PORT=${COOKIE_EMBED_PORT:-}"
     printf '%s\n' "resolvedPort=${PORT}"
+    printf '%s\n' "resolvedEmbedPort=${EMBED_PORT}"
     printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND:-}"
   } > "$evidence/command.txt"
   cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
@@ -809,37 +884,59 @@ relaunch_app() {
 
 # kill -9 skips applicationShouldTerminate, so a server we launched is
 # orphaned until the next launch reaps it. Fake mode has no llama-server.
+# Real mode runs the chat server and the embedding server, so two processes
+# is the ceiling.
 orphan_reap_check() {
-  local old_pid count
+  local old_pid old_embed count limit
   old_pid="$(pid_file_pid || true)"
-  log "orphan-reap kill -9 ${APP_PID} pidfile=${old_pid:-none}"
+  old_embed=""
+  if [[ "$runtime" == "real" ]]; then
+    old_embed="$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)"
+  fi
+  log "orphan-reap kill -9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
   kill -9 "$APP_PID" 2>/dev/null || true
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
   sleep 0.5
   relaunch_app
   count="$(llama_server_count)"
+  if [[ "$runtime" == "real" ]]; then
+    limit=2
+  else
+    limit=1
+  fi
   log "orphan-reap llama-server count ${count}"
-  if [[ "$count" -gt 1 ]]; then
+  if [[ "$count" -gt "$limit" ]]; then
     fail "orphan reap left ${count} llama-server processes: $(llama_server_pids | tr '\n' ' ')"
   fi
   if [[ "$runtime" == "fake" && "$count" != "0" ]]; then
     fail "fake runtime has llama-server after relaunch"
   fi
   if [[ -n "$old_pid" ]] && pid_is_llama "$old_pid"; then
-    if [[ "$count" != "1" ]]; then
+    if [[ "$runtime" != "real" && "$count" != "1" ]]; then
       fail "old llama-server ${old_pid} still alive with ${count} servers"
     fi
     log "orphan-reap reused ${old_pid}"
   else
     log "orphan-reap old server gone"
   fi
+  if [[ -n "$old_embed" ]] && pid_is_llama "$old_embed"; then
+    log "orphan-reap reused embed ${old_embed}"
+  fi
+  if [[ "$runtime" == "real" ]]; then
+    assert_both_servers
+  fi
 }
 
 orphan_reap_check
 
 owned_before_quit="$(pid_file_pid || true)"
-log "quit via menu pid=${owned_before_quit:-none} port=${PORT}"
+owned_embed_before=""
+embed_port_now="$EMBED_PORT"
+if [[ "$runtime" == "real" ]]; then
+  owned_embed_before="$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)"
+fi
+log "quit via menu pid=${owned_before_quit:-none} embed=${owned_embed_before:-none} port=${PORT}"
 osascript_run <<'APPLESCRIPT'
 tell application "System Events"
   if not (exists process "CookieAgent") then error "CookieAgent is not running"
@@ -893,6 +990,22 @@ else
     fail "quit stopped a server this app did not launch on port ${PORT}"
   fi
   log "quit left port ${PORT} listener state unchanged"
+fi
+
+if [[ "$runtime" == "real" ]]; then
+  if [[ -z "$owned_embed_before" ]]; then
+    fail "llama-embed.pid missing before quit"
+  fi
+  if pid_is_llama "$owned_embed_before"; then
+    fail "llama-embed ${owned_embed_before} still alive after quit"
+  fi
+  if port_listening "$embed_port_now"; then
+    fail "embed port ${embed_port_now} still listening after quit"
+  fi
+  if [[ -n "$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)" ]]; then
+    fail "llama-embed.pid remains after quit"
+  fi
+  log "quit reaped embed ${owned_embed_before} port ${embed_port_now} clear"
 fi
 
 cookie_agent_pids() {
@@ -1062,10 +1175,27 @@ open_clean_check() {
       term_port="$parsed"
     fi
   fi
+  local embed_file embed_owned="" embed_term_port="8081"
+  embed_file="$support/logs/llama-embed.pid"
+  if [[ -f "$support/logs/llama-embed.log" ]]; then
+    local embed_parsed
+    embed_parsed="$(awk 'match($0, /--port [0-9]+/) { print substr($0, RSTART+7, RLENGTH-7); exit }' "$support/logs/llama-embed.log" || true)"
+    if [[ -n "$embed_parsed" ]]; then
+      embed_term_port="$embed_parsed"
+    fi
+  fi
+  if [[ "$runtime" == "real" ]]; then
+    assert_both_servers "$term_port" "$embed_term_port" "$support"
+  fi
+  # The pid file appears while the servers become healthy. Read it after
+  # that wait, or a real launch looks like the embedder never started.
+  if [[ -f "$embed_file" ]]; then
+    embed_owned="$(awk 'NF >= 1 { print $1; exit }' "$embed_file")"
+  fi
   local signal_mark
   signal_mark="$(shell_log_bytes "$shell_log")"
   log_cookie_processes
-  log "SIGTERM target pid=$APP_PID pidfile=${owned:-none} port=$term_port"
+  log "SIGTERM target pid=$APP_PID pidfile=${owned:-none} embed=${embed_owned:-none} port=$term_port embedPort=$embed_term_port"
   kill -TERM "$APP_PID" || true
   local exited=0
   for attempt in $(seq 1 40); do
@@ -1100,6 +1230,21 @@ open_clean_check() {
       fail "SIGTERM stopped a server this app did not launch on port 8080"
     fi
     log "SIGTERM left an existing port 8080 listener"
+  fi
+  if [[ "$runtime" == "real" ]]; then
+    if [[ -z "$embed_owned" ]]; then
+      fail "llama-embed.pid missing before SIGTERM"
+    fi
+    if pid_is_llama "$embed_owned"; then
+      fail "llama-embed ${embed_owned} still alive after SIGTERM"
+    fi
+    if port_listening "$embed_term_port"; then
+      fail "embed port ${embed_term_port} still listening after SIGTERM"
+    fi
+    if [[ -f "$embed_file" ]]; then
+      fail "llama-embed.pid remains after SIGTERM"
+    fi
+    log "SIGTERM reaped embed ${embed_owned} port ${embed_term_port} clear"
   fi
 }
 
