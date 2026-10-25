@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -46,6 +52,9 @@ describe("memory data directory", () => {
     expect(() => memoryDataDir({ NODE_ENV: "test" })).toThrow(
       /default data directory/,
     );
+    expect(() => memoryDataDir({ NODE_ENV: "TEST" })).toThrow(
+      /default data directory/,
+    );
     expect(() =>
       memoryDataDir({ NODE_ENV: "test", COOKIE_DATA_DIR: "" }),
     ).toThrow(/temporary directory/);
@@ -69,6 +78,27 @@ describe("memory data directory", () => {
     expect(() =>
       memoryDataDir({ VITEST: "true", COOKIE_DATA_DIR: link }),
     ).toThrow(/default data directory/);
+  });
+
+  it("refuses a symlink alias when the default directory exists", () => {
+    const dir = defaultMemoryDataDir();
+    const created = !existsSync(dir);
+    if (created) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const parent = mkdtempSync(join(tmpdir(), "cookie-data-alias-"));
+    dirs.push(parent);
+    const link = join(parent, "alias");
+    symlinkSync(dir, link);
+    try {
+      expect(() =>
+        memoryDataDir({ NODE_ENV: "TEST", COOKIE_DATA_DIR: link }),
+      ).toThrow(/default data directory/);
+    } finally {
+      if (created) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it("allows a temporary COOKIE_DATA_DIR under test", () => {

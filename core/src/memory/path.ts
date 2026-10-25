@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -24,9 +24,9 @@ export function defaultMemoryDataDir(): string {
 /**
  * `COOKIE_DATA_DIR` when it is set. Otherwise the product default.
  * Verification always sets the variable.
- * `VITEST` (non-empty) or `NODE_ENV=test` refuses that default, including
- * a `COOKIE_DATA_DIR` that points at it, so a test cannot open John's
- * real database.
+ * `VITEST` (non-empty) or `NODE_ENV=test` (any case) refuses that default,
+ * including a `COOKIE_DATA_DIR` that points at it, so a test cannot open
+ * John's real database. A path with the same device and inode counts.
  */
 export function memoryDataDir(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.COOKIE_DATA_DIR;
@@ -54,11 +54,34 @@ function isTestEnv(env: NodeJS.ProcessEnv): boolean {
   if (typeof vitest === "string" && vitest !== "") {
     return true;
   }
-  return env.NODE_ENV === "test";
+  const nodeEnv = env.NODE_ENV;
+  return typeof nodeEnv === "string" && nodeEnv.toLowerCase() === "test";
 }
 
 function isDefaultDataDir(dir: string): boolean {
-  return canonicalDir(dir) === canonicalDir(defaultMemoryDataDir());
+  const fallback = defaultMemoryDataDir();
+  if (sameDirectory(dir, fallback)) {
+    return true;
+  }
+  return canonicalDir(dir) === canonicalDir(fallback);
+}
+
+/**
+ * True when both paths exist and are the same directory.
+ * `statSync` follows links, so a symlink alias matches, and so do
+ * case-folded APFS paths and `/System/Volumes/Data` firmlinks whose
+ * realpath strings still differ.
+ */
+function sameDirectory(left: string, right: string): boolean {
+  try {
+    const a = statSync(left);
+    const b = statSync(right);
+    return (
+      a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
