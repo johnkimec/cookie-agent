@@ -8,9 +8,9 @@
  * The process opens no sockets. It does not dial llama-server.
  */
 
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { REQUEST_ID_PATTERN, rpcError } from "./protocol/errors.ts";
 import {
   countWords,
@@ -456,10 +456,14 @@ function warnIfProductPort(): void {
 
 function isDirectRun(): boolean {
   const entry = process.argv[1];
-  if (entry === undefined) {
+  if (entry === undefined || entry === "") {
     return false;
   }
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
 }
 
 function main(): void {
