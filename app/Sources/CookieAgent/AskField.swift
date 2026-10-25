@@ -124,7 +124,7 @@ final class AskTextView: NSTextView {
     /// Present only when `COOKIE_DRIVE_KEYS=1`. Each action calls `keyDown`,
     /// the same path as the key. Names stay off the accessibility tree otherwise.
     override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
-        guard cookieDriveKeysEnabled(ProcessInfo.processInfo.environment) else {
+        guard cookieDriveKeysEnabled(environment: ProcessInfo.processInfo.environment) else {
             return super.accessibilityCustomActions()
         }
         return [
