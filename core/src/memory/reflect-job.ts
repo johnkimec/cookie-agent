@@ -181,7 +181,15 @@ export class LocalReflector implements Reflector {
       ];
       const liveProfile = profile.filter(
         (row) =>
-          !profileRowDropped(row, droppedFacts, "", sourceTurns, secretTexts),
+          !profileRowDropped(
+            row,
+            // Fact text must not drop a pinned row. Secrets still come
+            // from `secretTexts`, which already includes those facts.
+            row.pinned ? [] : droppedFacts,
+            "",
+            sourceTurns,
+            secretTexts,
+          ),
       );
       const raced = blocked.size > 0;
       if (!raced && journal !== null) {
