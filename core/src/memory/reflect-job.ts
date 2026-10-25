@@ -18,7 +18,6 @@ import {
   embedFact,
   isFactKind,
   nearestActive,
-  profileNameTokens,
   profileRowDropped,
 } from "./tools.ts";
 import type { TurnRecord } from "./types.ts";
@@ -168,20 +167,21 @@ export class LocalReflector implements Reflector {
       const droppedFacts = planned.inserts.filter((fact) =>
         droppedIds.has(fact.id),
       );
-      const nameTokens = profileNameTokens([
-        ...this.options.derived.listProfile(),
-        ...profile,
-      ]);
-      const droppedKeys = droppedFacts.map((fact) => fact.text.toLowerCase());
+      const sourceTurns = new Set<string>();
+      for (const fact of droppedFacts) {
+        if (fact.sourceTurn !== null) {
+          sourceTurns.add(fact.sourceTurn);
+        }
+      }
+      const secretTexts = [
+        ...droppedFacts.map((fact) => fact.text),
+        ...turns
+          .filter((turn) => sourceTurns.has(turn.id))
+          .map((turn) => turn.content),
+      ];
       const liveProfile = profile.filter(
         (row) =>
-          !profileRowDropped(
-            row,
-            droppedFacts,
-            droppedKeys,
-            forgottenNow,
-            nameTokens,
-          ),
+          !profileRowDropped(row, droppedFacts, "", sourceTurns, secretTexts),
       );
       const raced = blocked.size > 0;
       if (!raced && journal !== null) {
