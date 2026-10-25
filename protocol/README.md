@@ -139,6 +139,7 @@ These are process environment variables, not JSON-RPC fields.
 | Variable | Meaning |
 | --- | --- |
 | `COOKIE_LLAMA_PORT` | Port of `llama-server`. The product default is `8080` (`http://127.0.0.1:8080/v1` in the design doc). The shell leaves an unset or empty value unset so the core can apply that default. Verification sets `18080` and must not use `8080`. |
+| `COOKIE_EMBED_PORT` | Port of the embedding `llama-server`. The product default is `8081`. The shell sets this on the core child to the resolved port, including when the parent left it unset. `drive-mac` fake mode uses `18081`. |
 | `COOKIE_THINKING` | Real core only. `0` or `1`. Default `0`. `0` turns Qwen thinking off (`reasoning` `none`, and `chat_template_kwargs.enable_thinking` false). `1` leaves thinking on. Any other value makes the process exit 1 before it speaks protocol. |
 | `COOKIE_DATA_DIR` | Isolated data directory. Verification sets a fresh temp directory. The fake core does not read or write it. The real core does not read it in M0. |
 | `COOKIE_FAKE_DELTA_MS` | Fake core only. Milliseconds to wait between deltas so `chat.cancel` can land. `0`–`10000`. Default `0`. |
