@@ -199,4 +199,33 @@ describe("migration 001", () => {
     ).toEqual({ n: 0 });
     db.close();
   });
+
+  it("applies migration 003 on a database that stopped at version 2", () => {
+    const initial = readFileSync(
+      new URL("./migrations/001_initial.sql", import.meta.url),
+      "utf8",
+    );
+    const embed = readFileSync(
+      new URL("./migrations/002_embed_index.sql", import.meta.url),
+      "utf8",
+    );
+    const path = tempDbPath();
+    const created = new Database(path);
+    created.pragma("journal_mode = WAL");
+    created.loadExtension(sqliteVec.getLoadablePath());
+    created.exec(initial);
+    created.exec(embed);
+    created.pragma("user_version = 2");
+    created.close();
+
+    const db = openMemoryDatabase(path);
+    expect(db.pragma("user_version", { simple: true })).toBe(3);
+    expect(db.prepare("SELECT count(*) AS n FROM embed_index").get()).toEqual({
+      n: 0,
+    });
+    expect(
+      db.prepare("SELECT count(*) AS n FROM forgotten_turns").get(),
+    ).toEqual({ n: 0 });
+    db.close();
+  });
 });

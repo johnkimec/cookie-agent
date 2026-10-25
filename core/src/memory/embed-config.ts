@@ -13,19 +13,46 @@ export interface ResolveEmbedderOptions {
 }
 
 /**
+ * Remember a probe for `ttlMs` so a closed embed port is not dialed
+ * on every chat turn. The first call still probes.
+ */
+export function cachedProbe(
+  probe: () => Promise<boolean>,
+  ttlMs = 5000,
+): () => Promise<boolean> {
+  let checkedAt = 0;
+  let up = false;
+  return async () => {
+    const now = Date.now();
+    if (checkedAt !== 0 && now - checkedAt < ttlMs) {
+      return up;
+    }
+    try {
+      up = await probe();
+    } catch {
+      up = false;
+    }
+    checkedAt = Date.now();
+    return up;
+  };
+}
+
+/**
  * Embedder for `createMemoryRuntime`.
  *
  * `startStdioCore` passes `await resolveEmbedder(process.env)` as
- * `options.embedder`. Tests that omit it still get `FakeEmbedder`.
- * Do not change `Embedder`.
+ * `options.embedder` and always passes the same `SqliteVecIndex` the
+ * indexer and the retriever use. Tests that omit the embedder still
+ * get `FakeEmbedder`. Do not change `Embedder`.
  *
  * HTTP when `COOKIE_EMBED_PORT` (default 8081) answers `GET /health`.
  * `COOKIE_EMBEDDER=fake`, and a port that does not answer, return
  * `FakeEmbedder` so tests and a down server still construct a runtime.
- * Do not point that fake at sqlite-vec. `ContentIndexer` skips the write
- * when health is down so cookie.db does not fill with fake vectors.
- * `embed` does not add nomic prefixes. Callers that need
- * `search_query: ` or `search_document: ` add them before `embed`.
+ * `ContentIndexer` skips the write when health is down so cookie.db
+ * does not fill with fake vectors. Forget still deletes through the
+ * shared sqlite index. `embed` does not add nomic prefixes. Callers
+ * that need `search_query: ` or `search_document: ` add them before
+ * `embed`.
  */
 export async function resolveEmbedder(
   env: NodeJS.ProcessEnv = process.env,

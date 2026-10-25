@@ -12,7 +12,14 @@ export const DOCUMENT_PREFIX = "search_document: ";
 
 export const DEFAULT_EMBED_PORT = 8081;
 
+/** Indexing embed. A batch can be slow. Not the chat-turn budget. */
 export const DEFAULT_EMBED_TIMEOUT_MS = 10_000;
+
+/**
+ * Query embed on the chat path. `COOKIE_EMBED_TIMEOUT_MS` overrides it.
+ * A hung embedder must fall back to BM25 inside this, not the 10 s index budget.
+ */
+export const DEFAULT_QUERY_EMBED_TIMEOUT_MS = 400;
 
 export const DEFAULT_EMBED_HEALTH_TIMEOUT_MS = 300;
 
@@ -71,6 +78,17 @@ export function readEmbedTimeoutMs(
   return readPositiveInt(
     env.COOKIE_EMBED_TIMEOUT_MS,
     DEFAULT_EMBED_TIMEOUT_MS,
+    "COOKIE_EMBED_TIMEOUT_MS",
+  );
+}
+
+/** Chat-turn embed budget. Unset is 400 ms, not the indexing default. */
+export function readQueryEmbedTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return readPositiveInt(
+    env.COOKIE_EMBED_TIMEOUT_MS,
+    DEFAULT_QUERY_EMBED_TIMEOUT_MS,
     "COOKIE_EMBED_TIMEOUT_MS",
   );
 }

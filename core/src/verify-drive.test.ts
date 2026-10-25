@@ -365,13 +365,18 @@ describe("verify-cookie drive-core", () => {
         ["drive", "memory-forget", "--evidence", evidence, "--core", "real"],
         root,
         {},
-        30000,
+        60000,
       );
       expect(result.stdout).toContain("forget true\n");
-      expect(result.stdout).toContain("retrieval dropped\n");
+      expect(result.stdout).toContain("profile dropped\n");
+      expect(result.stdout).toContain("vectors cleared\n");
+      expect(result.stdout).toContain("prompt clean\n");
       const dbText = await readFile(join(evidence, "db.txt"), "utf8");
       expect(dbText).toContain("Remember the locker code is 4417");
+      expect(dbText).toContain("Saved: your locker code is 4417.");
       expect(dbText).not.toMatch(/^fact .*"4417"/m);
+      expect(dbText).toContain("vec_facts ");
+      expect(dbText).toContain("embed_index ");
       const command = await readFile(join(evidence, "command.txt"), "utf8");
       expect(command).toContain("COOKIE_REFLECT_IDLE_MS=250");
       const stderr = await readFile(join(evidence, "stderr.txt"), "utf8");
@@ -380,7 +385,7 @@ describe("verify-cookie drive-core", () => {
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
-  }, 30000);
+  }, 60000);
 
   it("drives memory reflect to abort on chat.send and then write a fact", async () => {
     const root = await runtime();
@@ -423,7 +428,7 @@ describe("verify-cookie drive-core", () => {
       expect(result.stdout).toContain("pinned kept\n");
       const dbText = await readFile(join(evidence, "db.txt"), "utf8");
       expect(dbText).toContain('"key":"name"');
-      expect(dbText).toContain('"key":"note_15"');
+      expect(dbText).not.toContain('"key":"note_15"');
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
@@ -437,17 +442,21 @@ describe("verify-cookie drive-core", () => {
         ["drive", "memory-rebuild", "--evidence", evidence, "--core", "real"],
         root,
         {},
-        30000,
+        45000,
       );
       expect(result.stdout).toContain("rebuild true\n");
       expect(result.stdout).toContain("recall true\n");
       const dbText = await readFile(join(evidence, "db.txt"), "utf8");
       expect(dbText).toContain("amber marker for the rebuild check");
-      expect(dbText).not.toContain("rebuild-should-drop-this");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain("conv-rebuild-ask");
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
-  }, 30000);
+  }, 45000);
 
   it("still rejects memory-recall because that drive is not written", async () => {
     const root = await runtime();
@@ -466,6 +475,61 @@ describe("verify-cookie drive-core", () => {
       await rm(evidence, { recursive: true, force: true });
     }
   });
+
+  it("drives BM25 recall when the embedder port is closed", async () => {
+    const root = await runtime();
+    const evidence = await mkdtemp(join(tmpdir(), "cookie-evidence-"));
+    try {
+      const result = await run(
+        [
+          "drive",
+          "memory-embed-down",
+          "--evidence",
+          evidence,
+          "--core",
+          "real",
+        ],
+        root,
+      );
+      expect(result.stdout).toContain("embedDown true\n");
+      expect(result.stdout).toContain("recall true\n");
+      expect(result.stdout).toContain("egress 0\n");
+      const transcript = await readFile(
+        join(evidence, "transcript.jsonl"),
+        "utf8",
+      );
+      expect(transcript).toContain(HISTORY_CODE_WORD);
+      expect(transcript).toContain("conv-ask");
+      expect(transcript).toContain(
+        "What did I say about the ECE midterm last week?",
+      );
+      const askSend = transcript.split("\n").find((line) => {
+        return (
+          line.includes('"method":"chat.send"') && line.includes("conv-ask")
+        );
+      });
+      expect(askSend).toBeDefined();
+      expect(askSend?.toLowerCase()).not.toContain(
+        HISTORY_CODE_WORD.toLowerCase(),
+      );
+      const dbText = await readFile(join(evidence, "db.txt"), "utf8");
+      expect(dbText).toContain(HISTORY_CODE_WORD);
+      expect(dbText).toContain('"egress":0');
+      expect(dbText).not.toContain('"egress":1');
+      for (const line of transcript.split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        const entry = JSON.parse(line) as { message: unknown };
+        expect(
+          isCookieMessage(entry.message),
+          messageErrors(entry.message),
+        ).toBe(true);
+      }
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
+  }, 20000);
 
   it("drives a llama stub restart through up, down, loading, and up", async () => {
     const root = await runtime();

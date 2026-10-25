@@ -11,8 +11,10 @@ CREATE TABLE IF NOT EXISTS memory_meta (
   value TEXT NOT NULL
 );
 
+-- No foreign key on turn_id. A fact can name a turn that is not in
+-- `turns`, and that must not abort the forget.
 CREATE TABLE forgotten_turns (
-  turn_id      TEXT PRIMARY KEY REFERENCES turns(id),
+  turn_id      TEXT PRIMARY KEY,
   forgotten_at TEXT NOT NULL,
   fact_ids     TEXT NOT NULL
 );

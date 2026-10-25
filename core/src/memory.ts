@@ -13,11 +13,6 @@ export interface ChatTurnCommit {
   modelId: string | null;
   usage: ModelUsage;
   latencyMs: number | null;
-  /**
-   * Unused by ChatLog. ChatLog is the only turn writer on the sqlite
-   * path and stores the user row in `messagesFor`.
-   */
-  userTurnId?: string;
 }
 
 /**

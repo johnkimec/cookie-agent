@@ -538,6 +538,15 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
     return rows.map((row) => row.turn_id);
   }
 
+  /** Fact ids recorded for this forgotten turn. Empty when it was not. */
+  forgottenFactIds(turnId: string): string[] {
+    this.requireOpen();
+    const row = this.db
+      .prepare("SELECT fact_ids FROM forgotten_turns WHERE turn_id = ?")
+      .get(turnId) as { fact_ids: string } | undefined;
+    return parseFactIds(row?.fact_ids);
+  }
+
   transaction(work: () => void): void {
     this.requireOpen();
     this.db.transaction(work)();
@@ -598,6 +607,7 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
       this.db.prepare("DELETE FROM journal").run();
       this.db.prepare("DELETE FROM chunks").run();
       this.db.prepare("UPDATE sessions SET summary = NULL").run();
+      this.db.prepare("DELETE FROM embed_index WHERE source = 'turn'").run();
     });
     wipe();
   }

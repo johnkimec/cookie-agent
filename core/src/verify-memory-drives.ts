@@ -1,29 +1,19 @@
 /**
  * Fake-model drives for memory.remember, memory.forget, reflect,
  * the profile cap, and rebuild. The real core talks to the llama stub.
- * Retrieval inside the prompt is a later change. These drives assert
- * the rows the core writes and the retrieval filter that already exists.
+ * Forget, rebuild, and the profile cap go through that process.
+ * The drive does not call capProfile or rebuildDerivedMemory itself.
  */
 
+import { createServer, type Server } from "node:http";
 import { join } from "node:path";
+import * as sqliteVec from "sqlite-vec";
 import type { FactKind, ProfileRecord } from "./memory/derived.ts";
-import { randomIds } from "./memory/derived.ts";
 import { dumpMemory, openReadonlyDatabase } from "./memory/dump.ts";
-import { FakeEmbedder } from "./memory/embedder.ts";
 import { MEMORY_DB_FILENAME } from "./memory/path.ts";
-import { withoutSuperseded } from "./memory/policy.ts";
-import {
-  capProfile,
-  PROFILE_TOKEN_CAP,
-  profileTokens,
-} from "./memory/profile-cap.ts";
-import { LocalReflector, rebuildDerivedMemory } from "./memory/reflect-job.ts";
-import { InMemoryRetriever } from "./memory/retrieve.ts";
-import { completeViaProvider } from "./memory/runtime.ts";
-import { localDay } from "./memory/schedule.ts";
+import { PROFILE_TOKEN_CAP, profileTokens } from "./memory/profile-cap.ts";
 import { SqliteMemoryStore } from "./memory/sqlite-store.ts";
-import { InMemoryVectorIndex } from "./memory/vectors.ts";
-import { createLlamaServerProvider } from "./model/llama.ts";
+import { EMBEDDING_DIMENSIONS } from "./memory/types.ts";
 import type { CoreSession } from "./verify-drive.ts";
 import type {
   LlamaStub,
@@ -38,8 +28,11 @@ const LOCKER = "4417";
 const LOCKER_FACT = "The locker code is 4417";
 const ECE_FACT = "ECE midterm is Friday";
 const AMBER_FACT = "amber marker for the rebuild check";
-const JUNK_FACT = "rebuild-should-drop-this";
 const REFLECT_MARK = "You extract memory";
+const FORGET_REPLY = "Done. I forgot the locker code 4417.";
+const SAVED_REPLY = "Saved: your locker code is 4417.";
+const ASK_LOCKER = "What is the locker code?";
+const ASK_MARKER = "What marker did I ask you to keep?";
 
 export const MEMORY_DRIVE_FEATURES = [
   "memory-remember",
@@ -67,7 +60,8 @@ export function memoryDriveIdleMs(
   if (
     feature === "memory-forget" ||
     feature === "memory-reflect" ||
-    feature === "memory-profile-cap"
+    feature === "memory-profile-cap" ||
+    feature === "memory-rebuild"
   ) {
     return "250";
   }
@@ -192,35 +186,55 @@ async function runForget(ctx: MemoryDriveContext): Promise<string> {
     "conv-locker",
     "Remember the locker code is 4417",
   );
-  await waitUntil("reflect wrote 4417", REFLECT_WAIT_MS, () =>
+  await waitUntil("reflect wrote the locker profile", REFLECT_WAIT_MS, () =>
     derivedCopyHasLocker(derivedDump(path)),
   );
+  await waitUntil("indexer stored the locker turn", REFLECT_WAIT_MS, () => {
+    const turnId = turnIdByContent(path, "Remember the locker code is 4417");
+    return turnId !== null && embedHasTurn(path, turnId);
+  });
+  if (vecCount(path, "vec_facts") < 1) {
+    throw new Error("vec_facts was empty before forget");
+  }
   await chat(ctx.session, "3", "conv-locker", "Forget that code");
-  await chat(ctx.session, "4", "conv-locker-ask", "What is the locker code?");
+  await settleAfterForget(path);
+  await chat(ctx.session, "4", "conv-locker-ask", ASK_LOCKER);
+  const ask = [...ctx.stub.chats]
+    .reverse()
+    .find((record) => lastUser(record) === ASK_LOCKER);
+  if (ask === undefined) {
+    throw new Error("stub did not see the locker ask");
+  }
+  if (blob(ask).includes(LOCKER)) {
+    throw new Error("next prompt still contains 4417");
+  }
   await shutdown(ctx.session, "5");
   const dbText = derivedDump(path);
   assertLockerGone(dbText);
-  const store = SqliteMemoryStore.open(path);
-  try {
-    if (store.forgottenTurnIds().length === 0) {
-      throw new Error("forgotten_turns is empty");
-    }
-    const retriever = new InMemoryRetriever();
-    retriever.add({
-      id: "planted",
-      text: LOCKER_FACT,
-      source: "fact",
-    });
-    const hits = await withoutSuperseded(retriever.retrieve, store, () =>
-      Date.now(),
-    )(LOCKER);
-    if (hits.length !== 0) {
-      throw new Error("retrieval kept a fact hit for the forgotten text");
-    }
-  } finally {
-    store.close();
+  const echo = jsonLines(dbText, "turn").find(
+    (row) => row.content === SAVED_REPLY,
+  );
+  if (echo === undefined) {
+    throw new Error("assistant did not repeat the locker code");
   }
-  return ["ok", "forget true", "retrieval dropped", "egress 0", ""].join("\n");
+  const forgotten = new Set(
+    jsonLines(dbText, "forgotten").map((row) => row.turn_id),
+  );
+  if (!forgotten.has(echo.id)) {
+    throw new Error("assistant echo was not forgotten");
+  }
+  if (embedHasTurn(path, turnIdByContent(path, FORGET_REPLY) ?? "")) {
+    throw new Error("indexer re-embedded the forgotten reply");
+  }
+  return [
+    "ok",
+    "forget true",
+    "profile dropped",
+    "vectors cleared",
+    "prompt clean",
+    "egress 0",
+    "",
+  ].join("\n");
 }
 
 async function runReflect(ctx: MemoryDriveContext): Promise<string> {
@@ -272,26 +286,12 @@ async function runReflect(ctx: MemoryDriveContext): Promise<string> {
 async function runProfile(ctx: MemoryDriveContext): Promise<string> {
   const path = dbPath(ctx.dataDir);
   await chat(ctx.session, "2", "conv-profile", "hello profile");
-  await waitUntil(
-    "profile rows",
-    REFLECT_WAIT_MS,
-    () => profileCount(path) >= 17,
+  await waitUntil("profile capped", REFLECT_WAIT_MS, () =>
+    storedProfileIsCapped(path),
   );
   await shutdown(ctx.session, "3");
-  const rows = profileRecords(path);
-  const visible = capProfile(rows);
-  if (rows.length <= visible.length) {
-    throw new Error("profile overflow was deleted");
-  }
-  if (profileTokens(visible) > PROFILE_TOKEN_CAP) {
-    throw new Error(`profile tokens ${String(profileTokens(visible))}`);
-  }
-  const pinned = visible.find((row) => row.key === "name");
-  if (pinned?.pinned !== true || pinned.value !== "John") {
-    throw new Error("pinned name did not survive the cap");
-  }
-  if (!rows.some((row) => row.key === "note_15")) {
-    throw new Error("unpinned overflow is missing from the store");
+  if (!storedProfileIsCapped(path)) {
+    throw new Error("stored profile is over the cap");
   }
   return ["ok", "profile capped", "pinned kept", "egress 0", ""].join("\n");
 }
@@ -303,6 +303,7 @@ async function runRebuild(
   await shutdown(ctx.session, "3");
   const path = dbPath(ctx.dataDir);
   const store = SqliteMemoryStore.open(path);
+  let userId = "";
   try {
     const user = store
       .recentTurns("conv-rebuild", 20)
@@ -312,50 +313,8 @@ async function runRebuild(
     if (user === undefined) {
       throw new Error("rebuild turn is missing");
     }
-    store.insertFact({
-      id: "junk-rebuild",
-      text: JUNK_FACT,
-      kind: "event",
-      subject: null,
-      confidence: 1,
-      sensitive: false,
-      validUntil: null,
-      supersededBy: null,
-      sourceTurn: user.id,
-      createdAt: Date.now(),
-      lastUsedAt: null,
-    });
-    const vectors = new InMemoryVectorIndex();
-    const reflector = new LocalReflector({
-      store,
-      derived: store,
-      embedder: new FakeEmbedder(),
-      vectors,
-      complete: (args) =>
-        completeViaProvider(
-          createLlamaServerProvider({ port: Number(ctx.port) }),
-          args,
-        ),
-      now: () => Date.now(),
-      timeZone: "UTC",
-      localDay,
-      factIds: randomIds("fact"),
-      journalIds: randomIds("journal"),
-    });
-    await rebuildDerivedMemory({
-      sessionIds: ["conv-rebuild"],
-      derived: store,
-      vectors,
-      reflect: (sessionId) => reflector.reflect(sessionId),
-    });
-    const facts = store.listFacts();
-    if (facts.some((fact) => fact.text.includes(JUNK_FACT))) {
-      throw new Error("rebuild kept the junk fact");
-    }
-    const rebuilt = facts.find((fact) => fact.text === AMBER_FACT);
-    if (rebuilt?.sourceTurn !== user.id) {
-      throw new Error("rebuilt fact is not sourced from the turn");
-    }
+    userId = user.id;
+    store.clearDerived();
   } finally {
     store.close();
   }
@@ -363,24 +322,33 @@ async function runRebuild(
   const second = ctx.respawn();
   try {
     await ctx.boot(second);
-    await chat(
-      second,
-      "2",
-      "conv-rebuild",
-      "What marker did I ask you to keep?",
+    await waitUntil("core rebuilt the fact", REFLECT_WAIT_MS, () =>
+      jsonLines(derivedDump(path), "fact").some(
+        (row) => row.text === AMBER_FACT && row.source_turn === userId,
+      ),
     );
-    const last = ctx.stub.chats.at(-1);
-    if (!JSON.stringify(last?.body ?? "").includes(AMBER_FACT)) {
-      throw new Error("relaunch prompt did not contain the turn");
+    await chat(second, "2", "conv-rebuild-ask", ASK_MARKER);
+    const ask = [...ctx.stub.chats]
+      .reverse()
+      .find((record) => lastUser(record) === ASK_MARKER);
+    if (ask === undefined) {
+      throw new Error("stub did not see the rebuild ask");
+    }
+    if (lastUser(ask).includes(AMBER_FACT)) {
+      throw new Error("the recall question itself contains the fact");
+    }
+    if (!blob(ask).includes(AMBER_FACT)) {
+      throw new Error("new conversation prompt did not contain the fact");
     }
     await shutdown(second, "3");
     const dbText = derivedDump(path);
     assertEgressZero(dbText);
-    if (!jsonLines(dbText, "fact").some((row) => row.text === AMBER_FACT)) {
-      throw new Error("rebuilt fact did not survive relaunch");
-    }
-    if (dbText.includes(JUNK_FACT)) {
-      throw new Error("junk fact survived relaunch");
+    if (
+      !jsonLines(dbText, "fact").some(
+        (row) => row.text === AMBER_FACT && row.source_turn === userId,
+      )
+    ) {
+      throw new Error("rebuilt fact did not survive the new conversation");
     }
     second.mergeEarlier(ctx.session);
     return {
@@ -441,8 +409,8 @@ function forgetScript(record: StubChatRequest): StubScriptTurn {
   }
   if (hasToolResult(record)) {
     return lastUser(record).includes("Forget that code")
-      ? { kind: "text", text: "Done." }
-      : { kind: "text", text: "Saved." };
+      ? { kind: "text", text: FORGET_REPLY }
+      : { kind: "text", text: SAVED_REPLY };
   }
   if (lastUser(record).includes("Remember the locker code is 4417")) {
     return {
@@ -451,8 +419,6 @@ function forgetScript(record: StubChatRequest): StubScriptTurn {
       arguments: {
         text: LOCKER_FACT,
         kind: "event",
-        aboutJohn: true,
-        profileKey: "locker",
       },
     };
   }
@@ -460,7 +426,7 @@ function forgetScript(record: StubChatRequest): StubScriptTurn {
     return {
       kind: "tool",
       name: "memory.forget",
-      arguments: { text: LOCKER },
+      arguments: { text: LOCKER_FACT },
     };
   }
   return { kind: "text", text: "I don't have that." };
@@ -572,11 +538,25 @@ function reflectJson(
     : factText === null
       ? "Nothing kept."
       : "Session note.";
+  const profile = markerInCopy
+    ? [
+        {
+          key: "locker",
+          value: LOCKER,
+          statedByJohn: true,
+          stable: true,
+          sessionsObserved: 1,
+          shareable: false,
+          sensitive: false,
+          pinned: false,
+        },
+      ]
+    : [];
   return JSON.stringify({
     journal: copy,
     summary,
     facts,
-    profile: [],
+    profile,
   });
 }
 
@@ -642,6 +622,12 @@ function derivedDump(path: string): string {
     "SELECT turn_id, forgotten_at, fact_ids FROM forgotten_turns ORDER BY turn_id",
   );
   const fts = readAll(path, "SELECT text FROM facts_fts ORDER BY text");
+  const embed = readAll(
+    path,
+    "SELECT source, source_id FROM embed_index ORDER BY source, source_id",
+  );
+  const vecFacts = readAll(path, "SELECT count(*) AS n FROM vec_facts");
+  const vecChunks = readAll(path, "SELECT count(*) AS n FROM vec_chunks");
   return [
     dumpMemory(path).trimEnd(),
     ...facts.map((row) => `fact ${JSON.stringify(row)}`),
@@ -650,6 +636,9 @@ function derivedDump(path: string): string {
     ...chunks.map((row) => `chunk ${JSON.stringify(row)}`),
     ...forgotten.map((row) => `forgotten ${JSON.stringify(row)}`),
     ...fts.map((row) => `facts_fts ${JSON.stringify(row)}`),
+    ...embed.map((row) => `embed_index ${JSON.stringify(row)}`),
+    ...vecFacts.map((row) => `vec_facts ${JSON.stringify(row)}`),
+    ...vecChunks.map((row) => `vec_chunks ${JSON.stringify(row)}`),
     "",
   ].join("\n");
 }
@@ -657,6 +646,7 @@ function derivedDump(path: string): string {
 function readAll(path: string, sql: string): Array<Record<string, unknown>> {
   const db = openReadonlyDatabase(path);
   try {
+    db.loadExtension(sqliteVec.getLoadablePath());
     return db.prepare(sql).all() as Array<Record<string, unknown>>;
   } finally {
     db.close();
@@ -724,10 +714,6 @@ function assertLockerGone(dump: string): void {
       throw new Error("forgotten_turns stores the fact text");
     }
   }
-}
-
-function profileCount(path: string): number {
-  return profileRecords(path).length;
 }
 
 function profileRecords(path: string): ProfileRecord[] {
@@ -862,5 +848,168 @@ function derivedCopyHasLocker(dump: string): boolean {
   const journal = jsonLines(dump, "journal").some((row) =>
     JSON.stringify(row).includes(LOCKER),
   );
-  return summary && journal;
+  const profile = jsonLines(dump, "profile").some(
+    (row) =>
+      row.key === "locker" &&
+      row.value === LOCKER &&
+      typeof row.source_turn === "string" &&
+      row.source_turn.length > 0,
+  );
+  return summary && journal && profile;
+}
+
+function storedProfileIsCapped(path: string): boolean {
+  const rows = profileRecords(path);
+  const pinned = rows.find((row) => row.key === "name");
+  return (
+    pinned?.pinned === true &&
+    pinned.value === "John" &&
+    rows.some((row) => row.key.startsWith("note_")) &&
+    !rows.some((row) => row.key === "note_15") &&
+    profileTokens(rows) <= PROFILE_TOKEN_CAP
+  );
+}
+
+function turnIdByContent(path: string, content: string): string | null {
+  const row = readAll(
+    path,
+    "SELECT id, content FROM turns ORDER BY created_at, id",
+  ).find((item) => item.content === content);
+  return typeof row?.id === "string" ? row.id : null;
+}
+
+function embedHasTurn(path: string, turnId: string): boolean {
+  if (turnId.length === 0) {
+    return false;
+  }
+  return readAll(
+    path,
+    "SELECT source_id FROM embed_index WHERE source = 'turn'",
+  ).some((row) => row.source_id === turnId);
+}
+
+function vecCount(path: string, table: "vec_facts" | "vec_chunks"): number {
+  const row = readAll(path, `SELECT count(*) AS n FROM ${table}`)[0];
+  return typeof row?.n === "number" ? row.n : 0;
+}
+
+async function settleAfterForget(path: string): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (forgottenReplyIndexed(path)) {
+      throw new Error("indexer re-embedded a forgotten turn");
+    }
+    if (
+      vecCount(path, "vec_facts") === 0 &&
+      vecCount(path, "vec_chunks") === 0
+    ) {
+      await delay(200);
+      if (
+        forgottenReplyIndexed(path) ||
+        vecCount(path, "vec_facts") !== 0 ||
+        vecCount(path, "vec_chunks") !== 0
+      ) {
+        throw new Error("forget left a vector or re-indexed a forgotten turn");
+      }
+      return;
+    }
+    await delay(40);
+  }
+  throw new Error(
+    `vec_facts=${String(vecCount(path, "vec_facts"))} vec_chunks=${String(vecCount(path, "vec_chunks"))} after forget`,
+  );
+}
+
+function forgottenReplyIndexed(path: string): boolean {
+  const reply = turnIdByContent(path, FORGET_REPLY);
+  const request = turnIdByContent(path, "Forget that code");
+  return (
+    (reply !== null && embedHasTurn(path, reply)) ||
+    (request !== null && embedHasTurn(path, request))
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+export interface EmbedStub {
+  port: number;
+  close: () => Promise<void>;
+}
+
+/** Loopback embeddings so the forget drive's indexer actually writes. */
+export function startEmbedStub(): Promise<EmbedStub> {
+  const server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"status":"ok"}');
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/embeddings") {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+      request.on("end", () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+            input?: unknown;
+          };
+          const input = Array.isArray(body.input) ? body.input : [body.input];
+          const data = input.map((text, index) => ({
+            index,
+            embedding: hashVector(typeof text === "string" ? text : ""),
+          }));
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ data }));
+        } catch {
+          response.writeHead(400);
+          response.end();
+        }
+      });
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  return listenEmbedStub(server);
+}
+
+function listenEmbedStub(server: Server): Promise<EmbedStub> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        reject(new Error("embed stub port"));
+        return;
+      }
+      resolve({
+        port: address.port,
+        close: () =>
+          new Promise((done) => {
+            server.close(() => {
+              done();
+            });
+          }),
+      });
+    });
+  });
+}
+
+function hashVector(text: string): number[] {
+  const out: number[] = [];
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  for (let index = 0; index < EMBEDDING_DIMENSIONS; index += 1) {
+    hash = Math.imul(hash ^ index, 16777619);
+    out.push(((hash >>> 0) % 1000) / 1000);
+  }
+  return out;
 }

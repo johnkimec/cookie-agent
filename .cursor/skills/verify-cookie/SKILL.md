@@ -193,6 +193,7 @@ Exit 0 means the command ran. Doctor and cleanup do not write evidence files, an
 .cursor/skills/verify-cookie/bin/drive-core drive memory-reflect --evidence verify-evidence/m1-memory-reflect --core real
 .cursor/skills/verify-cookie/bin/drive-core drive memory-profile-cap --evidence verify-evidence/m1-memory-profile-cap --core real
 .cursor/skills/verify-cookie/bin/drive-core drive memory-rebuild --evidence verify-evidence/m1-memory-rebuild --core real
+.cursor/skills/verify-cookie/bin/drive-core drive memory-embed-down --evidence verify-evidence/m1-memory-embed-down --core real
 .cursor/skills/verify-cookie/bin/drive-core drive menu-bar-icon
 .cursor/skills/verify-cookie/bin/drive-core drive hotkey-popup
 .cursor/skills/verify-cookie/bin/drive-mac all

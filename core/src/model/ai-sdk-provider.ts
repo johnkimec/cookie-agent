@@ -1,7 +1,9 @@
 import {
   type FinishReason,
+  jsonSchema,
   type LanguageModel,
   type LanguageModelUsage,
+  Output,
   stepCountIs,
   streamText,
 } from "ai";
@@ -35,11 +37,13 @@ export function createAiSdkProvider(
     probe: options.probe,
     streamChat(args): ModelStream {
       let providerError: unknown;
+      const format = args.responseFormat;
       const result = streamText({
         model: options.model,
         system: args.system,
         messages: args.messages,
         abortSignal: args.abortSignal,
+        maxOutputTokens: args.maxOutputTokens,
         maxRetries: 0,
         reasoning: options.thinking === true ? "provider-default" : "none",
         ...(args.tools === undefined
@@ -48,6 +52,18 @@ export function createAiSdkProvider(
               tools: args.tools,
               stopWhen: stepCountIs(LOCAL_TOOL_STEP_LIMIT),
             }),
+        output:
+          format === undefined
+            ? undefined
+            : Output.object({
+                name: format.name,
+                description: format.description,
+                schema: jsonSchema(format.schema),
+              }),
+        providerOptions:
+          format === undefined
+            ? undefined
+            : { llamaServer: { strictJsonSchema: false } },
         onError: ({ error }) => {
           providerError = error;
         },

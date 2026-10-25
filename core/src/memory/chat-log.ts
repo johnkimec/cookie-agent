@@ -1,10 +1,17 @@
 import type { ModelMessage } from "ai";
+import {
+  LOCAL_RECENT_TURN_TOKEN_BUDGET,
+  LOCAL_RETRIEVED_TOKEN_BUDGET,
+  recentWithinBudget,
+  renderRetrieved,
+} from "../context.ts";
 import type { ChatTurnCommit, ConversationHistory } from "../memory.ts";
 import type { ContentIndexer } from "./index-content.ts";
+import type { Retrieve } from "./retrieve.ts";
 import { abortError } from "./slot.ts";
 import type { SqliteMemoryStore } from "./sqlite-store.ts";
 
-/** Recent turns loaded into one prompt. Context budgets land in Step 2. */
+/** Recent turns loaded into one prompt, then cut to the local token budget. */
 const HISTORY_TURN_LIMIT = 10_000;
 
 /**
@@ -17,12 +24,24 @@ const HISTORY_TURN_LIMIT = 10_000;
 export class ChatLog implements ConversationHistory {
   private readonly store: SqliteMemoryStore;
   private readonly indexer: ContentIndexer | null;
+  private readonly retriever: {
+    retrieve: Retrieve;
+    setOmitTurnIds?: (ids: ReadonlySet<string>) => void;
+  } | null;
   private indexTail: Promise<void> = Promise.resolve();
   private lastUserTurnId: string | null = null;
 
-  constructor(store: SqliteMemoryStore, indexer: ContentIndexer | null = null) {
+  constructor(
+    store: SqliteMemoryStore,
+    indexer: ContentIndexer | null = null,
+    retriever: {
+      retrieve: Retrieve;
+      setOmitTurnIds?: (ids: ReadonlySet<string>) => void;
+    } | null = null,
+  ) {
     this.store = store;
     this.indexer = indexer;
+    this.retriever = retriever;
   }
 
   /** Resolves when indexing started by `commit` has finished. */
@@ -31,10 +50,10 @@ export class ChatLog implements ConversationHistory {
   }
 
   /**
-   * Prior turns plus this user text, once. The user row is stored here
-   * so a tool can cite it before the assistant reply exists. The memory
-   * host must not insert the same turn. The prompt does not load the
-   * row this call just stored.
+   * Prior turns plus this user text, once. The user row is stored
+   * before retrieval so a tool can cite it, and that id is omitted
+   * from the retrieved block. The prompt does not load the row this
+   * call just stored.
    */
   async messagesFor(
     conversationId: string,
@@ -50,14 +69,17 @@ export class ChatLog implements ConversationHistory {
       this.lastUserTurnId = null;
       return [{ role: "user", content: userText }];
     }
-    const prior = this.store.recentTurns(conversationId, HISTORY_TURN_LIMIT);
+    const prior = recentWithinBudget(
+      this.store.recentTurns(conversationId, HISTORY_TURN_LIMIT),
+      LOCAL_RECENT_TURN_TOKEN_BUDGET,
+    );
     for (const turn of prior) {
       if (turn.role === "tool") {
         continue;
       }
       messages.push({ role: turn.role, content: turn.content });
     }
-    this.lastUserTurnId = this.insertTurn(
+    const userTurnId = this.insertTurn(
       conversationId,
       "user",
       userText,
@@ -65,6 +87,18 @@ export class ChatLog implements ConversationHistory {
       null,
       null,
     );
+    this.lastUserTurnId = userTurnId;
+    const omitTurnIds = new Set(prior.map((turn) => turn.id));
+    omitTurnIds.add(userTurnId);
+    this.retriever?.setOmitTurnIds?.(omitTurnIds);
+    const memories =
+      signal?.aborted === true ? [] : await this.safeRetrieve(userText, signal);
+    const block = renderRetrieved(memories, LOCAL_RETRIEVED_TOKEN_BUDGET, {
+      omitTurnIds,
+    });
+    if (block.length > 0) {
+      messages.push({ role: "user", content: block });
+    }
     messages.push({ role: "user", content: userText });
     return messages;
   }
@@ -73,13 +107,26 @@ export class ChatLog implements ConversationHistory {
     return this.lastUserTurnId;
   }
 
+  private async safeRetrieve(query: string, signal?: AbortSignal) {
+    const retriever = this.retriever;
+    if (retriever === null || query.trim() === "" || signal?.aborted === true) {
+      return [];
+    }
+    try {
+      return await retriever.retrieve(query, signal);
+    } catch {
+      return [];
+    }
+  }
+
   commit(turn: ChatTurnCommit): void {
     const session = this.store.session(turn.conversationId);
     if (session === null || session.endedAt !== null) {
       this.lastUserTurnId = null;
       return;
     }
-    if (this.lastUserTurnId === null) {
+    const userId = this.lastUserTurnId;
+    if (userId === null) {
       this.insertTurn(
         turn.conversationId,
         "user",
@@ -91,7 +138,7 @@ export class ChatLog implements ConversationHistory {
     }
     this.lastUserTurnId = null;
     if (turn.assistantText.length > 0) {
-      this.insertTurn(
+      const assistantId = this.insertTurn(
         turn.conversationId,
         "assistant",
         turn.assistantText,
@@ -100,8 +147,27 @@ export class ChatLog implements ConversationHistory {
         turn.usage.outputTokens,
         turn.latencyMs,
       );
+      this.markForgottenReply(userId, assistantId);
     }
     this.scheduleIndex();
+  }
+
+  /**
+   * The forget tool runs before this reply is stored. When the user
+   * turn is already forgotten, the reply is too.
+   */
+  private markForgottenReply(userId: string | null, assistantId: string): void {
+    if (userId === null) {
+      return;
+    }
+    if (!this.store.forgottenTurnIds().includes(userId)) {
+      return;
+    }
+    this.store.forgetTurn(
+      assistantId,
+      new Date(this.store.currentTime()).toISOString(),
+      this.store.forgottenFactIds(userId),
+    );
   }
 
   private insertTurn(

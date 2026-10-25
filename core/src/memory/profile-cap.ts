@@ -23,10 +23,10 @@ export function profileTokens(rows: readonly ProfileRecord[]): number {
 }
 
 /**
- * Visible profile for a prompt. Pinned keys stay whole. When they alone
- * exceed the cap, every pinned value is kept and the overflow is logged.
- * Unpinned rows that do not fit are omitted from the result. Callers
- * hide those rows; they do not delete them from the store.
+ * Visible profile. Pinned keys stay whole. When they alone exceed the
+ * cap, every pinned value is kept and the overflow is logged.
+ * Unpinned rows that do not fit are omitted from the result. Reflect
+ * and consolidation store that list, so the omitted rows are dropped.
  */
 export function capProfile(
   rows: readonly ProfileRecord[],
