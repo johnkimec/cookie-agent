@@ -1,5 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -27,8 +29,8 @@ class CoreClient {
   private readonly pending: unknown[] = [];
   private readonly waiters: Array<(message: unknown) => void> = [];
 
-  constructor(deltaMs: string) {
-    this.child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, fakeCore], {
+  constructor(deltaMs: string, entry = fakeCore) {
+    this.child = spawn(process.execPath, [...TYPE_STRIP_NODE_ARGS, entry], {
       cwd: coreDir,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
@@ -388,5 +390,22 @@ describe("fake core", () => {
       params: { finishReason: "cancelled" },
     });
     expect(await client.response("7")).toMatchObject({ result: { ok: true } });
+  });
+
+  it("starts through a symlinked path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cookie-fake-link-"));
+    const link = join(dir, "fake-core.ts");
+    await symlink(fakeCore, link);
+    const client = new CoreClient("0", link);
+    clients.push(client);
+    try {
+      client.send(initialize());
+      const ready = await client.response("1");
+      expect(ready.result).toMatchObject({
+        serverInfo: { name: "cookie-fake-core" },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
