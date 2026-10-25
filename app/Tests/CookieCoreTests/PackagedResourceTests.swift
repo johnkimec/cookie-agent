@@ -35,4 +35,27 @@ final class PackagedResourceTests: XCTestCase {
         }
         XCTAssertNil(PackagedResourceBundles.bundle(named: "Missing.bundle", inApp: app))
     }
+
+    func testPackageScriptAcceptsBothIosMathFontLayouts() throws {
+        let script = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Scripts")
+            .appendingPathComponent("package-app-resources-test.sh")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: script.path) || FileManager.default.fileExists(atPath: script.path))
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [script.path]
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, stdout + stderr)
+        XCTAssertTrue(stdout.contains("iosmath font layouts ok"), stdout)
+    }
 }

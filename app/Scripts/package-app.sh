@@ -43,11 +43,27 @@ copy_resource_bundles() {
       exit 1
     fi
   done
-  if [[ ! -f "$dest_resources/iosMath_iosMath.bundle/fonts/latinmodern-math.otf" ]]; then
-    echo "iosMath bundle is missing fonts/latinmodern-math.otf" >&2
-    exit 1
-  fi
+  require_iosmath_font "$dest_resources/iosMath_iosMath.bundle"
 }
+
+# Swift 6.3.3 leaves the font at the bundle root. Swift 6.4 builds a
+# standard bundle and nests it under Contents/Resources. Either file is enough.
+require_iosmath_font() {
+  local bundle="$1"
+  local flat="$bundle/fonts/latinmodern-math.otf"
+  local standard="$bundle/Contents/Resources/fonts/latinmodern-math.otf"
+  if [[ -f "$flat" || -f "$standard" ]]; then
+    return 0
+  fi
+  echo "iosMath bundle is missing fonts/latinmodern-math.otf" >&2
+  echo "checked $flat" >&2
+  echo "checked $standard" >&2
+  return 1
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEST="${1:-"$ROOT/dist/Cookie Agent.app"}"

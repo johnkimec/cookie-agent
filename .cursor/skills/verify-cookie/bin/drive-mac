@@ -901,25 +901,86 @@ tell application "System Events"
     if dotElem is missing value then error "missing cookie.badge.on-device"
     if inputElem is missing value then error "missing cookie.popup.input"
     if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
-    set replyHeight to item 2 of (size of replyElem)
-    set dotWidth to item 1 of (size of dotElem)
-    set inputHeight to item 2 of (size of inputElem)
-    set windowHeight to item 2 of (size of popupWindow)
-    set bLeft to item 1 of (position of bottomElem)
-    set bTop to item 2 of (position of bottomElem)
-    set bWidth to item 1 of (size of bottomElem)
-    set bHeight to item 2 of (size of bottomElem)
-    set wLeft to item 1 of (position of popupWindow)
-    set wTop to item 2 of (position of popupWindow)
-    set wWidth to item 1 of (size of popupWindow)
-    set wHeight to item 2 of (size of popupWindow)
+    set replyHeight to item 2 of (get size of replyElem)
+    set dotWidth to item 1 of (get size of dotElem)
+    set inputHeight to item 2 of (get size of inputElem)
+    set windowHeight to item 2 of (get size of popupWindow)
+    set bLeft to item 1 of (get position of bottomElem)
+    set bTop to item 2 of (get position of bottomElem)
+    set bWidth to item 1 of (get size of bottomElem)
+    set bHeight to item 2 of (get size of bottomElem)
+    set wLeft to item 1 of (get position of popupWindow)
+    set wTop to item 2 of (get position of popupWindow)
+    set wWidth to item 1 of (get size of popupWindow)
+    set wHeight to item 2 of (get size of popupWindow)
+    set replyBottom to (item 2 of (get position of replyElem)) + replyHeight
+    set inputTop to item 2 of (get position of inputElem)
+    set gap to inputTop - replyBottom
     if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= (wTop + wHeight + 4) then
       set bottomPlace to "inside"
     end if
   end tell
 end tell
-return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace
+return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap
 APPLESCRIPT
+}
+
+# CGWindowList for this drive pid only. screencapture -l needs that window id.
+# A full-display capture misses a panel on another display.
+capture_drive_window() {
+  local pid="$1"
+  local dest="$2"
+  local dir src wid
+  [[ "$pid" =~ ^[0-9]+$ ]] || fail "screencapture needs the drive pid"
+  command -v swift >/dev/null || fail "swift is required to read the drive window id"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-window.XXXXXX")"
+  src="$dir/main.swift"
+  cat >"$src" <<'SWIFT'
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count == 2, let pid = Int(args[1]), pid >= 2 else {
+    fputs("drive pid missing\n", stderr)
+    exit(2)
+}
+let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+func number(_ value: Any?) -> Double? {
+    if let n = value as? Double { return n }
+    if let n = value as? Int { return Double(n) }
+    if let n = value as? NSNumber { return n.doubleValue }
+    return nil
+}
+var bestID = 0
+var bestArea = 0.0
+for window in info {
+    guard let owner = number(window[kCGWindowOwnerPID as String]), Int(owner) == pid else { continue }
+    guard let windowID = number(window[kCGWindowNumber as String]), windowID > 0 else { continue }
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = number(bounds["Width"]) ?? 0
+    let height = number(bounds["Height"]) ?? 0
+    let area = width * height
+    if width < 200 || height < 100 || area <= bestArea { continue }
+    bestArea = area
+    bestID = Int(windowID)
+}
+if bestID == 0 {
+    fputs("no on-screen window for drive pid \(pid)\n", stderr)
+    exit(1)
+}
+print(bestID)
+SWIFT
+  if ! wid="$(swift "$src" "$pid")"; then
+    rm -rf "$dir"
+    fail "no on-screen window for drive pid $pid"
+  fi
+  rm -rf "$dir"
+  wid="$(printf '%s' "$wid" | tr -d '[:space:]')"
+  [[ "$wid" =~ ^[0-9]+$ ]] || fail "no on-screen window for drive pid $pid"
+  log "popup window id=$wid pid=$pid"
+  if ! screencapture -x -l"$wid" "$dest"; then
+    fail "screencapture -l$wid wrote no popup image"
+  fi
 }
 
 run_popup_reply() {
@@ -951,7 +1012,7 @@ for line in text.splitlines():
     parts = line.split(" ", 1)
     if len(parts) == 2:
         vals[parts[0]] = parts[1].strip()
-need = ["replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom"]
+need = ["replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom", "gap"]
 if any(key not in vals for key in need):
     print("missing " + ", ".join(key for key in need if key not in vals))
     sys.exit(1)
@@ -959,12 +1020,14 @@ reply_height = float(vals["replyHeight"])
 dot_width = float(vals["dotWidth"])
 input_height = float(vals["inputHeight"])
 window_height = float(vals["windowHeight"])
+gap = float(vals["gap"])
 ok = (
     reply_height > 40
     and window_height > 400
     and vals["bottom"] == "inside"
     and 4 < dot_width < 40
     and input_height < 48
+    and gap > 0
 )
 if not ok:
     print(text.strip())
@@ -995,7 +1058,7 @@ PY
     cat "$shell_log" 2>/dev/null || true
     fail "chat.done log is missing the full accumulated reply"
   fi
-  screencapture -x /tmp/cookie-drive-mac-popup.png
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup.png
   if [[ ! -s /tmp/cookie-drive-mac-popup.png ]]; then
     fail "screencapture wrote no file"
   fi

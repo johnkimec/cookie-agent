@@ -231,16 +231,16 @@ A standard `MenuBarExtra` menu. Option-click the icon to open the popup directly
 - **Open/close:** ⌥Space toggles it (rebindable) and Esc closes it. Clicking outside closes it unless an action card is pending. The draft is kept for 10 minutes.
 - **Input:** Single line that grows to 5 lines. ⏎ sends, ⇧⏎ adds a newline, ↑ edits the last message, ⌘K clears.
 - **Screen chip:** Shows something like "Safari · Lab 4 handout" when you use ⌥⇧Space or type "this". Click the chip to drop it. Without the chip, no screen content goes into the prompt.
-- **Badge:** Each reply is labelled "on-device" or "cloud · Sonnet 5.5". The cloud label opens a "what was sent" popover.
+- **On-device dot:** One 8×8 dot in the input row while the runtime is up, labelled `on-device`. Not a badge on each reply.
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│ [▣ Safari · Lab 4 handout  ×]          on-device ◦      │  context chip + route badge
+│ [▣ Safari · Lab 4 handout  ×]          on-device ◦      │  context chip + 8 pt on-device dot
 ├────────────────────────────────────────────────────────┤
 │ you     what's the setup time in table 3?               │
 │                                                        │
 │ cookie  2.1 ns min at 3.3 V (row "tSU"). The 1.8 V      │
-│         column is blank in this PDF.     on-device      │
+│         column is blank in this PDF.                    │
 │                                                        │
 │ ┌ ACTION · T1 ─────────────────────────────────────┐   │
 │ │ Add reminder "Check tSU at 1.8 V" · Tomorrow 9am │   │

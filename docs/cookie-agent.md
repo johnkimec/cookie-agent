@@ -195,7 +195,7 @@ The Swift shell is the only process that touches TCC-protected APIs. The core ow
 | Apple Foundation Models | `LanguageModelSession` (macOS 26+) | Swift-only, so it lives in the shell and is exposed to the core as `fm.classify`. Used when the big model is unloaded. |
 | Notifications | UserNotifications with actions | Check-ins arrive as banners with Reply / Snooze / Mute this kind. |
 
-The shell also hosts the approval UI (Allow once, Always allow for this scope, Deny) and a small badge on every reply: "on-device" or "cloud", with a tap-through showing what was sent.
+The shell also hosts the approval UI (Allow once, Always allow for this scope, Deny). The popup shows one 8×8 on-device dot in the input row while the runtime is up, not a badge on every reply.
 
 <a id="ipc"></a>
 
