@@ -127,14 +127,95 @@ stop_pid() {
 }
 DECOY_DATA=""
 DRIVE_DATA=""
+DRIVE_SUPPORT_DIRS=""
+# Stop llama-server only when this directory's llama-embed.pid names a live
+# process whose argv is llama-server --port <the port in the log, else EMBED_PORT>.
+stop_owned_embed_dir() {
+  local dir="$1" port="" file pid cmd
+  [[ -n "$dir" ]] || return 0
+  if [[ -f "$dir/logs/llama-embed.log" ]]; then
+    port="$(awk 'match($0, /--port [0-9]+/) { print substr($0, RSTART+7, RLENGTH-7); exit }' "$dir/logs/llama-embed.log" || true)"
+  fi
+  if [[ -z "$port" ]]; then
+    port="${EMBED_PORT:-}"
+  fi
+  [[ -n "$port" ]] || return 0
+  file="$dir/logs/llama-embed.pid"
+  pid="$(pid_in_file "$file" || true)"
+  [[ -n "$pid" ]] || return 0
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  if llama_command_has_port "$cmd" "$port"; then
+    log "cleanup stopping embed pid=$pid port=$port"
+    stop_embed_pid "$pid"
+  else
+    log "cleanup left embed pid ${pid}: argv is not llama-server --port ${port}"
+  fi
+}
+
+stop_embed_pid() {
+  local pid="$1" attempt
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for attempt in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || return 0
+      sleep 0.25
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+}
+
+embed_dir_still_ours() {
+  local dir="$1" port="$2" file pid cmd
+  [[ -n "$dir" && -n "$port" ]] || return 1
+  file="$dir/logs/llama-embed.pid"
+  pid="$(pid_in_file "$file" || true)"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  llama_command_has_port "$cmd" "$port"
+}
+
+# Print listeners on a port. Does not signal them.
+report_listening_port() {
+  local port="$1" listeners=""
+  declare -F port_listening >/dev/null || return 0
+  port_listening "$port" || return 0
+  listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' ')"
+  log "port ${port} still listening: ${listeners}"
+}
+
+each_embed_dir() {
+  local dir
+  if [[ -n "${COOKIE_DATA_DIR:-}" ]]; then
+    printf '%s\n' "$COOKIE_DATA_DIR"
+  fi
+  if [[ -n "${DRIVE_DATA:-}" && "$DRIVE_DATA" != "${COOKIE_DATA_DIR:-}" ]]; then
+    printf '%s\n' "$DRIVE_DATA"
+  fi
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    printf '%s\n' "$dir"
+  done <<< "${DRIVE_SUPPORT_DIRS:-}"
+}
+
 cleanup() {
-  local root
+  local status=$?
+  local root dir leaked=0
   stop_pid "$APP_PID" "$BIN" "${DRIVE_PROCESS_NAME:-}" "${DRIVE_BUNDLE_ID:-}"
   stop_pid "$DECOY_PID" "$DECOY_BIN" "$DECOY_PROCESS_NAME" "$DECOY_BUNDLE_ID"
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    stop_owned_embed_dir "$dir"
+    if embed_dir_still_ours "$dir" 18081; then
+      leaked=1
+    fi
+  done < <(each_embed_dir)
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     case "$root" in
       */cookie-drive-app.*)
+        unregister_drive_root "$root"
         rm -rf "$root"
         ;;
     esac
@@ -146,6 +227,19 @@ cleanup() {
   esac
   if [[ -n "$DRIVE_DATA" && "$(drive_temp_data_dir "$DRIVE_DATA")" == "$DRIVE_DATA" ]]; then
     rm -rf "$DRIVE_DATA"
+  fi
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    case "$dir" in
+      "${HOME}/Library/Application Support/com.johnkimec.cookie-agent.drive."*)
+        rm -rf "$dir"
+        ;;
+    esac
+  done <<< "$DRIVE_SUPPORT_DIRS"
+  report_listening_port 18081
+  if [[ "$leaked" -eq 1 && "$status" -eq 0 ]]; then
+    printf '%s\n' "embed server this drive started is still listening on 18081" >&2
+    exit 1
   fi
 }
 trap cleanup EXIT
@@ -285,21 +379,40 @@ prepare_drive_bundle() {
   chmod +x "$mac_dir/$name"
   plutil -replace CFBundleExecutable -string "$name" "$dest/Contents/Info.plist"
   plutil -replace CFBundleIdentifier -string "$bundle_id" "$dest/Contents/Info.plist"
+  plutil -replace CookieApplicationSupportFolder -string "$bundle_id" "$dest/Contents/Info.plist"
+  plutil -replace CookieSkipHotkey -bool YES "$dest/Contents/Info.plist"
   codesign --force --sign - "$dest"
-  local got_name got_bundle got_display
+  local got_name got_bundle got_display got_folder got_skip
   got_name="$(plist_value "$dest/Contents/Info.plist" CFBundleExecutable || true)"
   got_bundle="$(plist_value "$dest/Contents/Info.plist" CFBundleIdentifier || true)"
   got_display="$(plist_value "$dest/Contents/Info.plist" CFBundleName || true)"
+  got_folder="$(plist_value "$dest/Contents/Info.plist" CookieApplicationSupportFolder || true)"
+  got_skip="$(plist_bool "$dest/Contents/Info.plist" CookieSkipHotkey || true)"
   if [[ "$got_name" != "$name" || "$got_bundle" != "$bundle_id" ]]; then
     fail "refusing to launch: prepared bundle identity did not stick (process ${got_name:-missing}, bundle ${got_bundle:-missing})"
   fi
   if [[ "$got_display" != "Cookie" ]]; then
     fail "refusing to launch: prepared bundle changed the visible name"
   fi
+  if [[ "$got_folder" != "$bundle_id" || "$got_skip" != "true" ]]; then
+    fail "refusing to launch: drive bundle did not keep its support folder and hotkey skip"
+  fi
+  remember_support_dir "$bundle_id"
   PREPARED_APP="$dest"
   PREPARED_BIN="$mac_dir/$name"
   PREPARED_PROCESS_NAME="$name"
   PREPARED_BUNDLE_ID="$bundle_id"
+}
+
+remember_support_dir() {
+  local folder dir
+  folder="$(drive_support_folder "$1")" || return 0
+  dir="${HOME}/Library/Application Support/${folder}"
+  case "$dir" in
+    "${HOME}/Library/Application Support/com.johnkimec.cookie-agent.drive."*)
+      DRIVE_SUPPORT_DIRS="${DRIVE_SUPPORT_DIRS}${dir}"$'\n'
+      ;;
+  esac
 }
 
 install_prepared_identity() {
@@ -335,26 +448,6 @@ frontmost_unix_id() {
 
 trim_osascript() {
   printf '%s' "$1" | tr -d '[:space:]'
-}
-
-# Key codes go to the frontmost process. Refuse unless that unix id is ours.
-send_key_code() {
-  local code="$1"
-  [[ "$code" =~ ^[0-9]+$ ]] || fail "refusing keystroke: code is not an integer"
-  COOKIE_KEY_CODE="$code" osascript_run <<'APPLESCRIPT'
-set drivePid to (system attribute "COOKIE_DRIVE_PID") as integer
-set keyCode to (system attribute "COOKIE_KEY_CODE") as integer
-set expectedName to system attribute "COOKIE_DRIVE_PROCESS_NAME"
-set expectedBundle to system attribute "COOKIE_DRIVE_BUNDLE_ID"
-tell application "System Events"
-  set frontProc to first process whose frontmost is true
-  set frontPid to unix id of frontProc
-  if frontPid is not drivePid then error "refusing keystroke: frontmost unix id " & frontPid & " is not drive pid " & drivePid
-  if name of frontProc is not expectedName then error "refusing keystroke: frontmost process is not the launched executable"
-  if bundle identifier of frontProc is not expectedBundle then error "refusing keystroke: frontmost bundle id is not the launched app"
-  key code keyCode
-end tell
-APPLESCRIPT
 }
 
 fail() {
@@ -524,7 +617,9 @@ core_child_cwd() {
 }
 
 open_support_dir() {
-  printf '%s\n' "$HOME/Library/Application Support/com.johnkimec.cookie-agent"
+  local folder
+  folder="$(drive_support_folder "$DRIVE_BUNDLE_ID")" || fail "refusing open-clean: bundle id has no private support folder"
+  printf '%s\n' "$HOME/Library/Application Support/$folder"
 }
 
 # Resolve the process by the pid and per-run identity this drive launched.
@@ -694,7 +789,7 @@ print("popup identifiers ok")
 PY
 }
 
-# Set the field through AX. System Events keystrokes go to the frontmost
+# Set the field through AX. System Events typing goes to the frontmost
 # app, not this non-activating panel. AXConfirm is the field's Return.
 send_chat() {
   osascript_run <<'APPLESCRIPT'
@@ -908,7 +1003,8 @@ return "no"
 APPLESCRIPT
 }
 
-option_click_status() {
+# x,y,w,h of the drive's status item in AX coordinates. No click and no modifier.
+option_click_frame() {
   osascript_run <<'APPLESCRIPT'
 set cookieProc to my cookieDriveProcess()
 tell application "System Events"
@@ -920,19 +1016,67 @@ tell application "System Events"
       end if
     end repeat
     if statusItem is missing value then error "no menu bar item"
+    set itemPos to position of statusItem
+    set itemSize to size of statusItem
+    return ((item 1 of itemPos) as integer) & "," & ((item 2 of itemPos) as integer) & "," & ((item 1 of itemSize) as integer) & "," & ((item 2 of itemSize) as integer)
   end tell
-  -- System-wide, not inside the process tell. The panel reads NSEvent.modifierFlags.
-  key down option
-  delay 0.1
-  try
-    tell cookieProc to click statusItem
-    key up option
-  on error errText
+end tell
+APPLESCRIPT
+}
+
+# Before a click at a screen point. CGWindowList names the front window there.
+# The desktop or this drive's window may be clicked. Any other owner exits 3
+# and the caller must not click.
+guard_click_point() {
+  local x="$1" y="$2" decision=""
+  decision="$(python3 "$DRIVE_BIN_DIR/drive-mac-ax.py" window-at "$APP_PID" "$x" "$y")" || fail "could not read the window at ${x},${y}"
+  decision="${decision//[[:space:]]/}"
+  case "$decision" in
+    desktop|drive)
+      return 0
+      ;;
+    skip)
+      log "click-outside skipped: point ${x},${y} is not the desktop or this drive"
+      printf '%s\n' "skipped"
+      exit 3
+      ;;
+    *)
+      fail "window-at returned ${decision:-empty}"
+      ;;
+  esac
+}
+
+# One click, with Option set on that event, posted only to the drive pid.
+option_click_status() {
+  local frame=""
+  assign_or_fail frame option_click_frame
+  python3 "$DRIVE_BIN_DIR/drive-mac-ax.py" option-click "$APP_PID" "$frame" || fail "option-click failed"
+}
+
+# Leave event-tracking mode without a key. Click only when AXSelected says
+# the menu is open, so a closed menu is not toggled open.
+dismiss_status_menu() {
+  osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  tell cookieProc
+    set statusItem to missing value
+    repeat with barIndex from 1 to (count of menu bars)
+      if (count of menu bar items of menu bar barIndex) > 0 then
+        set statusItem to menu bar item 1 of menu bar barIndex
+      end if
+    end repeat
+    if statusItem is missing value then error "no menu bar item"
     try
-      key up option
+      perform action "AXCancel" of menu 1 of statusItem
     end try
-    error errText
-  end try
+    try
+      set rawSelected to value of attribute "AXSelected" of statusItem
+      if rawSelected is true or rawSelected is 1 then
+        click statusItem
+      end if
+    end try
+  end tell
 end tell
 APPLESCRIPT
 }
@@ -1087,15 +1231,16 @@ run_self_check() {
   if status_menu_open "$decoy_before"; then
     fail "self-check decoy menu was already open: $decoy_before"
   fi
-  local clicked
-  clicked="$(trim_osascript "$(with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" click_status)")"
+  local clicked_raw="" clicked
+  assign_or_fail clicked_raw with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" click_status
+  clicked="$(trim_osascript "$clicked_raw")"
   if [[ "$clicked" != "$APP_PID" ]]; then
     fail "self-check click returned pid ${clicked:-empty}, drive pid is $APP_PID"
   fi
   sleep 0.4
-  local drive_after decoy_after
-  drive_after="$(with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" observe_status)"
-  decoy_after="$(with_target "$DECOY_PID" "$decoy_bin" "$decoy_name" "$decoy_bundle" observe_status)"
+  local drive_after="" decoy_after=""
+  assign_or_fail drive_after with_target "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" observe_status
+  assign_or_fail decoy_after with_target "$DECOY_PID" "$decoy_bin" "$decoy_name" "$decoy_bundle" observe_status
   if [[ "$(status_field "$drive_after" 1)" != "$APP_PID" ]]; then
     fail "self-check drive observation is not pid $APP_PID: $drive_after"
   fi
@@ -1176,14 +1321,18 @@ if [[ "$feature" == "chat" || "$feature" == "all" || "$runtime" == "real" ]]; th
 fi
 
 if [[ "$drive_popup" == "1" ]]; then
-  before_pid="$(trim_osascript "$(frontmost_unix_id)")"
-  before_name="$(frontmost_app)"
+  before_raw=""
+  after_raw=""
+  assign_or_fail before_raw frontmost_unix_id
+  before_pid="$(trim_osascript "$before_raw")"
+  assign_or_fail before_name frontmost_app
   log "frontmost-before $before_pid $before_name"
   log "open via Ask Cookie…"
   open_via_ask
   sleep 0.6
-  after_pid="$(trim_osascript "$(frontmost_unix_id)")"
-  after_name="$(frontmost_app)"
+  assign_or_fail after_raw frontmost_unix_id
+  after_pid="$(trim_osascript "$after_raw")"
+  assign_or_fail after_name frontmost_app
   log "frontmost-after $after_pid $after_name"
   if [[ "$before_pid" != "$after_pid" ]]; then
     fail "frontmost pid changed from $before_pid ($before_name) to $after_pid ($after_name)"
@@ -1238,9 +1387,9 @@ if runtime == "real" and (text == fake or text == stub or fake in text or stub i
 print("reply ok")
 PY
   shot="/tmp/cookie-drive-mac-popup.png"
-  screencapture -x "$shot"
+  python3 "$DRIVE_BIN_DIR/drive-mac-ax.py" capture-window "$APP_PID" "Ask Cookie…" "$shot" || fail "popup window capture failed"
   if [[ ! -s "$shot" ]]; then
-    fail "screencapture wrote no file"
+    fail "popup window capture wrote no file"
   fi
   log "screenshot $shot"
 fi
@@ -1281,16 +1430,20 @@ fi
 
 if [[ "$feature" == "menu-bar-icon" || "$feature" == "hotkey-popup" || "$feature" == "all" ]]; then
   log "option-click"
-  if [[ "$(popup_is_open)" == "yes" ]]; then
+  popup_state=""
+  assign_or_fail popup_state popup_is_open
+  if [[ "$popup_state" == "yes" ]]; then
     close_popup
     sleep 0.4
   fi
-  if [[ "$(popup_is_open)" == "yes" ]]; then
+  assign_or_fail popup_state popup_is_open
+  if [[ "$popup_state" == "yes" ]]; then
     fail "popup stayed open, so option-click was not a fresh open"
   fi
   option_click_status
   sleep 0.6
-  if [[ "$(popup_is_open)" != "yes" ]]; then
+  assign_or_fail popup_state popup_is_open
+  if [[ "$popup_state" != "yes" ]]; then
     fail "option-click did not open the Ask Cookie window"
   fi
   log "option-click opened popup"
@@ -1445,6 +1598,27 @@ if [[ "$runtime" == "real" ]]; then
   log "quit reaped embed ${owned_embed_before} port ${embed_port_now} clear"
 fi
 
+# status-offline-chat quits while a real embed server may be on 18081.
+# Fail only when llama-embed.pid still names a live llama-server with --port 18081.
+# Any other listener is reported and left alone.
+assert_embed_port_after_quit() {
+  local port="${1:-18081}" dir pid listeners=""
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    if embed_dir_still_ours "$dir" "$port"; then
+      pid="$(pid_in_file "$dir/logs/llama-embed.pid" || true)"
+      fail "embed server this drive started is still on port ${port} pid ${pid}"
+    fi
+  done < <(each_embed_dir)
+  if port_listening "$port"; then
+    listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' ')"
+    log "port ${port} still listening after quit, not this drive: ${listeners}"
+  else
+    log "port ${port} clear after quit"
+  fi
+}
+assert_embed_port_after_quit 18081
+
 log_cookie_processes() {
   log "ps pid ppid lstart command:"
   ps -ax -o pid,ppid,lstart,command | awk -v drive="${DRIVE_PROCESS_NAME:-}" 'NR==1 || (((drive != "" && index($0, drive)) || /CookieAgent/ || /llama-server/) && $0 !~ /awk/)' || true
@@ -1506,8 +1680,8 @@ open_clean_check() {
     open_clean_status=3
     return 0
   fi
-  local support port_before shell_log log_mark
-  support="$(open_support_dir)"
+  local support="" port_before shell_log log_mark
+  assign_or_fail support open_support_dir
   shell_log="$support/logs/cookie-shell.log"
   log_mark="$(shell_log_bytes "$shell_log")"
   port_before=0
@@ -1609,17 +1783,9 @@ open_clean_check() {
     fi
     log "open runtime up"
   fi
-  # read_menu leaves the status item in event-tracking mode if the closing
-  # click does not land. A key goes to the frontmost process, which is
-  # usually not this menu-bar app. The tracking-mode hop still runs, so
-  # skip the key instead of delivering it to some other pid.
-  local front
-  front="$(trim_osascript "$(frontmost_unix_id || true)")"
-  if [[ "$front" == "$APP_PID" ]]; then
-    send_key_code 53
-  else
-    log "not sending escape: frontmost unix id ${front:-unknown} is not drive pid $APP_PID"
-  fi
+  # read_menu can leave the status item in event-tracking mode. AXCancel
+  # and a click while AXSelected is set close that menu. Neither is a key.
+  dismiss_status_menu || fail "could not dismiss the status menu"
   sleep 0.3
   local pidfile owned=""
   pidfile="$support/logs/llama-server.pid"

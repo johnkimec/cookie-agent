@@ -232,6 +232,54 @@ final class LaunchTests: XCTestCase {
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/not-a-repo")
     }
 
+    func testDriveSupportFolderOverridesTheProductFolder() {
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
+        let folder = "com.johnkimec.cookie-agent.drive.abcd1234"
+        let launch = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            homeDirectory: home,
+            toolSearchPaths: [],
+            supportFolder: folder
+        )
+        XCTAssertEqual(
+            launch.environment["COOKIE_DATA_DIR"],
+            "/Users/john/Library/Application Support/\(folder)"
+        )
+    }
+
+    func testSupportFolderDoesNotEscapeApplicationSupport() {
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
+        XCTAssertEqual(
+            CoreLaunch.applicationSupportFolderName(override: "../Cookie"),
+            CoreLaunch.applicationSupportFolder
+        )
+        XCTAssertEqual(
+            CoreLaunch.applicationSupportFolderName(override: "drive/nested"),
+            CoreLaunch.applicationSupportFolder
+        )
+        XCTAssertEqual(
+            CoreLaunch.applicationSupportFolderName(override: "  "),
+            CoreLaunch.applicationSupportFolder
+        )
+        let launch = CoreLaunch.resolve(
+            environment: ["COOKIE_DATA_DIR": "/tmp/cookie-isolated"],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            homeDirectory: home,
+            toolSearchPaths: [],
+            supportFolder: "com.johnkimec.cookie-agent.drive.abcd1234"
+        )
+        XCTAssertEqual(launch.environment["COOKIE_DATA_DIR"], "/tmp/cookie-isolated")
+    }
+
+    func testSkipHotkeyReadsThePlistFlag() {
+        XCTAssertFalse(CoreLaunch.skipsHotkey(plistValue: nil))
+        XCTAssertFalse(CoreLaunch.skipsHotkey(plistValue: false))
+        XCTAssertTrue(CoreLaunch.skipsHotkey(plistValue: true))
+        XCTAssertTrue(CoreLaunch.skipsHotkey(plistValue: "YES"))
+        XCTAssertFalse(CoreLaunch.skipsHotkey(plistValue: "no"))
+    }
+
     func testExplicitDataDirAndCommandAreHonoured() {
         let launch = CoreLaunch.resolve(
             environment: [

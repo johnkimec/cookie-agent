@@ -31,7 +31,7 @@ M0 is the walking skeleton: menu bar, hotkey popup, a streamed reply from the lo
 - Every proof pairs the command that was run with the output it produced. A written claim about the result is not proof.
 - A drive that shows wrong behavior becomes one new test in `core/` when the failure is in the core. Run that test and confirm it fails on the captured output before any product change. A test that already passes does not count. With no suite for that surface, the failing command and its captured output, kept in `verify-evidence/`, are the regression check.
 - Core proof is `verify-evidence/<feature>/command.txt` plus `transcript.jsonl`. Every transcript message must match `protocol/schema/cookie-rpc.schema.json`.
-- Mac proof, when that surface exists, includes the `osascript` transcript and a `screencapture -x` image that shows the UI string the feature names.
+- Mac proof, when that surface exists, includes the `osascript` transcript and a `screencapture -l` image of the window that shows the UI string the feature names.
 - A vitest run is not feature evidence. `status: verified` requires a path under `verify-evidence/` written by this skill.
 - Record the feature file and the sub-feature id with every artifact.
 - Report an unreachable path with the attempted command and the unmet precondition.
