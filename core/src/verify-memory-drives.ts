@@ -911,11 +911,7 @@ function derivedCopyHasLocker(dump: string): boolean {
     JSON.stringify(row).includes(LOCKER),
   );
   const profile = jsonLines(dump, "profile").some(
-    (row) =>
-      row.key === "locker" &&
-      row.value === LOCKER &&
-      typeof row.source_turn === "string" &&
-      row.source_turn.length > 0,
+    (row) => row.key === "locker" && row.value === LOCKER,
   );
   const paraphrase = jsonLines(dump, "profile").some(
     (row) => row.key === "gym_locker" && row.value === GYM_LOCKER,

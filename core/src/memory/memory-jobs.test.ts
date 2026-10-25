@@ -264,6 +264,14 @@ describe("memory.remember and memory.forget", () => {
       updatedAt: DAY,
     });
     derived.upsertProfile({
+      key: "echo",
+      value: "unrelated note",
+      pinned: false,
+      shareable: true,
+      sourceTurn: "t1",
+      updatedAt: DAY,
+    });
+    derived.upsertProfile({
       key: "kept",
       value: "leave this",
       pinned: false,
@@ -304,14 +312,14 @@ describe("memory.remember and memory.forget", () => {
     ).toBe(false);
     expect(derived.forgottenTurnIds()).toEqual(["t1"]);
     expect(derived.listChunks()).toEqual([]);
-    // `linked` shares t1, which this forget marks, so the profile row goes.
+    // Pinned `linked` shares t1 and stays. Unpinned `echo` on that turn goes.
     // The sibling fact on t1 stays.
     expect(
       derived
         .listProfile()
         .map((row) => row.key)
         .sort(),
-    ).toEqual(["kept"]);
+    ).toEqual(["kept", "linked"]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
   });
 

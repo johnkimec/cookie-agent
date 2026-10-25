@@ -11,8 +11,14 @@ import type { Retrieve } from "./retrieve.ts";
 import { abortError } from "./slot.ts";
 import type { SqliteMemoryStore } from "./sqlite-store.ts";
 
-/** Recent turns loaded into one prompt, then cut to the local token budget. */
-const HISTORY_TURN_LIMIT = 10_000;
+/**
+ * How many live turns `messagesFor` keeps before the token budget.
+ * Forgotten turns are removed first, so they do not use a slot.
+ */
+export const HISTORY_TURN_CAP = 20;
+
+/** Rows read from SQLite before the forgotten-turn filter and the cap. */
+const HISTORY_FETCH_LIMIT = 10_000;
 
 /**
  * Turns in `cookie.db` for the real core.
@@ -70,10 +76,11 @@ export class ChatLog implements ConversationHistory {
       return [{ role: "user", content: userText }];
     }
     const forgotten = new Set(this.store.forgottenTurnIds());
+    const live = this.store
+      .recentTurns(conversationId, HISTORY_FETCH_LIMIT)
+      .filter((turn) => !forgotten.has(turn.id));
     const prior = recentWithinBudget(
-      this.store
-        .recentTurns(conversationId, HISTORY_TURN_LIMIT)
-        .filter((turn) => !forgotten.has(turn.id)),
+      live.slice(-HISTORY_TURN_CAP),
       LOCAL_RECENT_TURN_TOKEN_BUDGET,
     );
     for (const turn of prior) {
