@@ -114,7 +114,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolSet {
     }),
     [MEMORY_FORGET_TOOL]: tool({
       description:
-        "Forget a fact John asked to drop. Deletes that fact, the profile row with the same value, and derived rows built from its source turn. A profile row is also dropped when its value contains a secret number from the fact or that source turn, or when the request names the row's key or value exactly. An unpinned row whose source turn was forgotten is dropped. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way, and a chunk marks every turn it covers. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
+        "Forget a fact John asked to drop. Deletes that fact and derived rows built from its source turn. An unpinned profile row is dropped when the fact text equals its key or value. A pinned row is dropped only when its value contains a secret number, or when the request itself names that key or value. An unpinned row whose source turn was forgotten is dropped. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way, and a chunk marks every turn it covers. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
       inputSchema: forgetInput,
       execute: (input) => forgetFact(deps, input),
     }),
@@ -948,10 +948,10 @@ function dropProfileFor(
 }
 
 /**
- * Drop a row only when its value contains a secret number, the needle
- * or a forgotten fact names the key or the value exactly, or the row
- * is unpinned and its source turn is a forgotten source turn. Shared
- * words, names, and years are not secrets.
+ * A pinned row drops only for a secret number, or when the forget
+ * needle itself equals the key or the value. Fact text that equals
+ * the key or the value drops an unpinned row only. An unpinned row
+ * also drops when its source turn was forgotten.
  */
 export function profileRowDropped(
   row: ProfileRecord,
@@ -963,7 +963,10 @@ export function profileRowDropped(
   if (valueHasSecret(row.value, secretTexts)) {
     return true;
   }
-  if (namesRow(row, needle) || facts.some((fact) => namesRow(row, fact.text))) {
+  if (namesRow(row, needle)) {
+    return true;
+  }
+  if (!row.pinned && facts.some((fact) => namesRow(row, fact.text))) {
     return true;
   }
   return (

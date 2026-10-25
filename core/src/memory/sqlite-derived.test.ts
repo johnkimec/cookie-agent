@@ -108,7 +108,7 @@ describe("sqlite derived memory", () => {
     again.close();
   });
 
-  it("forgets the pinned profile row and the linked fact", async () => {
+  it("forgets the linked fact and keeps the pinned profile when the needle is only a word", async () => {
     const store = SqliteMemoryStore.open(tempDbPath(), { now: () => 10 });
     store.appendSession({
       id: "ses-1",
@@ -154,13 +154,108 @@ describe("sqlite derived memory", () => {
       toolOptions,
     );
     expect(dropped).toMatchObject({ forgotten: true, factIds: ["fact-1"] });
-    expect(store.listProfile()).toEqual([]);
+    // The needle is "midterm", not the pinned value, so the row stays.
+    expect(store.listProfile()).toEqual([
+      expect.objectContaining({
+        key: "ece_midterm",
+        value: "ECE midterm is Friday",
+        pinned: true,
+      }),
+    ]);
     expect(activeFacts(store, 10)).toEqual([]);
     expect(store.factById("fact-1")).toBeNull();
     expect(store.forgottenTurnIds()).toEqual(["t1"]);
     expect(store.listFacts().some((row) => row.text.includes("midterm"))).toBe(
       false,
     );
+    store.close();
+  });
+
+  it("keeps a pinned name when the forgotten fact text is exactly that name", async () => {
+    const store = SqliteMemoryStore.open(tempDbPath(), { now: () => 10 });
+    store.appendSession({
+      id: "ses-1",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    store.appendTurn(turn("t1", "ses-1", "My name is John"));
+    const state: MemoryToolState = { sourceTurnId: "t1" };
+    const tools = createMemoryTools({
+      derived: store,
+      store,
+      embedder: new FakeEmbedder(),
+      vectors: new InMemoryVectorIndex(),
+      state,
+      now: () => 10,
+      ids: sequentialIds("fact"),
+    });
+    const stored = await tools[MEMORY_REMEMBER_TOOL]?.execute?.(
+      { text: "John", kind: "person", aboutJohn: false },
+      toolOptions,
+    );
+    const factId = (stored as { factId: string }).factId;
+    store.upsertProfile({
+      key: "name",
+      value: "John",
+      pinned: true,
+      shareable: true,
+      sourceTurn: null,
+      updatedAt: 1,
+    });
+    const dropped = await tools[MEMORY_FORGET_TOOL]?.execute?.(
+      { factId },
+      toolOptions,
+    );
+    expect(dropped).toMatchObject({ forgotten: true, factIds: [factId] });
+    expect(store.factById(factId)).toBeNull();
+    expect(store.listProfile()).toEqual([
+      expect.objectContaining({ key: "name", value: "John", pinned: true }),
+    ]);
+    store.close();
+  });
+
+  it("drops an unpinned row when the forgotten fact text equals its value", async () => {
+    const store = SqliteMemoryStore.open(tempDbPath(), { now: () => 10 });
+    store.appendSession({
+      id: "ses-1",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    store.appendTurn(turn("t1", "ses-1", "My name is John"));
+    const state: MemoryToolState = { sourceTurnId: "t1" };
+    const tools = createMemoryTools({
+      derived: store,
+      store,
+      embedder: new FakeEmbedder(),
+      vectors: new InMemoryVectorIndex(),
+      state,
+      now: () => 10,
+      ids: sequentialIds("fact"),
+    });
+    const stored = await tools[MEMORY_REMEMBER_TOOL]?.execute?.(
+      { text: "John", kind: "person", aboutJohn: false },
+      toolOptions,
+    );
+    const factId = (stored as { factId: string }).factId;
+    store.upsertProfile({
+      key: "name",
+      value: "John",
+      pinned: false,
+      shareable: true,
+      sourceTurn: null,
+      updatedAt: 1,
+    });
+    const dropped = await tools[MEMORY_FORGET_TOOL]?.execute?.(
+      { factId },
+      toolOptions,
+    );
+    expect(dropped).toMatchObject({ forgotten: true, factIds: [factId] });
+    expect(store.factById(factId)).toBeNull();
+    expect(store.listProfile()).toEqual([]);
     store.close();
   });
 
