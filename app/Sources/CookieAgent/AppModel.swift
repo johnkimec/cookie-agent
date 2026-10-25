@@ -14,10 +14,23 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var launchFailure: ShellLaunchFailure?
 
     let localOnly = true
-    let conversationID: String
 
     var onPopup: ((Bool) -> Void)?
     var onLayout: (() -> Void)?
+    /// Laid-out transcript height, including its insets. Zero until the
+    /// scroll content reports one. The panel uses it so a short reply does
+    /// not keep the line-count estimate's extra space.
+    var measuredTranscriptHeight: CGFloat = 0
+
+    func noteTranscriptHeight(_ height: CGFloat) {
+        let next = height
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard abs(self.measuredTranscriptHeight - next) > 0.5 else { return }
+            self.measuredTranscriptHeight = next
+            self.onLayout?()
+        }
+    }
 
     private let turns: PopupChatSession
     private var supervisor: CoreSupervisor?
@@ -30,6 +43,14 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var pendingPush: RuntimeStatus?
     private var lastToggle = Date.distantPast
     private var terminationStarted = false
+    /// `chat.delta` waits here. `chat.done` delivers this buffer before
+    /// `ingestDone`, because `applyDelta` no-ops once the reply is settled.
+    private var replyBuffer = ReplyDeltaBuffer()
+    private var uiCoalescer = ReplyUICoalescer()
+    private var flushItem: DispatchWorkItem?
+    /// Resolved in `start` from `COOKIE_DATA_DIR` or the product default.
+    /// Tests that construct this model can replace it before any log line.
+    private var shellEnvironment = ProcessInfo.processInfo.environment
 
     var menuGlyphState: MenuGlyph {
         menuGlyph(
@@ -51,6 +72,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         )
     }
 
+    var conversationID: String { turns.conversationID }
+
     var statusText: String {
         if let launchFailure {
             return launchFailure.statusLine
@@ -60,8 +83,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     init() {
         let id = "conv-\(UUID().uuidString)"
-        conversationID = id
-        let session = PopupChatSession(conversationID: id)
+        let ttl = resolvedDraftTTL(environment: ProcessInfo.processInfo.environment)
+        let session = PopupChatSession(conversationID: id, draftTTL: ttl)
         turns = session
         session.onChange = { [weak self] in
             self?.publishTurns()
@@ -74,6 +97,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self?.log("cancel: \(description)")
             }
         }
+        session.onBeforeCancelSettle = { [weak self] in
+            self?.deliverBufferedReplyBeforeSettle()
+        }
     }
 
     func start() {
@@ -85,6 +111,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             plistRepoRoot: plistRoot,
             bundleURL: Bundle.main.bundleURL
         )
+        shellEnvironment = launch.environment
         do {
             try launch.prepareDataDirectory()
         } catch {
@@ -150,9 +177,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             }
             if let embed = servers.embed {
                 let embedEvents = embed.events
+                let environment = launch.environment
                 embedEventsTask = Task {
                     for await status in embedEvents {
-                        logShell("embed runtime \(status.state.rawValue)")
+                        logShell("embed runtime \(status.state.rawValue)", environment: environment)
                     }
                 }
             }
@@ -183,7 +211,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func prepareTermination() {
         if terminationStarted { return }
         terminationStarted = true
-        let reply = TerminationReply()
+        let reply = TerminationReply(environment: shellEnvironment)
         Task.detached { [weak self] in
             await self?.shutdownForExit()
             reply.send(reason: "stopped")
@@ -220,7 +248,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func openPopup() {
         lastToggle = Date()
         let wasOpen = popupOpen
-        turns.open(at: Date())
+        turns.open()
         if wasOpen {
             onPopup?(true)
         }
@@ -228,7 +256,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func closePopup() {
         guard popupOpen else { return }
-        turns.close(at: Date())
+        turns.close()
     }
 
     func setDraft(_ text: String) {
@@ -250,6 +278,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         turns.recallLast()
     }
 
+    /// ⌘K. The field clears itself. This starts a new conversation, same as a
+    /// send after the popup has been closed for the draft TTL.
+    func pressCommandK() {
+        turns.pressCommandK()
+    }
+
     func quit() {
         NSApp.terminate(nil)
     }
@@ -264,9 +298,16 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func publishTurns() {
+        publishTurnsNow()
+    }
+
+    private func publishTurnsNow() {
         let apply = { [weak self] in
             guard let self else { return }
             let snap = self.turns.snapshot
+            if snap.conversation.turns.count != self.conversation.turns.count {
+                self.measuredTranscriptHeight = 0
+            }
             self.conversation = snap.conversation
             if self.popupOpen != snap.popupOpen {
                 self.popupOpen = snap.popupOpen
@@ -291,13 +332,45 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                     self.turns.noteRuntime(status.state)
                 }
             case .delta(let delta):
-                self.turns.ingestDelta(delta)
+                self.replyBuffer.append(delta)
+                if self.uiCoalescer.noteDelta() {
+                    self.scheduleReplyFlush()
+                }
             case .done(let done):
+                self.deliverBufferedReplyBeforeSettle()
                 self.turns.ingestDone(done)
+                let accumulated = ReplyStream.cookieText(in: self.conversation)
+                self.log(ReplyStream.doneLog(messageId: done.messageId, accumulated: accumulated))
             case .rpcError, .decodeFailed:
                 self.onLayout?()
             }
         }
+    }
+
+    /// Apply every buffered delta while the reply is still in flight.
+    /// `chat.done` and a cancel result both call this before they settle.
+    private func deliverBufferedReplyBeforeSettle() {
+        flushItem?.cancel()
+        flushItem = nil
+        uiCoalescer.noteDone()
+        deliverBufferedDeltas()
+    }
+
+    private func deliverBufferedDeltas() {
+        for delta in replyBuffer.takePending() {
+            turns.ingestDelta(delta)
+        }
+    }
+
+    private func scheduleReplyFlush() {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.flushItem = nil
+            guard self.uiCoalescer.noteFlush() else { return }
+            self.deliverBufferedDeltas()
+        }
+        flushItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + ReplyStream.flushInterval, execute: item)
     }
 
     private func markCoreReady() {
@@ -362,18 +435,23 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func log(_ message: String) {
-        logShell(message)
+        logShell(message, environment: shellEnvironment)
     }
 }
 
 /// Replies to `.terminateLater` once. Both shutdown and the backstop call it.
 private final class TerminationReply: @unchecked Sendable {
     private let lock = NSLock()
+    private let environment: [String: String]
     private var sent = false
+
+    init(environment: [String: String]) {
+        self.environment = environment
+    }
 
     func send(reason: String) {
         guard mark() else { return }
-        logShell("termination reply \(reason)")
+        logShell("termination reply \(reason)", environment: environment)
         TerminationHop.performDuringTerminate {
             NSApp.reply(toApplicationShouldTerminate: true)
         }

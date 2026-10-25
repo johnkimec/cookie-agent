@@ -193,6 +193,7 @@ Exit 0 means the command ran. Doctor and cleanup do not write evidence files, an
 .cursor/skills/verify-cookie/bin/drive-mac all
 .cursor/skills/verify-cookie/bin/drive-mac self-check
 .cursor/skills/verify-cookie/bin/drive-mac chat --runtime real --evidence verify-evidence/m0-mac-real
+.cursor/skills/verify-cookie/bin/drive-mac popup-reply --evidence verify-evidence/m1-popup-reply
 .cursor/skills/verify-cookie/bin/drive-core cleanup
 ```
 

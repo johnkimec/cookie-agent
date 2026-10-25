@@ -1,5 +1,6 @@
 import AppKit
 import CookieCore
+import SwiftStreamingMarkdown
 import SwiftUI
 
 final class CookiePanel: NSPanel {
@@ -151,19 +152,15 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 
     private func preferredHeight() -> CGFloat {
-        let turns = model.conversation.turns
-        let draftLines = min(5, max(1, model.conversation.draft.components(separatedBy: "\n").count))
         let showsNotice = popupLoadingLine(runtime: model.runtime.state) != nil
             || model.conversation.refusalLine(runtime: model.runtime.state) != nil
-        let notice: CGFloat = showsNotice ? 20 : 0
-        let input = max(PopupLayout.collapsedHeight, 28 + CGFloat(draftLines) * 22 + notice)
-        guard !turns.isEmpty else { return min(PopupLayout.maxHeight, input) }
-        var lines = 0
-        for turn in turns {
-            lines += max(1, Int((Double(max(turn.text.count, 1)) / 48).rounded(.up)))
-        }
-        let transcript = CGFloat(lines) * 22 + CGFloat(turns.count) * 16 + 16
-        return min(PopupLayout.maxHeight, input + transcript)
+        let measured = model.measuredTranscriptHeight
+        return PopupMetrics.panelHeight(
+            turnTexts: model.conversation.turns.map(\.text),
+            draft: model.conversation.draft,
+            showsNotice: showsNotice,
+            measuredTranscript: measured > 1 ? measured : nil
+        )
     }
 
     private func focusField() {
@@ -244,24 +241,44 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 }
 
+private struct TranscriptFrame: Equatable, Sendable {
+    var height: CGFloat
+    var minY: CGFloat
+}
+
+private struct TranscriptFrameKey: PreferenceKey {
+    static var defaultValue: TranscriptFrame {
+        TranscriptFrame(height: 0, minY: 0)
+    }
+
+    static func reduce(value: inout TranscriptFrame, nextValue: () -> TranscriptFrame) {
+        let next = nextValue()
+        if next.height > 0 {
+            value = next
+        }
+    }
+}
+
+private struct ViewportHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct PopupRoot: View {
     @ObservedObject var model: AppModel
+    @State private var pin = TranscriptPin()
+    @State private var viewportHeight: CGFloat = 0
+    @State private var transcriptFrame = TranscriptFrame(height: 0, minY: 0)
 
     var body: some View {
         let _ = model.runtime
         let _ = model.popupOpen
         VStack(spacing: 0) {
             if !model.conversation.turns.isEmpty {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(model.conversation.turns) { turn in
-                            TurnRow(turn: turn)
-                        }
-                    }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: .infinity)
+                transcript
                 Divider()
             }
             inputRow
@@ -270,6 +287,78 @@ struct PopupRoot: View {
         .frame(minHeight: PopupLayout.collapsedHeight)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement(children: .contain)
+    }
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                // The marker used to be the last stack item, so the 12 pt
+                // spacing, its 8 pt height, and the 16 pt padding sat under
+                // the last line. It now occupies the bottom inset.
+                ZStack(alignment: .bottomLeading) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(model.conversation.turns) { turn in
+                            TurnRow(turn: turn)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, PopupLayout.transcriptBottomInset)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    IdentifiedBox(
+                        identifier: CookieAX.transcriptBottom,
+                        label: "transcript"
+                    )
+                    .frame(width: 8, height: 8)
+                    .id(CookieAX.transcriptBottom)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: TranscriptFrameKey.self,
+                            value: TranscriptFrame(
+                                height: geo.size.height,
+                                minY: geo.frame(in: .named("popupTranscript")).minY
+                            )
+                        )
+                    }
+                }
+            }
+            .coordinateSpace(name: "popupTranscript")
+            .background {
+                GeometryReader { geo in
+                    Color.clear.preference(key: ViewportHeightKey.self, value: geo.size.height)
+                }
+            }
+            .onPreferenceChange(ViewportHeightKey.self) { height in
+                viewportHeight = height
+                follow(proxy, frame: transcriptFrame, viewport: height)
+            }
+            .onPreferenceChange(TranscriptFrameKey.self) { frame in
+                transcriptFrame = frame
+                follow(proxy, frame: frame, viewport: viewportHeight)
+                model.noteTranscriptHeight(frame.height)
+            }
+            .onChange(of: model.conversation.turns.last?.text ?? "") { _, _ in
+                guard pin.pinnedToBottom else { return }
+                proxy.scrollTo(CookieAX.transcriptBottom, anchor: .bottom)
+            }
+            .frame(maxHeight: .infinity)
+        }
+    }
+
+    private func follow(_ proxy: ScrollViewProxy, frame: TranscriptFrame, viewport: CGFloat) {
+        var next = pin
+        let shouldScroll = next.note(
+            contentHeight: frame.height,
+            viewportHeight: viewport,
+            contentMinY: frame.minY
+        )
+        pin = next
+        if shouldScroll {
+            proxy.scrollTo(CookieAX.transcriptBottom, anchor: .bottom)
+        }
     }
 
     private var inputRow: some View {
@@ -287,10 +376,11 @@ struct PopupRoot: View {
                     ),
                     onSubmit: { model.submit() },
                     onEscape: { model.pressEscape() },
-                    onEditLast: { model.recallLast() }
+                    onEditLast: { model.recallLast() },
+                    onCommandK: { model.pressCommandK() }
                 )
                 .accessibilityLabel(CookieCopy.ask)
-                .frame(maxWidth: .infinity, minHeight: PopupLayout.mascot, maxHeight: 120)
+                .frame(maxWidth: .infinity)
                 if let loading = popupLoadingLine(runtime: model.runtime.state) {
                     IdentifiedText(
                         text: loading,
@@ -309,6 +399,9 @@ struct PopupRoot: View {
                     )
                 }
             }
+            if model.runtime.state == .up {
+                onDeviceIndicator
+            }
             IdentifiedButton(
                 title: control.title,
                 identifier: control.identifier,
@@ -319,8 +412,28 @@ struct PopupRoot: View {
             .help(control.stopsReply ? CookieCopy.stop : CookieCopy.ask)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, PopupLayout.inputRowVerticalPadding)
         .frame(minHeight: PopupLayout.collapsedHeight)
+    }
+
+    /// One status dot for the whole popup. The existing on-device string is
+    /// its accessibility label and tooltip. There is no per-reply pill.
+    private var onDeviceIndicator: some View {
+        ZStack {
+            IdentifiedBox(
+                identifier: CookieAX.onDeviceIndicator,
+                label: CookieCopy.onDevice,
+                value: CookieCopy.onDevice,
+                tooltip: CookieCopy.onDevice
+            )
+            Circle()
+                .fill(Color.secondary)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+        }
+        .frame(width: 8, height: 8)
+        .fixedSize()
+        .help(CookieCopy.onDevice)
     }
 }
 
@@ -328,31 +441,36 @@ struct TurnRow: View {
     var turn: ChatTurn
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             Text(turn.role.rawValue)
                 .font(.body.monospaced())
                 .foregroundStyle(.secondary)
                 .frame(width: 64, alignment: .leading)
-            IdentifiedText(
-                text: turn.text,
-                identifier: identifier,
-                label: turn.role.rawValue,
-                font: .systemFont(ofSize: NSFont.systemFontSize),
-                textColor: .labelColor
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if let badge = turn.badge {
-                IdentifiedText(
-                    text: badge,
-                    identifier: CookieAX.badge(turn.index),
-                    label: badge,
-                    font: .systemFont(ofSize: NSFont.smallSystemFontSize),
-                    textColor: .labelColor
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: Capsule())
-            }
+            reply
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .background {
+                    IdentifiedBox(
+                        identifier: identifier,
+                        label: turn.role.rawValue,
+                        value: turn.text
+                    )
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var reply: some View {
+        switch turn.role {
+        case .you:
+            Text(turn.text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        case .cookie:
+            MarkdownView(text: prepareReplyMarkdown(turn.text))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -378,9 +496,9 @@ struct CookiePlaceholder: View {
             let earsRaised = pose == .listening
             let earY: CGFloat = earsRaised ? size.height * 0.42 : size.height * 0.12
             let ear = CGSize(width: size.width * 0.22, height: size.height * 0.42)
-            var left = Path(ellipseIn: CGRect(x: size.width * 0.08, y: earY, width: ear.width, height: ear.height))
-            var right = Path(ellipseIn: CGRect(x: size.width * 0.70, y: earY, width: ear.width, height: ear.height))
-            var head = Path(ellipseIn: rect.insetBy(dx: size.width * 0.18, dy: size.height * 0.16))
+            let left = Path(ellipseIn: CGRect(x: size.width * 0.08, y: earY, width: ear.width, height: ear.height))
+            let right = Path(ellipseIn: CGRect(x: size.width * 0.70, y: earY, width: ear.width, height: ear.height))
+            let head = Path(ellipseIn: rect.insetBy(dx: size.width * 0.18, dy: size.height * 0.16))
             context.fill(left, with: .color(fur))
             context.fill(right, with: .color(fur))
             context.fill(head, with: .color(fur))

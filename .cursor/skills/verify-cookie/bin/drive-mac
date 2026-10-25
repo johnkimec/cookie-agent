@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 usage() {
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all|self-check] [--runtime fake|real] [--evidence dir]" >&2
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
 }
 
@@ -19,7 +19,7 @@ runtime="fake"
 evidence=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    menu-bar-icon|hotkey-popup|chat|all|self-check)
+    menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check)
       feature="$1"
       ;;
     --runtime)
@@ -80,6 +80,13 @@ else
   export COOKIE_LLAMA_PORT=18080
   export COOKIE_EMBED_PORT=18081
   export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+fi
+if [[ "$feature" == "popup-reply" ]]; then
+  if [[ "$runtime" != "fake" ]]; then
+    printf '%s\n' "not-ok" "popup-reply drives the long-reply fixture core, not --runtime real"
+    exit 1
+  fi
+  export COOKIE_CORE_COMMAND="node $ROOT/.cursor/skills/verify-cookie/bin/popup-long-reply-fake-core.mjs"
 fi
 
 log() { printf '%s\n' "$*"; }
@@ -847,6 +854,312 @@ end tell
 APPLESCRIPT
 }
 
+popup_layout_constant() {
+  local name="$1"
+  python3 - "$ROOT/app/Sources/CookieCore/Presentation.swift" "$name" <<'PY'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+name = sys.argv[2]
+match = re.search(
+    rf"static let {re.escape(name)}: CGFloat = ([0-9]+(?:\.[0-9]+)?)",
+    text,
+)
+if not match:
+    sys.exit(1)
+print(match.group(1))
+PY
+}
+
+popup_window_height() {
+  osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set windowHeight to item 2 of (get size of popupWindow)
+    return windowHeight
+  end tell
+end tell
+APPLESCRIPT
+}
+
+popup_reply_metrics() {
+  local pad="$1"
+  [[ "$pad" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 2
+  local script
+  script="$(cat <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+set replyHeight to 0
+set dotWidth to 0
+set inputHeight to 0
+set windowHeight to 0
+set bottomPlace to "outside"
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set replyElem to missing value
+    set dotElem to missing value
+    set inputElem to missing value
+    set bottomElem to missing value
+    set mascotElem to missing value
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is "cookie.badge.on-device.0" then error "per-message badge cookie.badge.on-device.0 is still present"
+      if theId is "cookie.turn.cookie.0" and replyElem is missing value then set replyElem to elem
+      if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
+      if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
+      if theId is "cookie.popup.transcript-bottom" and bottomElem is missing value then set bottomElem to elem
+      if theId is "cookie.popup.mascot" and mascotElem is missing value then set mascotElem to elem
+    end repeat
+    if replyElem is missing value then error "missing cookie.turn.cookie.0"
+    if dotElem is missing value then error "missing cookie.badge.on-device"
+    if inputElem is missing value then error "missing cookie.popup.input"
+    if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
+    if mascotElem is missing value then error "missing cookie.popup.mascot"
+    set replyHeight to item 2 of (get size of replyElem)
+    set dotWidth to item 1 of (get size of dotElem)
+    set inputHeight to item 2 of (get size of inputElem)
+    set windowHeight to item 2 of (get size of popupWindow)
+    set bLeft to item 1 of (get position of bottomElem)
+    set bTop to item 2 of (get position of bottomElem)
+    set bWidth to item 1 of (get size of bottomElem)
+    set bHeight to item 2 of (get size of bottomElem)
+    set wLeft to item 1 of (get position of popupWindow)
+    set wTop to item 2 of (get position of popupWindow)
+    set wWidth to item 1 of (get size of popupWindow)
+    set wHeight to item 2 of (get size of popupWindow)
+    set replyBottom to (item 2 of (get position of replyElem)) + replyHeight
+    set rowPad to __ROW_PAD__
+    set mascotTop to item 2 of (get position of mascotElem)
+    set rowTop to mascotTop - rowPad
+    set gap to rowTop - replyBottom
+    if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= (wTop + wHeight + 4) then
+      set bottomPlace to "inside"
+    end if
+  end tell
+end tell
+return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap
+APPLESCRIPT
+)"
+  script="${script//__ROW_PAD__/$pad}"
+  printf '%s\n' "$script" | osascript_run
+}
+
+# CGWindowList for this drive pid only. screencapture -l needs that window id.
+# A full-display capture misses a panel on another display.
+capture_drive_window() {
+  local pid="$1"
+  local dest="$2"
+  local dir src wid
+  [[ "$pid" =~ ^[0-9]+$ ]] || fail "screencapture needs the drive pid"
+  command -v swift >/dev/null || fail "swift is required to read the drive window id"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-window.XXXXXX")"
+  src="$dir/main.swift"
+  cat >"$src" <<'SWIFT'
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count == 2, let pid = Int(args[1]), pid >= 2 else {
+    fputs("drive pid missing\n", stderr)
+    exit(2)
+}
+let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+func number(_ value: Any?) -> Double? {
+    if let n = value as? Double { return n }
+    if let n = value as? Int { return Double(n) }
+    if let n = value as? NSNumber { return n.doubleValue }
+    return nil
+}
+var bestID = 0
+var bestArea = 0.0
+for window in info {
+    guard let owner = number(window[kCGWindowOwnerPID as String]), Int(owner) == pid else { continue }
+    guard let windowID = number(window[kCGWindowNumber as String]), windowID > 0 else { continue }
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = number(bounds["Width"]) ?? 0
+    let height = number(bounds["Height"]) ?? 0
+    let area = width * height
+    if width < 200 || height < 100 || area <= bestArea { continue }
+    bestArea = area
+    bestID = Int(windowID)
+}
+if bestID == 0 {
+    fputs("no on-screen window for drive pid \(pid)\n", stderr)
+    exit(1)
+}
+print(bestID)
+SWIFT
+  if ! wid="$(swift "$src" "$pid")"; then
+    rm -rf "$dir"
+    fail "no on-screen window for drive pid $pid"
+  fi
+  rm -rf "$dir"
+  wid="$(printf '%s' "$wid" | tr -d '[:space:]')"
+  [[ "$wid" =~ ^[0-9]+$ ]] || fail "no on-screen window for drive pid $pid"
+  log "popup window id=$wid pid=$pid"
+  if ! screencapture -x -l"$wid" "$dest"; then
+    fail "screencapture -l$wid wrote no popup image"
+  fi
+}
+
+run_popup_reply() {
+  local max_height row_pad
+  max_height="$(popup_layout_constant maxHeight)" || fail "PopupLayout.maxHeight is missing"
+  row_pad="$(popup_layout_constant inputRowVerticalPadding)" || fail "PopupLayout.inputRowVerticalPadding is missing"
+  export POPUP_MAX_HEIGHT="$max_height"
+  log "open via Ask Cookie…"
+  open_via_ask
+  sleep 0.6
+  log "measure empty popup"
+  local empty_height=""
+  local attempt
+  for attempt in $(seq 1 40); do
+    if empty_height="$(popup_window_height 2>/tmp/cookie-drive-mac-empty.err)"; then
+      empty_height="$(printf '%s' "$empty_height" | tr -d '[:space:]')"
+      if python3 -c 'import sys; h=float(sys.argv[1]); raise SystemExit(0 if h < 80 else 1)' "$empty_height"; then
+        break
+      fi
+    fi
+    empty_height=""
+    sleep 0.25
+  done
+  if [[ -z "$empty_height" ]]; then
+    log "empty popup"
+    cat /tmp/cookie-drive-mac-empty.err 2>/dev/null || true
+    fail "empty popup is not under 80 pt"
+  fi
+  log "empty height $empty_height"
+  log "send long reply"
+  send_chat
+  local ready=0
+  for attempt in $(seq 1 80); do
+    cookie_turn_value > /tmp/cookie-drive-mac-chat.txt || true
+    if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+ok = "END-OF-REPLY-m1-popup" in text and "Einstein is best known for" in text
+sys.exit(0 if ok else 1)
+PY
+    then
+      sleep 0.25
+      continue
+    fi
+    if popup_reply_metrics "$row_pad" > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if python3 - <<'PY'
+import os, pathlib, sys
+text = pathlib.Path("/tmp/cookie-drive-mac-metrics.txt").read_text()
+vals = {}
+for line in text.splitlines():
+    parts = line.split(" ", 1)
+    if len(parts) == 2:
+        vals[parts[0]] = parts[1].strip()
+need = ["replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom", "gap"]
+if any(key not in vals for key in need):
+    print("missing " + ", ".join(key for key in need if key not in vals))
+    sys.exit(1)
+reply_height = float(vals["replyHeight"])
+dot_width = float(vals["dotWidth"])
+input_height = float(vals["inputHeight"])
+window_height = float(vals["windowHeight"])
+gap = float(vals["gap"])
+max_height = float(os.environ["POPUP_MAX_HEIGHT"])
+ok = (
+    reply_height > 40
+    and abs(window_height - max_height) <= 1
+    and vals["bottom"] == "inside"
+    and 4 < dot_width < 40
+    and input_height < 48
+    and 0 <= gap <= 16
+)
+if not ok:
+    print(text.strip())
+    sys.exit(1)
+print("metrics ok")
+PY
+      then
+        ready=1
+        break
+      fi
+    fi
+    sleep 0.25
+  done
+  if [[ "$ready" != "1" ]]; then
+    log "chat value"
+    cat /tmp/cookie-drive-mac-chat.txt 2>/dev/null || true
+    log "metrics"
+    cat /tmp/cookie-drive-mac-metrics.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
+    dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
+    cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
+    fail "popup reply missed the height cap, the input-row gap, or the bottom marker"
+  fi
+  printf 'emptyHeight %s\n' "$empty_height" >> /tmp/cookie-drive-mac-metrics.txt
+  dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || fail "popup accessibility read failed"
+  local shell_log="$COOKIE_DATA_DIR/logs/cookie-shell.log"
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=" | grep -F "END-OF-REPLY-m1-popup" | grep -F "Einstein is best known for" >/dev/null; then
+    log "shell log"
+    cat "$shell_log" 2>/dev/null || true
+    fail "chat.done log is missing the full accumulated reply"
+  fi
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup.png
+  if [[ ! -s /tmp/cookie-drive-mac-popup.png ]]; then
+    fail "screencapture wrote no file"
+  fi
+  if [[ -n "$evidence" ]]; then
+    mkdir -p "$evidence"
+    {
+      printf '%s\n' "drive-mac popup-reply --runtime fake"
+      printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
+      printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+      printf '%s\n' "resolvedPort=${PORT}"
+      printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND:-}"
+    } > "$evidence/command.txt"
+    cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
+    cp /tmp/cookie-drive-mac-ax.txt "$evidence/ax.txt"
+    cp /tmp/cookie-drive-mac-chat.txt "$evidence/chat.txt"
+    cp /tmp/cookie-drive-mac-metrics.txt "$evidence/metrics.txt"
+    cp /tmp/cookie-drive-mac-popup.png "$evidence/popup.png"
+    cp "$shell_log" "$evidence/cookie-shell.log"
+    if [[ ! -s "$evidence/chat.txt" || ! -s "$evidence/popup.png" || ! -s "$evidence/metrics.txt" ]]; then
+      fail "evidence is missing chat.txt, metrics.txt, or popup.png"
+    fi
+  fi
+  log "metrics"
+  cat /tmp/cookie-drive-mac-metrics.txt
+  log "popup-reply ok"
+  log "Mac proof is pending. Leave the sub-features planned until verify-evidence/m1-popup-reply exists."
+}
+
 close_popup() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
@@ -1164,6 +1477,11 @@ if missing:
     sys.exit(1)
 print("menu strings ok")
 PY
+fi
+
+if [[ "$feature" == "popup-reply" ]]; then
+  run_popup_reply
+  exit 0
 fi
 
 drive_popup=0

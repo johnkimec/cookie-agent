@@ -1,6 +1,39 @@
 import Foundation
 import CookieProtocol
 
+/// Time source for draft expiry and the session boundary. Tests pass a clock
+/// they can move. The app uses `SystemCookieClock`.
+public protocol CookieClock: Sendable {
+    func now() -> Date
+}
+
+public struct SystemCookieClock: CookieClock {
+    public init() {}
+
+    public func now() -> Date { Date() }
+}
+
+public final class ManualCookieClock: CookieClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: Date
+
+    public init(_ instant: Date) {
+        self.instant = instant
+    }
+
+    public func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return instant
+    }
+
+    public func advance(by interval: TimeInterval) {
+        lock.lock()
+        instant = instant.addingTimeInterval(interval)
+        lock.unlock()
+    }
+}
+
 public struct PopupChatSnapshot: Equatable, Sendable {
     public var popupOpen: Bool
     public var conversation: PopupConversation
@@ -37,17 +70,35 @@ public struct PopupSendFailure: Sendable {
 /// closes the panel only when nothing is arriving. A cancel result is matched
 /// to its message id, so a late `cancelled: false` does not settle the next reply.
 public final class PopupChatSession: @unchecked Sendable {
-    public let conversationID: String
     public var onChange: @Sendable () -> Void = {}
     public var onSendFailure: @Sendable (PopupSendFailure) -> Void = { _ in }
     public var onCancelFailure: @Sendable (String) -> Void = { _ in }
+    /// Runs on the main queue before a cancel result settles the reply.
+    /// The shell delivers buffered `chat.delta` here. `applyDelta` drops a
+    /// tail once the reply is no longer in flight.
+    public var onBeforeCancelSettle: @Sendable () -> Void = {}
 
     private let lock = NSLock()
-    private var state = PopupChatState()
+    private var state: PopupChatState
     private var supervisor: CoreSupervisor?
+    private let clock: any CookieClock
+    private let makeConversationID: @Sendable () -> String
 
-    public init(conversationID: String) {
-        self.conversationID = conversationID
+    public init(
+        conversationID: String,
+        clock: any CookieClock = SystemCookieClock(),
+        draftTTL: TimeInterval = PopupLayout.draftTTL,
+        makeConversationID: @escaping @Sendable () -> String = { "conv-\(UUID().uuidString)" }
+    ) {
+        self.clock = clock
+        self.makeConversationID = makeConversationID
+        self.state = PopupChatState(conversationID: conversationID, draftTTL: draftTTL)
+    }
+
+    public var conversationID: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.conversationID
     }
 
     public func attach(_ supervisor: CoreSupervisor) {
@@ -89,20 +140,19 @@ public final class PopupChatSession: @unchecked Sendable {
         }
     }
 
-    public func open(at date: Date = Date()) {
+    public func open(at date: Date? = nil) {
+        let now = date ?? clock.now()
         mutate { state in
-            state.popupOpen = true
-            state.conversation.noteOpen(at: date)
+            state.noteOpen(at: now)
             return .none
         }
     }
 
     /// Click outside and the hotkey. Does not cancel an in-flight reply.
-    public func close(at date: Date = Date()) {
+    public func close(at date: Date? = nil) {
+        let now = date ?? clock.now()
         mutate { state in
-            guard state.popupOpen else { return .none }
-            state.conversation.noteClose(at: date)
-            state.popupOpen = false
+            _ = state.noteClose(at: now)
             return .none
         }
     }
@@ -127,12 +177,26 @@ public final class PopupChatSession: @unchecked Sendable {
 
     /// Return, the send/stop button, and AXConfirm.
     public func pressReturn() {
-        mutate { $0.pressReturn() }
+        let makeID = makeConversationID
+        mutate { state in
+            state.pressReturn(makeID: makeID)
+        }
+    }
+
+    /// ⌘K. Clears nothing in the transcript. The field clears itself.
+    /// The next `chat.send` uses the new conversation id.
+    public func pressCommandK() {
+        let freshID = makeConversationID()
+        mutate { state in
+            state.beginNewConversation(id: freshID)
+            return .none
+        }
     }
 
     /// Escape. Stops a reply that is still arriving. Closes only when idle.
     public func pressEscape() {
-        mutate { $0.pressEscape() }
+        let now = clock.now()
+        mutate { $0.pressEscape(at: now) }
     }
 
     public func ingest(_ event: CoreEvent) {
@@ -168,9 +232,8 @@ public final class PopupChatSession: @unchecked Sendable {
         switch effect {
         case .none:
             return
-        case .send(let text):
+        case .send(let text, let conversationID):
             let supervisor = currentSupervisor()
-            let conversationID = self.conversationID
             guard let supervisor else {
                 mutate { state in
                     state.rollbackSend(restoredText: text)
@@ -194,9 +257,8 @@ public final class PopupChatSession: @unchecked Sendable {
                     self.onSendFailure(failure)
                 }
             }
-        case .cancel(let messageID):
+        case .cancel(let messageID, let conversationID):
             let supervisor = currentSupervisor()
-            let conversationID = self.conversationID
             guard let supervisor else {
                 mutate { state in
                     state.noteCancelFailed(messageID: messageID)
@@ -211,10 +273,7 @@ public final class PopupChatSession: @unchecked Sendable {
                         conversationId: conversationID,
                         messageId: messageID
                     )
-                    self.mutate { state in
-                        state.noteCancelResult(messageID: messageID)
-                        return .none
-                    }
+                    self.settleCancelOnMain(messageID: messageID)
                 } catch {
                     self.mutate { state in
                         state.noteCancelFailed(messageID: messageID)
@@ -223,6 +282,24 @@ public final class PopupChatSession: @unchecked Sendable {
                     self.onCancelFailure(String(describing: error))
                 }
             }
+        }
+    }
+
+    /// Deltas and `chat.done` are applied on the main queue. A cancel result
+    /// that settles from the request task drops a tail still sitting in the
+    /// shell's buffer. Flush that buffer, then settle, both on main.
+    private func settleCancelOnMain(messageID: String) {
+        let work = {
+            self.onBeforeCancelSettle()
+            self.mutate { state in
+                state.noteCancelResult(messageID: messageID)
+                return .none
+            }
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.sync(execute: work)
         }
     }
 
@@ -235,20 +312,50 @@ public final class PopupChatSession: @unchecked Sendable {
 
 private enum PopupEffect {
     case none
-    case send(String)
-    case cancel(String)
+    case send(text: String, conversationID: String)
+    case cancel(messageID: String, conversationID: String)
 }
 
 private struct PopupChatState {
+    var conversationID: String
+    var draftTTL: TimeInterval
     var popupOpen = false
     var conversation = PopupConversation()
     var runtime = RuntimeState.down
+    /// When the popup last went from open to closed.
+    var closedAt: Date?
+    /// The last close lasted at least `draftTTL`. The next send, or ⌘K, consumes it.
+    var sessionExpired = false
+    /// Conversation id of the reply that is in flight. Cancel keeps this id
+    /// after ⌘K mints a new one.
+    var inflightConversationID: String?
     /// `chat.cancel` already handed to the supervisor for this message.
     var cancelForMessageID: String?
     /// Stop was asked before the ack or the first delta provided a message id.
     var cancelWhenAcked = false
 
-    mutating func pressReturn() -> PopupEffect {
+    mutating func beginNewConversation(id: String) {
+        conversationID = id
+        sessionExpired = false
+    }
+
+    mutating func noteOpen(at date: Date) {
+        if !popupOpen, let closedAt, date.timeIntervalSince(closedAt) >= draftTTL {
+            sessionExpired = true
+        }
+        popupOpen = true
+        conversation.noteOpen(at: date, ttl: draftTTL)
+    }
+
+    mutating func noteClose(at date: Date) -> PopupEffect {
+        guard popupOpen else { return .none }
+        conversation.noteClose(at: date)
+        closedAt = date
+        popupOpen = false
+        return .none
+    }
+
+    mutating func pressReturn(makeID: () -> String) -> PopupEffect {
         if conversation.replyInFlight {
             return requestStop()
         }
@@ -256,20 +363,22 @@ private struct PopupChatState {
         cancelWhenAcked = false
         switch conversation.prepareSend(runtime: runtime) {
         case .send(let text):
-            return .send(text)
+            if sessionExpired {
+                beginNewConversation(id: makeID())
+            }
+            inflightConversationID = conversationID
+            return .send(text: text, conversationID: conversationID)
         case .ignore, .refused:
             return .none
         }
     }
 
-    mutating func pressEscape() -> PopupEffect {
+    mutating func pressEscape(at now: Date) -> PopupEffect {
         guard popupOpen else { return .none }
         if conversation.replyInFlight {
             return requestStop()
         }
-        conversation.noteClose(at: Date())
-        popupOpen = false
-        return .none
+        return noteClose(at: now)
     }
 
     mutating func ingestDelta(_ delta: ChatDeltaParams) -> PopupEffect {
@@ -329,7 +438,8 @@ private struct PopupChatState {
         }
         if let messageID = conversation.inflightMessageID {
             cancelForMessageID = messageID
-            return .cancel(messageID)
+            let id = inflightConversationID ?? conversationID
+            return .cancel(messageID: messageID, conversationID: id)
         }
         cancelWhenAcked = true
         return .none
@@ -342,7 +452,8 @@ private struct PopupChatState {
         guard let messageID = conversation.inflightMessageID else { return .none }
         cancelWhenAcked = false
         cancelForMessageID = messageID
-        return .cancel(messageID)
+        let id = inflightConversationID ?? conversationID
+        return .cancel(messageID: messageID, conversationID: id)
     }
 }
 

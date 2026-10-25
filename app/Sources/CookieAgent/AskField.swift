@@ -2,14 +2,49 @@ import AppKit
 import CookieCore
 import SwiftUI
 
+/// Sized like `TextField(axis: .vertical).lineLimit(1...8)`: one line when
+/// empty, growing through eight, then scrolling inside the field.
+///
+/// This stays an `NSTextView`. A SwiftUI vertical text field turns Return
+/// into a newline. Return still sends, Shift-Return inserts a newline, and
+/// ⌘K, Up at the start, AXValue, and AXConfirm stay on this view.
 struct AskField: NSViewRepresentable {
     @Binding var text: String
     var onSubmit: () -> Void
     var onEscape: () -> Void
     var onEditLast: () -> Void
+    var onCommandK: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: NSScrollView, context: Context) -> CGSize? {
+        let width = proposal.width ?? 320
+        let fittedWidth = width.isFinite && width > 1 ? width : 320
+        guard let textView = scroll.documentView as? AskTextView else {
+            return CGSize(width: fittedWidth, height: PopupMetrics.inputLineHeight)
+        }
+        let inset = textView.textContainerInset
+        let containerWidth = max(1, fittedWidth - inset.width * 2)
+        textView.textContainer?.containerSize = NSSize(
+            width: containerWidth,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
+        let used: CGFloat
+        if let container = textView.textContainer {
+            textView.layoutManager?.ensureLayout(for: container)
+            used = textView.layoutManager?.usedRect(for: container).height ?? PopupMetrics.inputLineHeight
+        } else {
+            used = PopupMetrics.inputLineHeight
+        }
+        let raw = used + inset.height * 2
+        let maxHeight = PopupMetrics.clampedInputHeight(lineCount: PopupMetrics.inputMaxLines)
+        let height = min(maxHeight, max(PopupMetrics.inputLineHeight, raw))
+        scroll.hasVerticalScroller = raw > maxHeight + 1
+        textView.frame = NSRect(x: 0, y: 0, width: fittedWidth, height: max(raw, PopupMetrics.inputLineHeight))
+        return CGSize(width: fittedWidth, height: height)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -34,7 +69,7 @@ struct AskField: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
-        textView.textContainerInset = NSSize(width: 2, height: 8)
+        textView.textContainerInset = NSSize(width: 2, height: 2)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -46,6 +81,7 @@ struct AskField: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
         textView.onEditLast = onEditLast
+        textView.onCommandK = onCommandK
         textView.onChange = { context.coordinator.parent.text = $0 }
 
         scroll.documentView = textView
@@ -60,6 +96,7 @@ struct AskField: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
         textView.onEditLast = onEditLast
+        textView.onCommandK = onCommandK
         if textView.string != text {
             textView.string = text
             textView.needsDisplay = true
@@ -75,18 +112,8 @@ struct AskField: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? AskTextView else { return }
-            let limited = Self.limited(view.string)
-            if limited != view.string {
-                view.string = limited
-            }
             parent.text = view.string
             view.needsDisplay = true
-        }
-
-        private static func limited(_ text: String) -> String {
-            let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-            guard lines.count > 5 else { return text }
-            return lines.prefix(5).joined(separator: "\n")
         }
     }
 }
@@ -96,6 +123,7 @@ final class AskTextView: NSTextView {
     var onSubmit: () -> Void = {}
     var onEscape: () -> Void = {}
     var onEditLast: () -> Void = {}
+    var onCommandK: () -> Void = {}
     var onChange: (String) -> Void = { _ in }
 
     override func setAccessibilityValue(_ accessibilityValue: Any?) {
@@ -123,7 +151,6 @@ final class AskTextView: NSTextView {
         }
         if event.keyCode == 36 || event.keyCode == 76 {
             if flags.contains(.shift) {
-                if string.components(separatedBy: "\n").count >= 5 { return }
                 insertNewline(nil)
                 return
             }
@@ -141,6 +168,7 @@ final class AskTextView: NSTextView {
            !flags.contains(.control) {
             string = ""
             onChange("")
+            onCommandK()
             needsDisplay = true
             return
         }
@@ -166,6 +194,11 @@ final class AskTextView: NSTextView {
 
 /// AppKit label so System Events can read `AXIdentifier`. A SwiftUI `Text`
 /// modifier did not show up in the window's accessibility tree.
+///
+/// Loading and refusal lines still use this view. Cookie turns do not: those
+/// are `Text` and `MarkdownView`. A wrapping label whose
+/// `preferredMaxLayoutWidth` stays 0 reports a one-line intrinsic height, so
+/// the proposed width is written onto the field.
 struct IdentifiedText: NSViewRepresentable {
     var text: String
     var identifier: String
@@ -174,7 +207,7 @@ struct IdentifiedText: NSViewRepresentable {
     var textColor: NSColor
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(wrappingLabelWithString: text)
+        let field = WrappingLabel(wrappingLabelWithString: text)
         field.isEditable = false
         field.isSelectable = true
         field.isBezeled = false
@@ -200,6 +233,27 @@ struct IdentifiedText: NSViewRepresentable {
         field.setAccessibilityIdentifier(identifier)
         field.setAccessibilityLabel(label)
         field.setAccessibilityValue(text)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+        if nsView.preferredMaxLayoutWidth != width {
+            nsView.preferredMaxLayoutWidth = width
+            nsView.invalidateIntrinsicContentSize()
+        }
+        return CGSize(width: width, height: nsView.intrinsicContentSize.height)
+    }
+}
+
+/// Sets `preferredMaxLayoutWidth` from the width SwiftUI actually gave the label.
+private final class WrappingLabel: NSTextField {
+    override func layout() {
+        let width = bounds.width
+        if width > 1, abs(preferredMaxLayoutWidth - width) > 0.5 {
+            preferredMaxLayoutWidth = width
+            invalidateIntrinsicContentSize()
+        }
+        super.layout()
     }
 }
 
@@ -250,17 +304,28 @@ struct IdentifiedButton: NSViewRepresentable {
 struct IdentifiedBox: NSViewRepresentable {
     var identifier: String
     var label: String
+    var value: String? = nil
+    var tooltip: String? = nil
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
+        view.autoresizingMask = [.width, .height]
         view.setAccessibilityElement(true)
         view.setAccessibilityIdentifier(identifier)
         view.setAccessibilityLabel(label)
+        if let value {
+            view.setAccessibilityValue(value)
+        }
+        view.toolTip = tooltip
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
         view.setAccessibilityIdentifier(identifier)
         view.setAccessibilityLabel(label)
+        if let value {
+            view.setAccessibilityValue(value)
+        }
+        view.toolTip = tooltip
     }
 }

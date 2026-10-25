@@ -53,14 +53,22 @@ public struct FileRuntimePidStore: RuntimePidStoring {
             let flag = record.leadsGroup ? "1" : "0"
             let text = "\(record.pid) \(record.processGroup) \(flag)\n"
             try text.write(to: url, atomically: true, encoding: .utf8)
-            logShell("pid file \(path)")
+            logShell("pid file \(path)", environment: shellLogEnvironment())
         } catch {
-            logShell("pid file \(path) write failed: \(error)")
+            logShell("pid file \(path) write failed: \(error)", environment: shellLogEnvironment())
         }
     }
 
     public func remove() {
         try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The pid file lives in `<dataDir>/logs`. The shell log uses that same
+    /// data directory, not the process environment.
+    private func shellLogEnvironment() -> [String: String] {
+        let logs = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let data = logs.lastPathComponent == "logs" ? logs.deletingLastPathComponent() : logs
+        return ["COOKIE_DATA_DIR": data.path]
     }
 }
 
@@ -146,6 +154,12 @@ public actor RuntimeSupervisor {
 
     public var isOwningProcess: Bool { ownsProcess }
 
+    /// Shell lines for this server go under `launch.dataDirectory`, which
+    /// tests set to a temp directory.
+    private func note(_ message: String) {
+        logShell(message, environment: ["COOKIE_DATA_DIR": launch.dataDirectory])
+    }
+
     public func start() async {
         guard launch.port != nil else {
             publish(RuntimeStatus(state: .down, modelId: nil))
@@ -184,12 +198,12 @@ public actor RuntimeSupervisor {
         watchGeneration += 1
         let record = ownedRecord ?? (ownsProcess ? pidStore.load() : nil)
         guard ownsProcess, let record else {
-            logShell("runtime stop skipped owns=\(ownsProcess)")
+            note("runtime stop skipped owns=\(ownsProcess)")
             ownsProcess = false
             ownedRecord = nil
             return
         }
-        logShell("runtime stop pid=\(record.pid) pgid=\(record.processGroup)")
+        note("runtime stop pid=\(record.pid) pgid=\(record.processGroup)")
         await signalUntilDead(record)
     }
 
@@ -303,7 +317,7 @@ public actor RuntimeSupervisor {
             forgetProcess(removePid: true)
             return
         }
-        logShell("runtime SIGKILL pid=\(record.pid) pgid=\(record.processGroup)")
+        note("runtime SIGKILL pid=\(record.pid) pgid=\(record.processGroup)")
         launcher.forceTerminate(
             pid: record.pid,
             processGroup: record.processGroup,
@@ -314,7 +328,7 @@ public actor RuntimeSupervisor {
             forgetProcess(removePid: true)
             return
         }
-        logShell("runtime pid \(record.pid) still alive; keeping \(launch.pidFile)")
+        note("runtime pid \(record.pid) still alive; keeping \(launch.pidFile)")
         forgetProcess(removePid: false)
     }
 
@@ -402,7 +416,7 @@ public actor RuntimeSupervisor {
             remember(record)
             pidStore.save(record)
             if pidStore.load()?.pid != record.pid {
-                logShell("pid file \(launch.pidFile) missing after save")
+                note("pid file \(launch.pidFile) missing after save")
             }
             switch await waitUntilReady(port: port, owned: owned) {
             case .ready:
