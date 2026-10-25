@@ -19,10 +19,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { mkdir, readdir, readlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readlink, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { CORE_SERVER_NAME } from "./identity.ts";
 import { dumpMemory } from "./memory/dump.ts";
 import { MEMORY_DB_FILENAME } from "./memory/path.ts";
@@ -1631,7 +1631,66 @@ function llamaMode(args: string[]): LlamaMode | null {
   return null;
 }
 
-async function main(argv: string[]): Promise<number> {
+export type DriveInvocation = {
+  /** False when this process did not execute a command. */
+  ran: boolean;
+  code: number;
+  /**
+   * Absolute directory for a drive that must write evidence.
+   * Doctor, cleanup, usage, and the unreachable Mac drives leave this null.
+   */
+  evidenceDir: string | null;
+};
+
+const evidenceFileNames = [
+  "command.txt",
+  "transcript.jsonl",
+  "stderr.txt",
+  "summary.txt",
+] as const;
+
+function invocation(
+  code: number,
+  evidenceDir: string | null = null,
+): DriveInvocation {
+  return { ran: true, code, evidenceDir };
+}
+
+async function evidenceWasWritten(evidenceDir: string): Promise<boolean> {
+  try {
+    await Promise.all(
+      evidenceFileNames.map((name) => stat(join(evidenceDir, name))),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exit status for one drive-core invocation.
+ *
+ * Exit 1 when no command ran, or when a drive that should write evidence
+ * reported success and the evidence files are missing. Doctor and cleanup
+ * pass a successful code through with a null evidence directory.
+ */
+export async function resolveDriveExit(run: DriveInvocation): Promise<number> {
+  if (!run.ran) {
+    process.stderr.write("drive-core: no drive ran\n");
+    return 1;
+  }
+  if (
+    run.evidenceDir !== null &&
+    run.code === 0 &&
+    !(await evidenceWasWritten(run.evidenceDir))
+  ) {
+    process.stderr.write("drive-core: no evidence written\n");
+    return 1;
+  }
+  return run.code;
+}
+
+export async function main(argv: string[]): Promise<DriveInvocation> {
   const [command, feature, ...rest] = argv;
   if (command === "doctor") {
     const kind = coreKind(argv.slice(1));
@@ -1641,18 +1700,18 @@ async function main(argv: string[]): Promise<number> {
       llama === null ||
       (llama === "external" && kind !== "real")
     ) {
-      return usage();
+      return invocation(usage());
     }
-    return doctor(kind, llama);
+    return invocation(await doctor(kind, llama));
   }
   if (command === "cleanup") {
-    return cleanupAsync();
+    return invocation(await cleanupAsync());
   }
   if (command !== "drive") {
-    return usage();
+    return invocation(usage());
   }
   if (feature === "menu-bar-icon" || feature === "hotkey-popup") {
-    return unreachable();
+    return invocation(unreachable());
   }
   if (
     feature !== "chat-streaming" &&
@@ -1661,11 +1720,11 @@ async function main(argv: string[]): Promise<number> {
     feature !== "memory-persist" &&
     feature !== "runtime-restart"
   ) {
-    return usage();
+    return invocation(usage());
   }
   const evidence = evidenceArg(rest);
   if (evidence === null) {
-    return usage();
+    return invocation(usage());
   }
   const kind = coreKind(rest);
   const llama = llamaMode(rest);
@@ -1674,46 +1733,28 @@ async function main(argv: string[]): Promise<number> {
     llama === null ||
     (llama === "external" && kind !== "real")
   ) {
-    return usage();
+    return invocation(usage());
   }
   if (feature === "chat-history" && llama !== "external") {
     process.stderr.write(
       "chat-history requires --core real --llama external\n",
     );
-    return usage();
+    return invocation(usage());
   }
   if (feature === "memory-persist" && (kind !== "real" || llama !== "stub")) {
     process.stderr.write(
       "memory-persist requires --core real and the built-in stub\n",
     );
-    return usage();
+    return invocation(usage());
   }
   if (feature === "runtime-restart" && (kind !== "real" || llama !== "stub")) {
     process.stderr.write(
       "runtime-restart requires --core real and the built-in stub\n",
     );
-    return usage();
+    return invocation(usage());
   }
-  return driveFeature(feature, evidence, kind, llama);
-}
-
-function isDirectRun(): boolean {
-  const entry = process.argv[1];
-  if (entry === undefined) {
-    return false;
-  }
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
-}
-
-if (isDirectRun()) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      process.exit(code);
-    })
-    .catch((error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : "verify-drive failed";
-      process.stderr.write(`${message}\n`);
-      process.exit(1);
-    });
+  return invocation(
+    await driveFeature(feature, evidence, kind, llama),
+    resolve(repoRoot, evidence),
+  );
 }
