@@ -400,6 +400,15 @@ ln -s "$REAL" "$FIXTURE/home-link"
 mkdir -p "$REAL/Library/Application Support/com.johnkimec.cookie-agent-extra"
 
 expect_refuse "data-dir" "$SAFE_HOME" "$DATA" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+# launch_verified keeps a non-empty caller COOKIE_DATA_DIR and still asserts it.
+# A caller-supplied real data directory is refused before the binary starts.
+caller_data="$DATA"
+if [[ -z "$caller_data" ]]; then
+  printf 'caller data dir fixture was empty\n' >&2
+  exit 1
+fi
+launch_data="$caller_data"
+expect_refuse "caller-supplied-data-dir" "$SAFE_HOME" "$launch_data" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
 expect_refuse "subdir" "$SAFE_HOME" "$DATA/nested" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
 expect_refuse "mixed-case" "$SAFE_HOME" "$REAL/library/APPLICATION SUPPORT/com.johnkimec.COOKIE-AGENT" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
 expect_refuse "symlink" "$SAFE_HOME" "$FIXTURE/into-data" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
@@ -470,6 +479,20 @@ if launch.index("assert_isolated_data_dir") > launch.index('"$bin" &'):
     sys.exit("assert_isolated_data_dir is after the direct launch")
 if "HOME=" not in launch.split('"$bin" &', 1)[0]:
     sys.exit("direct launch does not set HOME before the binary")
+nonempty = 'if [[ -n "${COOKIE_DATA_DIR:-}" ]]; then'
+if nonempty not in launch:
+    sys.exit("launch_verified lost the non-empty COOKIE_DATA_DIR branch")
+then_part, after_then = launch.split(nonempty, 1)[1].split("else", 1)
+if 'launch_data="$COOKIE_DATA_DIR"' not in then_part:
+    sys.exit("non-empty COOKIE_DATA_DIR is not the launch data directory")
+else_part, after_fi = after_then.split("fi", 1)
+assert_line = 'assert_isolated_data_dir "$launch_home" "$launch_data"'
+if assert_line in else_part:
+    sys.exit("assert_isolated_data_dir is only reachable from the empty COOKIE_DATA_DIR branch")
+if assert_line not in after_fi:
+    sys.exit("assert_isolated_data_dir does not run when COOKIE_DATA_DIR is non-empty")
+if after_fi.index(assert_line) > after_fi.index('"$bin" &'):
+    sys.exit("a non-empty COOKIE_DATA_DIR launches before assert_isolated_data_dir")
 
 opened = body("open_clean_check", "\nopen_clean_status=0")
 if opened.index("assert_isolated_data_dir") > opened.index("/usr/bin/open -n"):
