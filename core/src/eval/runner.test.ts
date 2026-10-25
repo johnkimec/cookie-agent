@@ -1,14 +1,31 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { startLlamaStub } from "../verify-llama-stub.ts";
 import {
+  attachEvalDataCleanup,
+  completeAtTemperatureZero,
   coreEvalEnv,
   evalExitCode,
+  REAL_PORTS_REQUIRED,
+  resolveRealPorts,
   runMemoryEval,
   scriptedAnswer,
+  storedTurnId,
+  writeServerEvidence,
 } from "./runner.ts";
+import { loadTasks } from "./tasks.ts";
 
 const dirs: string[] = [];
 
@@ -125,6 +142,10 @@ describe("memory recall runner", () => {
       evidenceDir,
       keepData: true,
     });
+    const kept = report.tasks[0]?.dataDir;
+    if (kept !== null && kept !== undefined) {
+      dirs.push(kept);
+    }
     expect(report.plumbingError).toBe(false);
     expect(report.egressViolation).toBe(false);
     expect(report.tasks).toHaveLength(1);
@@ -157,4 +178,139 @@ describe("memory recall runner", () => {
     expect(report.text).toContain("score 1/1");
     expect(report.text).toContain("PASS 90-plum");
   }, 30_000);
+
+  it("loads the scored fixtures, including the new accept entries", () => {
+    const tasksDir = fileURLToPath(
+      new URL("../../../evals/memory-recall/tasks", import.meta.url),
+    );
+    const tasks = loadTasks(tasksDir);
+    expect(tasks.map((task) => task.id)).toEqual([
+      "03-digikey-part-number",
+      "04-knee-squat-swap",
+      "05-protein-target-updated",
+      "06-forget-debt-to-daniel",
+      "07-meal-preference-cilantro",
+      "08-lab-partner-meeting",
+      "09-cookie-grooming-time",
+      "10-capstone-supervisor",
+      "11-buried-dog-food",
+      "12-dog-weight-distractor",
+    ]);
+    const debt = tasks.find((task) => task.id === "06-forget-debt-to-daniel");
+    expect(storedTurnId(debt?.sessions ?? [], "owe Daniel $40")).toBe(
+      "ses-2026-10-04-0215-popup-1-user",
+    );
+  });
+
+  it("refuses --real when the ports are not explicit", async () => {
+    expect(resolveRealPorts({}, {})).toEqual({ error: REAL_PORTS_REQUIRED });
+    expect(
+      resolveRealPorts(
+        {},
+        { COOKIE_LLAMA_PORT: "8080", COOKIE_EMBED_PORT: "8081" },
+      ),
+    ).toEqual({ llamaPort: 8080, embedPort: 8081 });
+    const root = mkdtempSync(join(tmpdir(), "cookie-eval-ports-"));
+    dirs.push(root);
+    mkdirSync(join(root, "tasks"));
+    const previousLlama = process.env.COOKIE_LLAMA_PORT;
+    const previousEmbed = process.env.COOKIE_EMBED_PORT;
+    delete process.env.COOKIE_LLAMA_PORT;
+    delete process.env.COOKIE_EMBED_PORT;
+    try {
+      const report = await runMemoryEval({
+        mode: "real",
+        tasksDir: join(root, "tasks"),
+        evidenceDir: join(root, "evidence"),
+      });
+      expect(report.plumbingError).toBe(true);
+      expect(report.text).toContain("does not default to 8080 or 8081");
+      expect(report.tasks).toHaveLength(0);
+    } finally {
+      if (previousLlama === undefined) {
+        delete process.env.COOKIE_LLAMA_PORT;
+      } else {
+        process.env.COOKIE_LLAMA_PORT = previousLlama;
+      }
+      if (previousEmbed === undefined) {
+        delete process.env.COOKIE_EMBED_PORT;
+      } else {
+        process.env.COOKIE_EMBED_PORT = previousEmbed;
+      }
+    }
+  });
+
+  it("sends the real question at temperature 0", async () => {
+    let seen: unknown = null;
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+      request.on("end", () => {
+        seen = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            choices: [{ message: { content: "Priya has the probes." } }],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("temperature server did not bind");
+    }
+    try {
+      const text = await completeAtTemperatureZero(address.port, {
+        messages: [{ role: "user", content: "owed?" }],
+        temperature: 1,
+        stream: true,
+      });
+      expect(text).toBe("Priya has the probes.");
+      expect(seen).toMatchObject({ temperature: 0, stream: false });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
+  it("saves /props and /v1/models from a loopback server", async () => {
+    const stub = await startLlamaStub(0);
+    const root = mkdtempSync(join(tmpdir(), "cookie-eval-evidence-"));
+    dirs.push(root);
+    try {
+      await writeServerEvidence(root, "llama", stub.port);
+      const models = JSON.parse(
+        readFileSync(join(root, "llama-v1-models.json"), "utf8"),
+      ) as { status: number; body: string };
+      expect(models.status).toBe(200);
+      expect(models.body).toContain("list");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("removes a temp data dir on SIGTERM", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cookie-eval-signal-"));
+    writeFileSync(join(dir, "marker"), "x");
+    let code: number | null = null;
+    const detach = attachEvalDataCleanup([dir], (next) => {
+      code = next;
+    });
+    process.emit("SIGTERM");
+    expect(code).toBe(1);
+    expect(existsSync(dir)).toBe(false);
+    detach();
+  });
 });

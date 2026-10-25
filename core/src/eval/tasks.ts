@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { acceptIssue } from "./match.ts";
 
 export interface RecallTurn {
   role: "user" | "assistant" | "tool";
@@ -39,16 +40,15 @@ export const SCORED_TASK_IDS = [
   "12-dog-weight-distractor",
 ] as const;
 
+/** Task 06. It always counts in the 10. */
+export const FORGET_TASK_ID = "06-forget-debt-to-daniel";
+
 /**
- * Forget is not implemented until #18. The task still runs and still
- * counts in the 10. A fail here is expected and labeled, not skipped.
+ * `forgottenTurnIds()` is #18. Until that method is on the store,
+ * task 06 fails with this label. It is not skipped.
  */
 export const KNOWN_BLOCKED_REASON =
-  "memory.forget is #18 and is not in this tree; this task counts in the 10 and is expected to fail";
-
-export function isKnownBlocked(id: string): boolean {
-  return id === "06-forget-debt-to-daniel";
-}
+  "SqliteMemoryStore.forgottenTurnIds() is not in this tree (#18); task 06 counts in the 10 and is expected to fail";
 
 export function loadTasks(tasksDir: string): RecallTask[] {
   const files = readdirSync(tasksDir)
@@ -60,6 +60,19 @@ export function loadTasks(tasksDir: string): RecallTask[] {
     ) as RecallTask;
     if (task.id !== file.replace(/\.json$/, "")) {
       throw new Error(`${file} id is ${task.id}`);
+    }
+    for (const entry of task.accept ?? []) {
+      const issue = acceptIssue(
+        {
+          expectedFact: task.expectedFact,
+          question: task.question,
+          mustNotContain: task.mustNotContain,
+        },
+        entry,
+      );
+      if (issue !== null) {
+        throw new Error(`${task.id} accept ${JSON.stringify(entry)} ${issue}`);
+      }
     }
     return task;
   });

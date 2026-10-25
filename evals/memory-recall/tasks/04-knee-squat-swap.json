@@ -2,6 +2,7 @@
   "id": "04-knee-squat-swap",
   "question": "Which leg exercise did I switch to because of my old injury?",
   "expectedFact": "box squats",
+  "accept": ["box squat"],
   "tests": "Paraphrase: the question shares no content words with the stored turn, so the vector leg must find it.",
   "mustNotContain": [],
   "setup": "S1 knee + box squats, S2 lunch idea; ask in S3",

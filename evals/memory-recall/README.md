@@ -19,18 +19,18 @@ Each file in `tasks/` and `examples/` is one JSON object matching [`task.schema.
 
 ## Pass check
 
-Normalize by trimming, lowercasing, and collapsing whitespace. A task passes when the answer contains `expectedFact` or any `accept` string, and contains no `mustNotContain` string. The runner also prints the retrieved memory ids for the question turn.
+Normalize by trimming, lowercasing, collapsing whitespace, and removing a space between a number and its unit. `170 g` and `170g` are the same string. A task passes when the answer contains `expectedFact` or any `accept` string, and contains no `mustNotContain` string. The runner also prints the retrieved memory ids for the question turn.
 
-The bar is 8 of 10 on `pnpm eval memory --real` (llama-server on `127.0.0.1:${COOKIE_LLAMA_PORT:-8080}`, embedder on `127.0.0.1:${COOKIE_EMBED_PORT:-8081}`). `pnpm eval memory --fake` uses a scripted model and a fake embedder. It proves the plumbing. A score under 8 does not fail that command.
+The bar is 8 of 10 on `pnpm eval memory --real`. That command needs an explicit llama port and embed port: `--llama-port` and `--embed-port`, or `COOKIE_LLAMA_PORT` and `COOKIE_EMBED_PORT`. It does not default to 8080 or 8081. Fixture assistant lines are replayed by a scripted stub. Reflect and the final question are the calls that reach the real model, at temperature 0. The evidence directory stores each server's `/props` and `/v1/models` response. `pnpm eval memory --fake` uses a scripted model and a fake embedder. It proves the plumbing. A score under 8 does not fail that command.
 
-`06-forget-debt-to-daniel` is known-blocked until `memory.forget` lands (#18). The runner still executes it, still counts it in the 10, and labels the result `known-blocked`. It is not skipped.
+`06-forget-debt-to-daniel` still runs and still counts in the 10. It passes only when `store.forgottenTurnIds()` includes the debt turn. Until that method exists it is labeled `known-blocked` and it is not skipped.
 
 ## Runner
 
 `pnpm eval memory --fake` and `pnpm eval memory --real` replay every scored task through the real core: `chat.send` on stdio, with `ChatLog` and the memory tools that exist in this tree. Each fixture session is its own `conversationId`. The question is a new conversation. Each task gets a new `COOKIE_DATA_DIR`.
 
-`COOKIE_REFLECT_IDLE_MS=0` makes the core call `Reflector` when a new conversation ends the previous session, before that turn is retrieved. That is the idle hook. Protocol 0.1 has no reflect message. The current reflector records a journal row. Fact extraction and `memory.forget` are still #18.
+`COOKIE_REFLECT_IDLE_MS=0` makes the core call `Reflector` when a new conversation ends the previous session, before that turn is retrieved. The call is the session id only. Protocol 0.1 has no reflect message. The current reflector records a journal row. When #18 is on main, that body becomes `runtime.reflector` (the same `LocalReflector` the idle scheduler uses) and this runner drops its copy of `readReflectIdleMs`.
 
-`COOKIE_LOOPBACK_ONLY=1` refuses a TCP connect whose host is not `127.0.0.1` or `::1`. A violation fails the run.
+`COOKIE_LOOPBACK_ONLY=1` refuses a TCP connect whose host is not `127.0.0.1` or `::1`. The core prints `cookie-core: loopback guard active` on stderr. A missing line fails the run, and so does a blocked connect.
 
 Evidence is written under `verify-evidence/m1-recall/` (gitignored): `summary.txt`, `report.json`, and one JSON file per task. That directory is not feature-verification evidence. `memory-recall` stays `planned` until a verify-cookie drive records it.

@@ -16,20 +16,34 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { LOOPBACK_GUARD_LINE } from "../loopback-guard.ts";
+import { SqliteMemoryStore } from "../memory/sqlite-store.ts";
 import { TYPE_STRIP_NODE_ARGS } from "../node-launch.ts";
 import { isRecord } from "../protocol/validate.ts";
 import { startLlamaStub } from "../verify-llama-stub.ts";
 import { startFakeEmbedder } from "./fake-embed.ts";
 import { answerMatches } from "./match.ts";
 import {
-  isKnownBlocked,
+  FORGET_TASK_ID,
   KNOWN_BLOCKED_REASON,
   loadTasks,
+  type RecallSession,
   type RecallTask,
   SCORED_TASK_IDS,
 } from "./tasks.ts";
 
 export const RECALL_BAR = 8;
+
+/**
+ * `--real` does not dial John's servers. Ports come from flags or env.
+ */
+export const REAL_PORTS_REQUIRED =
+  "--real needs --llama-port and --embed-port, or COOKIE_LLAMA_PORT and COOKIE_EMBED_PORT. It does not default to 8080 or 8081.";
+
+/** #18's reflect system prompt. A fixture reply must not answer it. */
+const REFLECT_MARK = "You extract memory for Cookie";
+
+const DEBT_TURN_NEEDLE = "owe Daniel $40";
 const CONVERSATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ANSWER_PREVIEW = 500;
 
@@ -88,6 +102,159 @@ export function scriptedAnswer(messages: unknown, script: Script): string {
   return retrieved.join("\n");
 }
 
+export function resolveRealPorts(
+  options: { llamaPort?: number; embedPort?: number },
+  env: NodeJS.ProcessEnv,
+): { llamaPort: number; embedPort: number } | { error: string } {
+  const llamaPort =
+    usablePort(options.llamaPort) ?? portFromEnv(env.COOKIE_LLAMA_PORT);
+  const embedPort =
+    usablePort(options.embedPort) ?? portFromEnv(env.COOKIE_EMBED_PORT);
+  if (llamaPort === null || embedPort === null) {
+    return { error: REAL_PORTS_REQUIRED };
+  }
+  return { llamaPort, embedPort };
+}
+
+function usablePort(port: number | undefined): number | null {
+  if (port === undefined) {
+    return null;
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+  return port;
+}
+
+function portFromEnv(raw: string | undefined): number | null {
+  if (raw === undefined || raw === "") {
+    return null;
+  }
+  if (!/^\d+$/.test(raw)) {
+    return null;
+  }
+  return usablePort(Number(raw));
+}
+
+/**
+ * Forward one completion to llama-server. Fixture replies never get here.
+ * `temperature` is 0 and streaming is off so the text is one JSON body.
+ */
+export async function completeAtTemperatureZero(
+  port: number,
+  body: Record<string, unknown>,
+): Promise<string> {
+  const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, temperature: 0, stream: false }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) {
+    throw new Error(`llama-server status ${response.status}`);
+  }
+  const parsed = (await response.json()) as {
+    choices?: Array<{ message?: { content?: unknown } }>;
+  };
+  const content = parsed.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new Error("llama-server reply has no content");
+  }
+  return content;
+}
+
+/** Save `/props` and `/v1/models` for one real server. A 404 is still saved. */
+export async function writeServerEvidence(
+  dir: string,
+  label: string,
+  port: number,
+): Promise<void> {
+  await writeEndpoint(dir, label, port, "/props");
+  await writeEndpoint(dir, label, port, "/v1/models");
+}
+
+async function writeEndpoint(
+  dir: string,
+  label: string,
+  port: number,
+  path: string,
+): Promise<void> {
+  const file = join(dir, `${label}${path.replace(/\//g, "-")}.json`);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    const body = await response.text();
+    writeFileSync(
+      file,
+      `${JSON.stringify({ status: response.status, body }, null, 2)}\n`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "request failed";
+    writeFileSync(file, `${JSON.stringify({ error: message }, null, 2)}\n`);
+  }
+}
+
+export function clearEvalDataDirs(dirs: readonly string[]): void {
+  for (const dir of dirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Delete every dir in `dirs` on SIGINT, SIGTERM, and an uncaught crash,
+ * then exit. `exit` is injectable so a test can emit the signal.
+ */
+export function attachEvalDataCleanup(
+  dirs: readonly string[],
+  exit: (code: number) => void = (code) => {
+    process.exit(code);
+  },
+): () => void {
+  const onStop = (): void => {
+    clearEvalDataDirs(dirs);
+    exit(1);
+  };
+  process.on("SIGINT", onStop);
+  process.on("SIGTERM", onStop);
+  process.on("uncaughtException", onStop);
+  return () => {
+    process.off("SIGINT", onStop);
+    process.off("SIGTERM", onStop);
+    process.off("uncaughtException", onStop);
+  };
+}
+
+/**
+ * Turn id `ChatLog` writes for a fixture user line.
+ * The count matches replay: a user turn, then its assistant line.
+ */
+export function storedTurnId(
+  sessions: readonly RecallSession[],
+  userContent: string,
+): string | null {
+  for (const session of sessions) {
+    let count = 0;
+    for (let index = 0; index < session.turns.length; index += 1) {
+      const turn = session.turns[index];
+      if (turn === undefined || turn.role !== "user") {
+        continue;
+      }
+      const next = session.turns[index + 1];
+      count += 1;
+      const id = `${session.id}-${count}-user`;
+      if (turn.content.includes(userContent)) {
+        return id;
+      }
+      if (next?.role === "assistant") {
+        count += 1;
+        index += 1;
+      }
+    }
+  }
+  return null;
+}
+
 export function evalExitCode(report: EvalReport): number {
   if (report.egressViolation || report.plumbingError) {
     return 1;
@@ -110,13 +277,15 @@ export async function runMemoryEval(
   let plumbingError = loaded.error !== null || idError !== null;
 
   const servers = await startServers(options);
+  const owned: string[] = [];
+  const detach = attachEvalDataCleanup(owned);
   if (servers.error !== null) {
     plumbingError = true;
   }
   try {
     if (servers.llamaPort !== null && servers.embedPort !== null) {
       for (const task of tasks) {
-        const result = await runTask(task, options, servers);
+        const result = await runTask(task, options, servers, owned);
         results.push(result);
         if (result.error !== null) {
           plumbingError = true;
@@ -128,6 +297,10 @@ export async function runMemoryEval(
       }
     }
   } finally {
+    detach();
+    if (!options.keepData) {
+      clearEvalDataDirs(owned);
+    }
     await servers.close();
   }
 
@@ -176,25 +349,49 @@ interface Servers {
 async function startServers(options: RunMemoryEvalOptions): Promise<Servers> {
   const script: Script = { text: null };
   if (options.mode === "real") {
-    const llamaPort = options.llamaPort ?? readPort("COOKIE_LLAMA_PORT", 8080);
-    const embedPort = options.embedPort ?? readPort("COOKIE_EMBED_PORT", 8081);
-    const llamaUp = await health(llamaPort);
-    const embedUp = await health(embedPort);
+    const ports = resolveRealPorts(options, process.env);
+    if ("error" in ports) {
+      return {
+        llamaPort: null,
+        embedPort: null,
+        script,
+        error: ports.error,
+        close: async () => undefined,
+      };
+    }
+    const llamaUp = await health(ports.llamaPort);
+    const embedUp = await health(ports.embedPort);
     if (!llamaUp || !embedUp) {
       return {
         llamaPort: null,
         embedPort: null,
         script,
-        error: realDownMessage(llamaPort, llamaUp, embedPort, embedUp),
+        error: realDownMessage(
+          ports.llamaPort,
+          llamaUp,
+          ports.embedPort,
+          embedUp,
+        ),
         close: async () => undefined,
       };
     }
+    await writeServerEvidence(options.evidenceDir, "llama", ports.llamaPort);
+    await writeServerEvidence(options.evidenceDir, "embed", ports.embedPort);
+    // The core talks to the stub. Fixture assistant lines are the script.
+    // Reflect and the final question have no script, so they are forwarded
+    // to the real server at temperature 0.
+    const llama = await startLlamaStub(0, {
+      replyText: (messages, body) =>
+        scriptedOrReal(messages, body, script, ports.llamaPort),
+    });
     return {
-      llamaPort,
-      embedPort,
+      llamaPort: llama.port,
+      embedPort: ports.embedPort,
       script,
       error: null,
-      close: async () => undefined,
+      close: async () => {
+        await llama.close();
+      },
     };
   }
   const embedder = await startFakeEmbedder(0);
@@ -213,10 +410,27 @@ async function startServers(options: RunMemoryEvalOptions): Promise<Servers> {
   };
 }
 
+function scriptedOrReal(
+  messages: unknown,
+  body: Record<string, unknown> | undefined,
+  script: Script,
+  realPort: number,
+): string | Promise<string> {
+  if (script.text !== null && !isReflectPrompt(messages)) {
+    return script.text;
+  }
+  return completeAtTemperatureZero(realPort, body ?? { messages });
+}
+
+function isReflectPrompt(messages: unknown): boolean {
+  return JSON.stringify(messages).includes(REFLECT_MARK);
+}
+
 async function runTask(
   task: RecallTask,
   options: RunMemoryEvalOptions,
   servers: Servers,
+  owned: string[],
 ): Promise<TaskResult> {
   const llamaPort = servers.llamaPort;
   const embedPort = servers.embedPort;
@@ -224,6 +438,7 @@ async function runTask(
     return failed(task, "model servers did not start", []);
   }
   const dataDir = await mkdtemp(join(tmpdir(), "cookie-recall-"));
+  owned.push(dataDir);
   const clockFile = join(dataDir, "clock");
   const traceFile = join(dataDir, "retrieval.jsonl");
   const egressLog = join(dataDir, "egress.log");
@@ -269,12 +484,37 @@ async function runTask(
   if (egress !== null) {
     error = error === null ? egress : `${error}; ${egress}`;
   }
+  if (!stderr.includes(LOOPBACK_GUARD_LINE)) {
+    const missing = "loopback guard was not reported";
+    error = error === null ? missing : `${error}; ${missing}`;
+  }
   const journalRows = countJournal(dataDir);
+  const forgotten =
+    task.id === FORGET_TASK_ID ? probeForgottenTurnIds(dataDir) : undefined;
   if (!options.keepData) {
     rmSync(dataDir, { recursive: true, force: true });
+    const at = owned.indexOf(dataDir);
+    if (at >= 0) {
+      owned.splice(at, 1);
+    }
   }
-  const knownBlocked = isKnownBlocked(task.id);
-  const pass = error === null && egress === null && answerMatches(task, answer);
+  const answerPass =
+    error === null && egress === null && answerMatches(task, answer);
+  let knownBlocked = false;
+  let pass = answerPass;
+  if (task.id === FORGET_TASK_ID) {
+    if (forgotten === null) {
+      knownBlocked = true;
+      pass = false;
+    } else {
+      const debtId = storedTurnId(task.sessions, DEBT_TURN_NEEDLE);
+      pass =
+        answerPass &&
+        forgotten !== undefined &&
+        debtId !== null &&
+        forgotten.includes(debtId);
+    }
+  }
   return {
     id: task.id,
     pass,
@@ -304,7 +544,11 @@ async function replaySession(
       continue;
     }
     const next = session.turns[index + 1];
-    // A fixture user turn with no assistant line stores only the user text.
+    // Both modes replay the fixture assistant line through the stub.
+    // Reflect and the final question leave `script.text` null, so --real
+    // forwards those completions at temperature 0.
+    // TODO(#18): script 06's forget as a memory.forget tool call. The
+    // assistant line above does not call the tool.
     script.text = next?.role === "assistant" ? next.content : "";
     if (next?.role === "assistant") {
       index += 1;
@@ -364,12 +608,11 @@ function turnTimeout(mode: "fake" | "real"): number {
 }
 
 function failed(task: RecallTask, error: string, ids: string[]): TaskResult {
-  const knownBlocked = isKnownBlocked(task.id);
   return {
     id: task.id,
     pass: false,
-    knownBlocked,
-    knownBlockedReason: knownBlocked ? KNOWN_BLOCKED_REASON : null,
+    knownBlocked: false,
+    knownBlockedReason: null,
     countsTowardDenominator: true,
     ids,
     answer: "",
@@ -453,7 +696,7 @@ function formatReport(report: EvalReport, setupError: string | null): string {
     `score ${report.passed}/${report.total}`,
     `bar ${report.bar}/10`,
     "denominator 10 (tasks 03-12)",
-    "known-blocked 06-forget-debt-to-daniel counts toward the 8/10 denominator and is not skipped",
+    "06-forget-debt-to-daniel counts in the 10. It is known-blocked when forgottenTurnIds() is missing, and it is not skipped.",
   ];
   if (setupError !== null) {
     lines.push(`error ${setupError}`);
@@ -526,13 +769,33 @@ function expectIds(
   return null;
 }
 
-function readPort(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") {
-    return fallback;
+/**
+ * `store.forgottenTurnIds()` with no callback.
+ * Null means the method is not on this store (#18 has not landed).
+ */
+function probeForgottenTurnIds(dataDir: string): string[] | null {
+  const path = join(dataDir, "cookie.db");
+  let store: SqliteMemoryStore;
+  try {
+    store = SqliteMemoryStore.open(path);
+  } catch {
+    return null;
   }
-  const port = Number(raw);
-  return Number.isInteger(port) && port > 0 ? port : fallback;
+  try {
+    const candidate = store as SqliteMemoryStore & {
+      forgottenTurnIds?: () => string[];
+    };
+    if (typeof candidate.forgottenTurnIds !== "function") {
+      return null;
+    }
+    const ids = candidate.forgottenTurnIds();
+    if (!Array.isArray(ids)) {
+      return null;
+    }
+    return ids.filter((id): id is string => typeof id === "string");
+  } finally {
+    store.close();
+  }
 }
 
 async function health(port: number): Promise<boolean> {

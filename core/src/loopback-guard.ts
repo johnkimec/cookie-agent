@@ -10,6 +10,9 @@
 import { appendFileSync } from "node:fs";
 import { Socket } from "node:net";
 
+/** Stderr line the eval requires when `COOKIE_LOOPBACK_ONLY=1`. */
+export const LOOPBACK_GUARD_LINE = "cookie-core: loopback guard active";
+
 type Connect = Socket["connect"];
 
 let original: Connect | null = null;

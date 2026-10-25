@@ -2,6 +2,7 @@
   "id": "09-cookie-grooming-time",
   "question": "What time is my dog Cookie's grooming appointment?",
   "expectedFact": "10:30",
+  "accept": ["10:30am"],
   "tests": "Date/time: an absolute appointment time for John's dog Cookie (not the assistant).",
   "mustNotContain": [],
   "setup": "S1 grooming booking, S2 llama-server question; ask in S3",

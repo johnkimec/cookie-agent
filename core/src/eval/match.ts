@@ -1,13 +1,22 @@
-/** Case-insensitive, whitespace-collapsed substring. */
+/**
+ * Case-insensitive, whitespace-collapsed substring.
+ * A space between a number and its unit is removed, so "170 g" and
+ * "170g" are the same needle.
+ */
 
 export function normalizeMatchText(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  return value
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/(\d)\s+(?=[a-z])/g, "$1");
 }
 
 export interface AnswerCheck {
   expectedFact: string;
   accept?: readonly string[];
   mustNotContain?: readonly string[];
+  question?: string;
 }
 
 /**
@@ -22,6 +31,34 @@ export function answerMatches(check: AnswerCheck, answer: string): boolean {
     contains(haystack, item),
   );
   return hit && !blocked;
+}
+
+/**
+ * Why an `accept` entry is rejected, or null when it may ship.
+ * After normalizing it must be at least 3 characters, contain a digit
+ * or a word of 4 or more letters, and not appear in the question or
+ * in any `mustNotContain` string.
+ */
+export function acceptIssue(check: AnswerCheck, entry: string): string | null {
+  const normalized = normalizeMatchText(entry);
+  if (normalized.length < 3) {
+    return "shorter than 3 characters";
+  }
+  const hasDigit = /\d/.test(normalized);
+  const hasWord = /[a-z]{4,}/.test(normalized);
+  if (!hasDigit && !hasWord) {
+    return "needs a digit or a word of 4 or more letters";
+  }
+  const question = normalizeMatchText(check.question ?? "");
+  if (question.includes(normalized)) {
+    return "appears in the question";
+  }
+  for (const blocked of check.mustNotContain ?? []) {
+    if (normalizeMatchText(blocked).includes(normalized)) {
+      return "appears in mustNotContain";
+    }
+  }
+  return null;
 }
 
 function contains(haystack: string, needle: string): boolean {

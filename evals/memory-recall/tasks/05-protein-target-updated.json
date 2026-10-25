@@ -2,6 +2,7 @@
   "id": "05-protein-target-updated",
   "question": "What's my daily protein target right now?",
   "expectedFact": "170 g",
+  "accept": ["170g"],
   "tests": "Update: a later session changes the number; the newer value (170 g) must win over the older 150 g.",
   "mustNotContain": [
     "150 g"

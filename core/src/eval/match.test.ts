@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerMatches } from "./match.ts";
+import { acceptIssue, answerMatches } from "./match.ts";
 
 describe("recall answer match", () => {
   it("accepts a case and whitespace variant, and an alternate", () => {
@@ -30,5 +30,45 @@ describe("recall answer match", () => {
     expect(answerMatches({ expectedFact: "Kovacs" }, "Jordan Park")).toBe(
       false,
     );
+  });
+
+  it("treats a number and its unit as the same with or without a space", () => {
+    expect(
+      answerMatches({ expectedFact: "170 g" }, "Daily target is 170g."),
+    ).toBe(true);
+    expect(
+      answerMatches(
+        { expectedFact: "170 g", mustNotContain: ["150 g"] },
+        "It is 170g, down from 150g.",
+      ),
+    ).toBe(false);
+    expect(
+      answerMatches(
+        { expectedFact: "4.2 kg", mustNotContain: ["5.1 kg"] },
+        "Cookie weighs 4.2kg.",
+      ),
+    ).toBe(true);
+    expect(
+      answerMatches(
+        { expectedFact: "box squats", accept: ["box squat"] },
+        "Switched to a box squat.",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects an accept entry that is too weak or already in the question", () => {
+    const check = {
+      expectedFact: "170 g",
+      question: "What's my daily protein target right now?",
+      mustNotContain: ["150 g"],
+    };
+    expect(acceptIssue(check, "170g")).toBeNull();
+    expect(acceptIssue(check, "ab")).toMatch(/3 characters/);
+    expect(acceptIssue(check, "xyz")).toMatch(/digit or a word/);
+    expect(
+      acceptIssue({ ...check, question: "Did I say 170g today?" }, "170g"),
+    ).toMatch(/question/);
+    expect(acceptIssue(check, "150g")).toMatch(/mustNotContain/);
+    expect(acceptIssue(check, "box squat")).toBeNull();
   });
 });

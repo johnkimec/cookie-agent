@@ -143,7 +143,7 @@ Changes to existing files:
 
 ### Recall eval
 
-`evals/memory-recall/`: 10 scored tasks (ids 03–12) plus two unscored samples in `examples/`. Pass is a case-insensitive, whitespace-normalized substring: `expectedFact` or any `accept` string, and none of `mustNotContain`. The runner prints retrieved ids and the answer. The exit bar is 8 of 10 on `pnpm eval memory --real` (Qwen on John's Mac, zero egress). `pnpm eval memory --fake` checks plumbing and does not enforce the score. `06-forget-debt-to-daniel` stays in the denominator and is known-blocked until `memory.forget`.
+`evals/memory-recall/`: 10 scored tasks (ids 03–12) plus two unscored samples in `examples/`. Pass is a case-insensitive, whitespace-normalized substring: `expectedFact` or any `accept` string, and none of `mustNotContain`. The runner prints retrieved ids and the answer. The exit bar is 8 of 10 on `pnpm eval memory --real` (Qwen on John's Mac, zero egress). `pnpm eval memory --fake` checks plumbing and does not enforce the score. `06-forget-debt-to-daniel` stays in the denominator. It passes only when `forgottenTurnIds()` includes the debt turn, and it is known-blocked while that method is missing. `--real` takes explicit llama and embed ports and does not default to 8080 or 8081.
 
 ## Implementation plan
 

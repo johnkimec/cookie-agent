@@ -11,7 +11,7 @@ import {
   messageErrors,
 } from "../protocol/validate.ts";
 import { ChatLog } from "./chat-log.ts";
-import { JournalReflector } from "./reflect.ts";
+import { JournalReflector, type Reflector } from "./reflect.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
 import type { Memory } from "./types.ts";
 
@@ -206,9 +206,16 @@ describe("chat log wired into the core", () => {
     const path = tempDbPath();
     const seen: ModelMessage[][] = [];
     const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
-    const reflector = new JournalReflector(store.database(), () =>
+    const journal = new JournalReflector(store.database(), () =>
       store.currentTime(),
     );
+    const reflected: Array<{ id: string; opts: unknown }> = [];
+    const reflector: Reflector = {
+      async reflect(sessionId, opts) {
+        reflected.push({ id: sessionId, opts });
+        await journal.reflect(sessionId);
+      },
+    };
     const harness = coreFor(
       new ChatLog(store, null, null, { reflector }),
       seen,
@@ -224,6 +231,7 @@ describe("chat log wired into the core", () => {
       .prepare("SELECT entry FROM journal")
       .all() as Array<{ entry: string }>;
     expect(rows.map((row) => row.entry)).toEqual(["reflected conv-a"]);
+    expect(reflected).toEqual([{ id: "conv-a", opts: undefined }]);
     store.close();
   });
 

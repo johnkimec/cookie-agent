@@ -14,7 +14,10 @@ import type { SqliteMemoryStore } from "./sqlite-store.ts";
 import type { Memory, TurnRecord } from "./types.ts";
 
 export interface ChatLogHooks {
-  /** Set when `COOKIE_REFLECT_IDLE_MS` is set. Otherwise null. */
+  /**
+   * Set when `COOKIE_REFLECT_IDLE_MS` is a non-empty string.
+   * Unset leaves this null. `"0"` still installs the hook.
+   */
   reflector?: Reflector | null;
   /** `COOKIE_RETRIEVAL_TRACE`. One JSON line per retrieve. */
   tracePath?: string | null;
@@ -165,10 +168,12 @@ export class ChatLog implements ConversationHistory {
 
   /**
    * A new conversation id ends the previous session. When a reflector
-   * is installed, that ended session is reflected before this turn's
-   * retrieval. The idle timer itself is not in the core. The eval sets
-   * `COOKIE_REFLECT_IDLE_MS` and treats the next conversation as the
-   * idle boundary.
+   * is installed, each ended session is reflected once, before this
+   * turn's retrieval. The call is the session id only. The chat abort
+   * signal is not passed: that signal is what cancels the idle timer.
+   * The eval sets `COOKIE_REFLECT_IDLE_MS` and treats the next
+   * conversation as the idle boundary. When #18 is on main this calls
+   * `runtime.reflector`, the same `LocalReflector` the scheduler uses.
    */
   private async beginAndReflect(conversationId: string) {
     const reflector = this.reflector;
