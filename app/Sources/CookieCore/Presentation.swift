@@ -12,6 +12,8 @@ public enum CookieAX {
     public static let popupInput = "cookie.popup.input"
     public static let popupMascot = "cookie.popup.mascot"
     public static let popupSend = "cookie.popup.send"
+    /// Same control as `popupSend`, while a reply is arriving.
+    public static let popupStop = "cookie.popup.stop"
     public static let popupRefusal = "cookie.popup.refusal"
     public static let popupLoading = "cookie.popup.loading"
     public static func turnYou(_ index: Int) -> String { "cookie.turn.you.\(index)" }
@@ -45,6 +47,8 @@ public enum CookieCopy {
     public static let pnpmNotFound = "🐾 Cookie · pnpm not found"
     /// Placeholder menu copy, pending John's review.
     public static let commandNotFound = "🐾 Cookie · core can't start"
+    /// Send control while a reply is arriving. Placeholder copy, pending John's review.
+    public static let stop = "Stop"
 }
 
 public enum ShellLaunchFailure: Equatable, Sendable {
@@ -173,6 +177,39 @@ public func presentChatSendFailure(code: Int?, runtime: RuntimeState) -> ChatSen
 
 public func sendEnabled(runtime: RuntimeState) -> Bool {
     runtime != .loading
+}
+
+/// The ⏎ control. While a reply is arriving it is Stop and stays enabled,
+/// including if the runtime flips to `loading` mid-reply.
+public struct PopupSendControl: Equatable, Sendable {
+    public var title: String
+    public var identifier: String
+    public var enabled: Bool
+    public var stopsReply: Bool
+
+    public init(title: String, identifier: String, enabled: Bool, stopsReply: Bool) {
+        self.title = title
+        self.identifier = identifier
+        self.enabled = enabled
+        self.stopsReply = stopsReply
+    }
+}
+
+public func popupSendControl(runtime: RuntimeState, replyInFlight: Bool) -> PopupSendControl {
+    if replyInFlight {
+        return PopupSendControl(
+            title: CookieCopy.stop,
+            identifier: CookieAX.popupStop,
+            enabled: true,
+            stopsReply: true
+        )
+    }
+    return PopupSendControl(
+        title: "⏎",
+        identifier: CookieAX.popupSend,
+        enabled: sendEnabled(runtime: runtime),
+        stopsReply: false
+    )
 }
 
 public func popupLoadingLine(runtime: RuntimeState) -> String? {
