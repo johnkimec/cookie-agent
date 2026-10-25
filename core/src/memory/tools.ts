@@ -18,6 +18,7 @@ import {
   isSecret,
 } from "./policy.ts";
 import type { MemoryStore } from "./store.ts";
+import type { TurnRecord } from "./types.ts";
 import type { VectorIndex } from "./vectors.ts";
 
 export const MEMORY_REMEMBER_TOOL = "memory.remember";
@@ -37,6 +38,13 @@ export type MemoryToolState = {
 
 /** Text forget needs at least this many characters. */
 export const MIN_FORGET_TEXT = 4;
+
+/** More distinct turn texts than this is ambiguous and deletes nothing. */
+export const FORGET_TURN_CAP = 5;
+
+/** A request-only hit tells the model to name the fact or the turn. */
+export const FORGET_NAME_THE_THING =
+  "Name the fact or the turn to forget. The request itself is not a match.";
 
 export interface MemoryToolDeps {
   derived: DerivedMemoryStore;
@@ -106,7 +114,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolSet {
     }),
     [MEMORY_FORGET_TOOL]: tool({
       description:
-        "Forget a fact John asked to drop. Deletes that fact, its profile row, and derived rows built from its turn. When no fact matches, an exact or unique turn or chunk match is forgotten the same way. Raw turns stay. An exact match is forgotten, and any other partial matches are returned as candidates. If several matches and none is exact, returns the candidates and deletes nothing.",
+        "Forget a fact John asked to drop. Deletes that fact, the profile row with the same value, and derived rows built from its source turn. A profile row is also dropped when its value contains a secret number from the fact or that source turn, or when the request names the row's key or value exactly. An unpinned row whose source turn was forgotten is dropped. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way, and a chunk marks every turn it covers. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
       inputSchema: forgetInput,
       execute: (input) => forgetFact(deps, input),
     }),
@@ -183,7 +191,7 @@ async function forgetFact(
   input: ForgetInput,
 ): Promise<
   | { forgotten: true; factIds: string[]; candidates?: ForgetCandidate[] }
-  | { forgotten: false; reason: "not found" | "too short" }
+  | { forgotten: false; reason: "not found" | "too short"; detail?: string }
   | {
       forgotten: false;
       reason: "ambiguous";
@@ -217,6 +225,13 @@ async function forgetFact(
     if (fallback.kind === "none") {
       return { forgotten: false, reason: "not found" };
     }
+    if (fallback.kind === "request") {
+      return {
+        forgotten: false,
+        reason: "not found",
+        detail: FORGET_NAME_THE_THING,
+      };
+    }
     return commitForget(
       deps,
       [],
@@ -224,10 +239,14 @@ async function forgetFact(
       fallback.turnIds,
       now,
       fallback.candidates,
+      input.text ?? "",
+      fallback.secretTexts,
+      fallback.sourceTurns,
     );
   }
   const facts = match.facts;
   const keys = keyStrings(facts, input.text);
+  const sourceTurns = factSourceTurns(facts);
   return commitForget(
     deps,
     facts,
@@ -235,6 +254,9 @@ async function forgetFact(
     turnsToForget(deps, facts, keys),
     now,
     match.candidates,
+    input.text ?? "",
+    secretTextsFor(deps, facts, sourceTurns),
+    sourceTurns,
   );
 }
 
@@ -245,6 +267,9 @@ async function commitForget(
   turnIds: Set<string>,
   now: number,
   candidates: ForgetCandidate[],
+  needle: string,
+  secretTexts: readonly string[],
+  sourceTurns: ReadonlySet<string>,
 ): Promise<
   | { forgotten: true; factIds: string[]; candidates?: ForgetCandidate[] }
   | { forgotten: false; reason: "not found" }
@@ -266,17 +291,13 @@ async function commitForget(
   const sessions = sessionsTouching(deps.store, turnIds, texts, deps.derived);
   const factIds = facts.map((fact) => fact.id);
   const forgottenAt = new Date(now).toISOString();
-  const forgottenTurns = new Set<string>([
-    ...deps.derived.forgottenTurnIds(),
-    ...turnIds,
-  ]);
   // TODO: a hard-erase option deletes the raw turn as well, including
   // its `turns_fts` row. John wants to test this flow first. Until then
   // the turn stays in `turns` and `turns_fts`, is kept as a dated entry,
   // and is never recalled. Retrieval filters the forgotten ids.
   let vectorDelete: Promise<void> = Promise.resolve();
   deps.derived.transaction(() => {
-    dropProfileFor(deps.derived, facts, keys, forgottenTurns);
+    dropProfileFor(deps.derived, facts, needle, sourceTurns, secretTexts);
     for (const fact of doomed) {
       deps.derived.deleteFact(fact.id);
     }
@@ -365,14 +386,19 @@ type TurnFallback =
       keys: string[];
       turnIds: Set<string>;
       candidates: ForgetCandidate[];
+      secretTexts: string[];
+      sourceTurns: Set<string>;
     }
   | { kind: "ambiguous"; candidates: ForgetCandidate[] }
+  | { kind: "request" }
   | { kind: "none" };
 
 /**
  * No fact matched. The same exact / unique / ambiguous rule applies to
- * turns, and then to chunks. The forget-request turn is not a second
- * candidate. A chosen turn's assistant reply is marked with it.
+ * earlier turns, and then to chunks. The forget-request turn and its
+ * reply are never a match. A request-only hit forgets nothing. A chosen
+ * chunk marks every turn in its span. More than FORGET_TURN_CAP distinct
+ * texts is ambiguous.
  */
 function locateTurnOrChunk(
   deps: MemoryToolDeps,
@@ -383,7 +409,7 @@ function locateTurnOrChunk(
     return { kind: "none" };
   }
   const forgotten = new Set(deps.derived.forgottenTurnIds());
-  const requestId = deps.state.sourceTurnId;
+  const blocked = requestTurnIds(deps);
   const others: ForgetCandidate[] = [];
   let requestHit = false;
   for (const session of deps.store.listSessions()) {
@@ -394,7 +420,7 @@ function locateTurnOrChunk(
       if (!turn.content.toLowerCase().includes(needle)) {
         continue;
       }
-      if (turn.id === requestId) {
+      if (blocked.has(turn.id)) {
         requestHit = true;
         continue;
       }
@@ -405,21 +431,19 @@ function locateTurnOrChunk(
   if (turnClass.kind === "ambiguous") {
     return { kind: "ambiguous", candidates: turnClass.candidates };
   }
-  if (turnClass.kind === "chosen" || requestHit) {
-    const chosen = turnClass.kind === "chosen" ? turnClass.chosen : [];
-    const keys = keyStrings([], needleRaw);
-    for (const hit of chosen) {
-      pushKey(keys, hit.text);
-    }
+  if (turnClass.kind === "chosen") {
+    const sourceTurns = new Set(turnClass.chosen.map((hit) => hit.id));
     return {
       kind: "forget",
-      keys,
-      turnIds: turnIdsForHits(deps, chosen, requestHit),
-      candidates: turnClass.kind === "chosen" ? turnClass.candidates : [],
+      keys: keyStrings([], needleRaw),
+      turnIds: turnIdsForHits(deps, turnClass.chosen, true),
+      candidates: turnClass.candidates,
+      secretTexts: contentsOf(deps, sourceTurns),
+      sourceTurns,
     };
   }
   const chunks = deps.derived.listChunks().filter((chunk) => {
-    if (chunk.firstTurn === requestId && chunk.lastTurn === requestId) {
+    if (chunkIsRequestOnly(deps, chunk, blocked)) {
       return false;
     }
     return chunk.text.toLowerCase().includes(needle);
@@ -432,17 +456,40 @@ function locateTurnOrChunk(
     return { kind: "ambiguous", candidates: chunkClass.candidates };
   }
   if (chunkClass.kind === "none") {
-    return { kind: "none" };
+    return requestHit ? { kind: "request" } : { kind: "none" };
+  }
+  const sourceTurns = new Set<string>();
+  const secretTexts: string[] = [];
+  for (const hit of chunkClass.chosen) {
+    secretTexts.push(hit.text);
+    const chunk = chunks.find((item) => item.chunkId === hit.id);
+    if (chunk === undefined) {
+      continue;
+    }
+    for (const turn of turnsCovered(deps.store, chunk)) {
+      if (blocked.has(turn.id)) {
+        continue;
+      }
+      sourceTurns.add(turn.id);
+    }
+  }
+  const turnIds = new Set(sourceTurns);
+  pairReplies(deps.store, turnIds);
+  for (const id of blocked) {
+    turnIds.add(id);
   }
   const keys = keyStrings([], needleRaw);
   for (const hit of chunkClass.chosen) {
     pushKey(keys, hit.text);
   }
+  secretTexts.push(...contentsOf(deps, sourceTurns));
   return {
     kind: "forget",
     keys,
-    turnIds: turnIdsForHits(deps, [], false),
+    turnIds,
     candidates: chunkClass.candidates,
+    secretTexts,
+    sourceTurns,
   };
 }
 
@@ -463,8 +510,27 @@ function classifyTextHits(
   if (hits.length === 0) {
     return { kind: "none" };
   }
-  const exact = hits.filter((hit) => hit.text.trim().toLowerCase() === needle);
-  if (exact.length > 0) {
+  const groups = new Map<string, ForgetCandidate[]>();
+  for (const hit of hits) {
+    const key = hit.text.trim().toLowerCase();
+    const group = groups.get(key);
+    if (group === undefined) {
+      groups.set(key, [hit]);
+    } else {
+      group.push(hit);
+    }
+  }
+  const representatives = [...groups.values()].flatMap((group) =>
+    group[0] === undefined ? [] : [group[0]],
+  );
+  if (groups.size > FORGET_TURN_CAP) {
+    return {
+      kind: "ambiguous",
+      candidates: representatives.slice(0, FORGET_TURN_CAP),
+    };
+  }
+  const exact = groups.get(needle.trim().toLowerCase());
+  if (exact !== undefined) {
     const ids = new Set(exact.map((hit) => hit.id));
     return {
       kind: "chosen",
@@ -472,18 +538,16 @@ function classifyTextHits(
       candidates: hits.filter((hit) => !ids.has(hit.id)),
     };
   }
-  if (hits.length === 1) {
-    const only = hits[0];
-    return only === undefined
-      ? { kind: "none" }
-      : { kind: "chosen", chosen: [only], candidates: [] };
+  if (groups.size === 1) {
+    return { kind: "chosen", chosen: hits, candidates: [] };
   }
-  return { kind: "ambiguous", candidates: hits };
+  return { kind: "ambiguous", candidates: representatives };
 }
 
 /**
- * Chosen turns and each assistant reply. The forget request is included
- * when its own text matched, so an older unrelated turn is not marked.
+ * Chosen turns and each assistant reply. A successful forget also marks
+ * the request turn so that command is not replayed. The request is not
+ * a source turn and is not a match.
  */
 function turnIdsForHits(
   deps: MemoryToolDeps,
@@ -499,6 +563,93 @@ function turnIdsForHits(
   }
   pairReplies(deps.store, turnIds);
   return turnIds;
+}
+
+function factSourceTurns(facts: readonly FactRecord[]): Set<string> {
+  const ids = new Set<string>();
+  for (const fact of facts) {
+    if (fact.sourceTurn !== null && fact.sourceTurn.length > 0) {
+      ids.add(fact.sourceTurn);
+    }
+  }
+  return ids;
+}
+
+function secretTextsFor(
+  deps: MemoryToolDeps,
+  facts: readonly FactRecord[],
+  sourceTurns: ReadonlySet<string>,
+): string[] {
+  const blocked = requestTurnIds(deps);
+  const spoken = new Set([...sourceTurns].filter((id) => !blocked.has(id)));
+  return [...facts.map((fact) => fact.text), ...contentsOf(deps, spoken)];
+}
+
+function contentsOf(deps: MemoryToolDeps, ids: ReadonlySet<string>): string[] {
+  if (ids.size === 0) {
+    return [];
+  }
+  const texts: string[] = [];
+  for (const session of deps.store.listSessions()) {
+    for (const turn of deps.store.recentTurns(session.id, 10_000)) {
+      if (ids.has(turn.id)) {
+        texts.push(turn.content);
+      }
+    }
+  }
+  return texts;
+}
+
+/** The forget-request turn and its reply, when that reply is already stored. */
+function requestTurnIds(deps: MemoryToolDeps): Set<string> {
+  const ids = new Set<string>();
+  const requestId = deps.state.sourceTurnId;
+  if (requestId === null || requestId.length === 0) {
+    return ids;
+  }
+  ids.add(requestId);
+  const reply = pairedAssistant(deps.store, requestId);
+  if (reply !== null) {
+    ids.add(reply);
+  }
+  return ids;
+}
+
+function chunkIsRequestOnly(
+  deps: MemoryToolDeps,
+  chunk: ChunkRecord,
+  blocked: ReadonlySet<string>,
+): boolean {
+  const covered = turnsCovered(deps.store, chunk);
+  if (covered.length === 0) {
+    return (
+      chunk.firstTurn !== null &&
+      blocked.has(chunk.firstTurn) &&
+      (chunk.lastTurn === null || blocked.has(chunk.lastTurn))
+    );
+  }
+  return covered.every((turn) => blocked.has(turn.id));
+}
+
+function turnsCovered(store: MemoryStore, chunk: ChunkRecord): TurnRecord[] {
+  if (chunk.sessionId === null) {
+    return [];
+  }
+  const turns = store.recentTurns(chunk.sessionId, 10_000);
+  const first = chunk.firstTurn ?? chunk.lastTurn;
+  const last = chunk.lastTurn ?? chunk.firstTurn;
+  if (first === null || last === null) {
+    return [];
+  }
+  const ends = turns.filter((turn) => turn.id === first || turn.id === last);
+  if (ends.length === 0) {
+    return [];
+  }
+  const start = Math.min(...ends.map((turn) => turn.createdAt));
+  const end = Math.max(...ends.map((turn) => turn.createdAt));
+  return turns.filter(
+    (turn) => turn.createdAt >= start && turn.createdAt <= end,
+  );
 }
 
 function pairReplies(store: MemoryStore, turnIds: Set<string>): void {
@@ -782,13 +933,13 @@ export function tombstone(
 function dropProfileFor(
   derived: DerivedMemoryStore,
   facts: readonly FactRecord[],
-  keys: readonly string[],
-  forgottenTurns: ReadonlySet<string>,
+  needle: string,
+  sourceTurns: ReadonlySet<string>,
+  secretTexts: readonly string[],
 ): void {
   const rows = derived.listProfile();
-  const nameTokens = profileNameTokens(rows);
   const next = rows.filter(
-    (row) => !profileRowDropped(row, facts, keys, forgottenTurns, nameTokens),
+    (row) => !profileRowDropped(row, facts, needle, sourceTurns, secretTexts),
   );
   if (next.length === rows.length) {
     return;
@@ -796,253 +947,77 @@ function dropProfileFor(
   derived.replaceProfile(next);
 }
 
-const NAME_KEYS = new Set([
-  "name",
-  "full_name",
-  "first_name",
-  "last_name",
-  "given_name",
-  "family_name",
-]);
-
-/** Tokens from profile rows that store John's name. */
-export function profileNameTokens(rows: readonly ProfileRecord[]): Set<string> {
-  const out = new Set<string>();
-  for (const row of rows) {
-    const key = row.key.trim().toLowerCase();
-    if (!NAME_KEYS.has(key) && !key.endsWith("_name")) {
-      continue;
-    }
-    for (const token of row.value.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
-      if (token.length >= 2) {
-        out.add(token);
-      }
-    }
-  }
-  return out;
-}
-
 /**
- * A pinned row drops only when its key matches the forget, or a
- * forgotten fact contains its value. An unpinned row also drops when
- * its source turn was forgotten, or when its value holds a secret
- * token from the forget (a digit run of 3 or more that is not a year,
- * or a rare word). The profile name is not a secret token. An active
- * sibling fact on that turn still stays.
+ * Drop a row only when its value contains a secret number, the needle
+ * or a forgotten fact names the key or the value exactly, or the row
+ * is unpinned and its source turn is a forgotten source turn. Shared
+ * words, names, and years are not secrets.
  */
 export function profileRowDropped(
   row: ProfileRecord,
   facts: readonly FactRecord[],
-  keys: readonly string[],
-  forgottenTurns: ReadonlySet<string>,
-  nameTokens: ReadonlySet<string>,
+  needle: string,
+  sourceTurns: ReadonlySet<string>,
+  secretTexts: readonly string[],
 ): boolean {
-  if (profileKeyMatches(row.key, keys)) {
+  if (valueHasSecret(row.value, secretTexts)) {
     return true;
   }
-  if (
-    facts.some((fact) =>
-      factContainsProfileValue(row.value, fact.text, nameTokens),
-    ) ||
-    keys.some((key) => factContainsProfileValue(row.value, key, nameTokens))
-  ) {
+  if (namesRow(row, needle) || facts.some((fact) => namesRow(row, fact.text))) {
     return true;
   }
-  if (row.pinned) {
-    return false;
-  }
-  if (row.sourceTurn !== null && forgottenTurns.has(row.sourceTurn)) {
-    return true;
-  }
-  const value = row.value.trim().toLowerCase();
-  if (
-    value.length >= MIN_FORGET_TEXT &&
-    !isNameOnlyValue(value, nameTokens) &&
-    containsKey(value, keys)
-  ) {
-    return true;
-  }
-  return valueHasSecret(value, keys, nameTokens);
+  return (
+    !row.pinned && row.sourceTurn !== null && sourceTurns.has(row.sourceTurn)
+  );
 }
 
-function profileKeyMatches(key: string, keys: readonly string[]): boolean {
-  const normalized = key
+function namesRow(row: ProfileRecord, needle: string): boolean {
+  const named = normalizeLabel(needle);
+  if (named.length === 0) {
+    return false;
+  }
+  if (normalizeLabel(row.key) === named) {
+    return true;
+  }
+  return row.value.trim().toLowerCase() === needle.trim().toLowerCase();
+}
+
+function normalizeLabel(value: string): string {
+  return value
     .trim()
     .toLowerCase()
     .replace(/_/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (normalized.length < MIN_FORGET_TEXT) {
-    return false;
-  }
-  const pattern = new RegExp(
-    `(^|[^a-z0-9])${escapeRegExp(normalized)}([^a-z0-9]|$)`,
-  );
-  return keys.some((item) => pattern.test(item));
 }
 
-function factContainsProfileValue(
-  value: string,
-  factText: string,
-  nameTokens: ReadonlySet<string>,
-): boolean {
-  const needle = value.trim().toLowerCase();
-  if (needle.length < MIN_FORGET_TEXT || isNameOnlyValue(needle, nameTokens)) {
-    return false;
-  }
-  return factText.toLowerCase().includes(needle);
-}
-
-function isNameOnlyValue(
-  value: string,
-  nameTokens: ReadonlySet<string>,
-): boolean {
-  if (nameTokens.size === 0) {
-    return false;
-  }
-  const tokens = value.toLowerCase().match(/[a-z0-9]+/g) ?? [];
-  if (tokens.length === 0) {
-    return false;
-  }
-  return tokens.every((token) => nameTokens.has(token));
-}
-
-/** A 4-digit year in 1900–2099 is a date, not a secret. */
+/** A 4-digit year in 1900–2100 is a date, not a secret. */
 function isYearToken(run: string): boolean {
   if (run.length !== 4) {
     return false;
   }
   const year = Number(run);
-  return year >= 1900 && year <= 2099;
+  return year >= 1900 && year <= 2100;
 }
 
-/**
- * Digit runs of 3 or more that are not years, and rare words (7 or
- * more letters) that are not the profile name. Ordinary words in the
- * fact, such as "locker" or "code", are not secrets.
- */
-export function secretTokens(
-  text: string,
-  nameTokens: ReadonlySet<string>,
-): string[] {
+/** Digit runs of 3 or more that are not years. Words are not secrets. */
+export function secretTokens(text: string): string[] {
   const out: string[] = [];
-  const add = (token: string): void => {
-    if (!out.includes(token)) {
-      out.push(token);
-    }
-  };
   for (const run of text.match(/\d+/g) ?? []) {
-    if (run.length >= 3 && !isYearToken(run)) {
-      add(run);
+    if (run.length >= 3 && !isYearToken(run) && !out.includes(run)) {
+      out.push(run);
     }
-  }
-  for (const word of text.toLowerCase().match(/[a-z]+/g) ?? []) {
-    if (
-      word.length < 7 ||
-      PROFILE_STOPWORDS.has(word) ||
-      nameTokens.has(word)
-    ) {
-      continue;
-    }
-    add(word);
   }
   return out;
 }
 
-function valueHasSecret(
-  value: string,
-  texts: readonly string[],
-  nameTokens: ReadonlySet<string>,
-): boolean {
+function valueHasSecret(value: string, texts: readonly string[]): boolean {
   const haystack = value.toLowerCase();
-  const secrets = texts.flatMap((text) => secretTokens(text, nameTokens));
-  return secrets.some((token) => {
-    if (/^\d+$/.test(token)) {
-      return new RegExp(`(^|\\D)${token}(\\D|$)`).test(haystack);
-    }
-    return new RegExp(`\\b${escapeRegExp(token)}\\b`).test(haystack);
-  });
+  const secrets = texts.flatMap((text) => secretTokens(text));
+  return secrets.some((token) =>
+    new RegExp(`(^|\\D)${token}(\\D|$)`).test(haystack),
+  );
 }
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const PROFILE_STOPWORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "and",
-  "or",
-  "of",
-  "to",
-  "in",
-  "on",
-  "for",
-  "with",
-  "is",
-  "it",
-  "my",
-  "your",
-  "his",
-  "her",
-  "our",
-  "their",
-  "this",
-  "that",
-  "was",
-  "be",
-  "as",
-  "at",
-  "by",
-  "from",
-  "has",
-  "have",
-  "had",
-  "not",
-  "but",
-  "if",
-  "so",
-  "than",
-  "then",
-  "too",
-  "very",
-  "can",
-  "will",
-  "just",
-  "about",
-  "into",
-  "over",
-  "after",
-  "before",
-  "between",
-  "out",
-  "up",
-  "down",
-  "off",
-  "no",
-  "yes",
-  "do",
-  "does",
-  "did",
-  "done",
-  "i",
-  "me",
-  "we",
-  "you",
-  "he",
-  "she",
-  "they",
-  "them",
-  "what",
-  "when",
-  "where",
-  "who",
-  "how",
-  "which",
-  "there",
-  "here",
-]);
 
 type SqlStatement = { run: (param: string) => unknown };
 type SqlDatabase = { prepare: (sql: string) => SqlStatement };

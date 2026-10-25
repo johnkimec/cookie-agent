@@ -194,10 +194,24 @@ describe("round2 adversarial (reviewer)", () => {
       text: "Dentist appointment at the gym on 2026-11-03 at 2 pm",
     })();
     const after2 = values(h);
-    console.log(
-      "OVERDEL",
-      JSON.stringify({ before, res, after1, res2, after2 }, null, 1),
-    );
+    const kept = [
+      "name=John",
+      "full_name=John Kim",
+      "pronouns=he/him",
+      "city=Toronto",
+      "gym=goes to the gym on Mondays",
+      "married=married in 2026",
+      "employer=Cookie Labs since 2019",
+      "kids=2 kids",
+      "locker_room=prefers the locker room near the code desk",
+    ];
+    expect(res).toMatchObject({ forgotten: true });
+    expect(res2).toMatchObject({ forgotten: true });
+    expect(before).toEqual(expect.arrayContaining(kept));
+    expect([...after1].sort()).toEqual([...kept].sort());
+    expect([...after2].sort()).toEqual([...kept].sort());
+    expect(after1.join("\n")).not.toContain(SECRET);
+    expect(after2.join("\n")).not.toContain(SECRET);
     h.runtime.scheduler.stop();
     h.store.close();
   });
@@ -257,10 +271,17 @@ describe("round2 adversarial (reviewer)", () => {
       "Done.",
       h.tool(MEMORY_FORGET_TOOL, { text: "Locker code is 4417" }),
     );
-    console.log(
-      "REFLECTSRC",
-      JSON.stringify({ t: !!t, before, after: h.store.listProfile() }, null, 1),
-    );
+    const after = h.store.listProfile();
+    expect(t.msgs).toBeDefined();
+    expect(before.map((row) => row.sourceTurn)).toEqual([null, null]);
+    expect(before.map((row) => `${row.key}=${row.value}`).sort()).toEqual([
+      "name=John",
+      "pronouns=he/him",
+    ]);
+    expect(after.map((row) => `${row.key}=${row.value}`).sort()).toEqual([
+      "name=John",
+      "pronouns=he/him",
+    ]);
     h.runtime.scheduler.stop();
     h.store.close();
   });
@@ -299,11 +320,17 @@ describe("round2 adversarial (reviewer)", () => {
         }),
       );
       const r = await h.tool(MEMORY_FORGET_TOOL, { text: factText })();
+      const profile = values(h);
       out[label] = {
         r,
-        profile: values(h),
+        profile,
         facts: h.store.listFacts().map((f) => f.text),
       };
+      expect(r).toMatchObject({ forgotten: true });
+      expect(profile).toEqual([`lock=${profileValue}`]);
+      expect(h.store.listFacts().map((fact) => fact.text)).not.toContain(
+        factText,
+      );
       h.runtime.scheduler.stop();
       h.store.close();
     }
@@ -464,22 +491,14 @@ describe("round2 adversarial (reviewer)", () => {
     const same = JSON.stringify(
       await h.log.messagesFor("a", "what is my locker code?"),
     );
-    console.log(
-      "CHUNKONLY",
-      JSON.stringify(
-        {
-          r1,
-          r2,
-          chunks: h.store.listChunks(),
-          forgotten: h.store.forgottenTurnIds(),
-          hitsHas: hits.includes(SECRET),
-          nextHas: next.includes(SECRET),
-          sameHas: same.includes(SECRET),
-        },
-        null,
-        1,
-      ),
-    );
+    expect(r1).toMatchObject({ forgotten: true });
+    expect(r2).toMatchObject({ forgotten: false, reason: "not found" });
+    expect(
+      h.store.listChunks().some((chunk) => chunk.text.includes(SECRET)),
+    ).toBe(false);
+    expect(hits).not.toContain(SECRET);
+    expect(next).not.toContain(SECRET);
+    expect(same).not.toContain(SECRET);
     h.runtime.scheduler.stop();
     h.store.close();
   });
