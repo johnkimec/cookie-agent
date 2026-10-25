@@ -75,6 +75,7 @@ interface FactRow {
   text: string;
   superseded_by: string | null;
   valid_until: number | null;
+  created_at: number;
 }
 
 /**
@@ -112,19 +113,23 @@ export class HybridRetriever {
     this.store = options.store ?? null;
   }
 
-  readonly retrieve: Retrieve = async (query, signal) => {
+  readonly retrieve: Retrieve = async (query, signal, omitTurnIds) => {
     if (isAborted(signal)) {
       return [];
     }
     const match = ftsOrQuery(query);
     const now = this.now();
     const forgotten = readForgottenTurnIds(this.store);
+    const omit = omitTurnIds ?? new Set<string>();
+    const counts = turnTokenCounts(this.db, query);
     const facts = match === "" ? [] : this.bm25Facts(match, now);
-    const turns = match === "" ? [] : this.bm25Turns(match, forgotten);
-    const summaries = match === "" ? [] : this.bm25Summaries(query, forgotten);
+    const turns =
+      match === "" ? [] : this.bm25Turns(match, forgotten, omit, query, counts);
+    const summaries =
+      match === "" ? [] : this.bm25Summaries(query, forgotten, counts);
     const byId = new Map<string, Memory>();
     for (const memory of [...facts, ...turns, ...summaries]) {
-      byId.set(memory.id, memory);
+      remember(byId, memory);
     }
     let vectorUp = false;
     try {
@@ -161,17 +166,20 @@ export class HybridRetriever {
           return [];
         }
         try {
-          vectorChunks = await this.vectorChunks(embedding, forgotten);
+          vectorChunks = await this.vectorChunks(embedding, forgotten, omit);
         } catch {
           vectorChunks = [];
         }
       }
     }
-    const chunkHits = collapseChunkHits(vectorChunks, forgotten);
+    const chunkHits = collapseChunkHits(vectorChunks, forgotten, (turnId) =>
+      this.turnBody(turnId),
+    );
     for (const memory of [...vectorFacts, ...chunkHits]) {
-      if (!byId.has(memory.id)) {
-        byId.set(memory.id, memory);
+      if (omit.has(memory.id)) {
+        continue;
       }
+      remember(byId, memory);
     }
     const bm25Weight = vectorUp
       ? this.weights.bm25
@@ -192,7 +200,7 @@ export class HybridRetriever {
     const candidates: Memory[] = [];
     for (const row of fused) {
       const memory = byId.get(row.id);
-      if (memory !== undefined) {
+      if (memory !== undefined && !omit.has(memory.id)) {
         candidates.push(memory);
       }
     }
@@ -202,10 +210,15 @@ export class HybridRetriever {
     let ranked = candidates.slice(0, this.limit);
     if (this.rerank !== undefined) {
       try {
-        ranked = await this.rerank(query, candidates, signal);
+        ranked = (await this.rerank(query, candidates, signal)).filter(
+          (memory) => !omit.has(memory.id),
+        );
       } catch {
         ranked = candidates.slice(0, this.limit);
       }
+    }
+    if (isAborted(signal)) {
+      return [];
     }
     return dedupeText(ranked).slice(0, this.limit);
   };
@@ -213,7 +226,7 @@ export class HybridRetriever {
   private bm25Facts(match: string, now: number): Memory[] {
     const rows = this.db
       .prepare(
-        `SELECT f.id, f.text, f.superseded_by, f.valid_until
+        `SELECT f.id, f.text, f.superseded_by, f.valid_until, f.created_at
          FROM facts_fts
          JOIN facts f ON f.rowid = facts_fts.rowid
          WHERE facts_fts MATCH ?
@@ -223,27 +236,47 @@ export class HybridRetriever {
          LIMIT ?`,
       )
       .all(match, now, this.pool) as FactRow[];
-    return rows.map((row) => memoryFrom(row.id, row.text, "fact"));
+    return rows.map((row) =>
+      memoryFrom(row.id, row.text, "fact", row.created_at),
+    );
   }
 
-  private bm25Turns(match: string, forgotten: ReadonlySet<string>): Memory[] {
-    const hidden = forgotten.size > 0;
+  private bm25Turns(
+    match: string,
+    forgotten: ReadonlySet<string>,
+    omit: ReadonlySet<string>,
+    query: string,
+    counts: ReadonlyMap<string, number>,
+  ): Memory[] {
+    const hidden = [...forgotten, ...omit];
     const rows = this.db
       .prepare(
-        `SELECT t.id AS id, t.content AS text
+        `SELECT t.id AS id, t.content AS text, t.created_at AS created_at
          FROM turns_fts
          JOIN turns t ON t.rowid = turns_fts.rowid
          WHERE turns_fts MATCH ?
-           ${hidden ? "AND t.id NOT IN (SELECT value FROM json_each(?))" : ""}
+           ${
+             hidden.length > 0
+               ? "AND t.id NOT IN (SELECT value FROM json_each(?))"
+               : ""
+           }
          ORDER BY bm25(turns_fts), t.created_at, t.id
          LIMIT ?`,
       )
       .all(
-        ...(hidden
-          ? [match, JSON.stringify([...forgotten]), this.pool]
+        ...(hidden.length > 0
+          ? [match, JSON.stringify(hidden), this.pool]
           : [match, this.pool]),
-      ) as Array<{ id: string; text: string }>;
-    return rows.map((row) => memoryFrom(row.id, row.text, "turn"));
+      ) as Array<{ id: string; text: string; created_at: number }>;
+    return rows.map((row) =>
+      memoryFrom(
+        row.id,
+        row.text,
+        "turn",
+        row.created_at,
+        matchSpan(row.text, query, counts),
+      ),
+    );
   }
 
   /**
@@ -254,6 +287,7 @@ export class HybridRetriever {
   private bm25Summaries(
     query: string,
     forgotten: ReadonlySet<string>,
+    counts: ReadonlyMap<string, number>,
   ): Memory[] {
     const tokens = query
       .split(/[^\p{L}\p{N}]+/u)
@@ -262,8 +296,10 @@ export class HybridRetriever {
       return [];
     }
     const rows = this.db
-      .prepare("SELECT id, summary FROM sessions WHERE summary IS NOT NULL")
-      .all() as Array<{ id: string; summary: string }>;
+      .prepare(
+        "SELECT id, summary, started_at FROM sessions WHERE summary IS NOT NULL",
+      )
+      .all() as Array<{ id: string; summary: string; started_at: number }>;
     const out: Memory[] = [];
     for (const row of rows) {
       const hay = row.summary.toLowerCase();
@@ -273,7 +309,15 @@ export class HybridRetriever {
       if (!matches || sessionHasForgottenTurn(this.db, row.id, forgotten)) {
         continue;
       }
-      out.push(memoryFrom(`summary:${row.id}`, row.summary, "chunk"));
+      out.push(
+        memoryFrom(
+          `summary:${row.id}`,
+          row.summary,
+          "chunk",
+          row.started_at,
+          matchSpan(row.summary, query, counts),
+        ),
+      );
       if (out.length === this.pool) {
         break;
       }
@@ -288,13 +332,14 @@ export class HybridRetriever {
     const hits = await this.knnUntil(embedding, "vec_facts", (id) => {
       const row = this.db
         .prepare(
-          "SELECT id, text, superseded_by, valid_until FROM facts WHERE id = ?",
+          `SELECT id, text, superseded_by, valid_until, created_at
+           FROM facts WHERE id = ?`,
         )
         .get(id) as FactRow | undefined;
       if (row === undefined || !liveFact(row, now)) {
         return null;
       }
-      return memoryFrom(row.id, row.text, "fact");
+      return memoryFrom(row.id, row.text, "fact", row.created_at);
     });
     return hits;
   }
@@ -302,6 +347,7 @@ export class HybridRetriever {
   private async vectorChunks(
     embedding: Float32Array,
     forgotten: ReadonlySet<string>,
+    omit: ReadonlySet<string>,
   ): Promise<Memory[]> {
     return this.knnUntil(embedding, "vec_chunks", (id) => {
       const row = this.db
@@ -310,11 +356,25 @@ export class HybridRetriever {
       if (row === undefined || row.text.trim() === "") {
         return null;
       }
+      const turnId = turnIdFromChunkId(row.chunk_id);
+      if (turnId !== null && (omit.has(turnId) || forgotten.has(turnId))) {
+        return null;
+      }
       if (chunkDerivedFromForgotten(this.db, id, forgotten)) {
         return null;
       }
       return memoryFrom(row.chunk_id, row.text, "chunk");
     });
+  }
+
+  private turnBody(turnId: string): { text: string; createdAt: number } | null {
+    const row = this.db
+      .prepare("SELECT content, created_at FROM turns WHERE id = ?")
+      .get(turnId) as { content: string; created_at: number } | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    return { text: row.content, createdAt: row.created_at };
   }
 
   /**
@@ -422,6 +482,8 @@ export function turnIdFromChunkId(chunkId: string): string | null {
 export function collapseChunkHits(
   memories: readonly Memory[],
   forgotten: ReadonlySet<string> = new Set(),
+  turnOf: (turnId: string) => { text: string; createdAt: number } | null = () =>
+    null,
 ): Memory[] {
   const out: Memory[] = [];
   const seen = new Set<string>();
@@ -436,19 +498,69 @@ export function collapseChunkHits(
       out.push(memory);
       continue;
     }
-    out.push({ id: turnId, text: memory.text, source: "turn" });
+    const turn = turnOf(turnId);
+    const chunk = memory.text;
+    const text = turn !== null && turn.text.length > 0 ? turn.text : chunk;
+    out.push({
+      id: turnId,
+      text,
+      source: "turn",
+      createdAt: turn?.createdAt ?? memory.createdAt,
+      matchText: chunk,
+    });
   }
   return out;
 }
 
+const MATCH_STOPWORDS = new Set(
+  `a an the and or but if of to in on for at by with from as is it its be am
+   are was were do does did my me we our you your he she they them their this
+   that these those what who how when where why not no so than then into about
+   just can will would could should have has had remember forget something
+   anything tell said say know`
+    .split(/\s+/)
+    .filter((word) => word.length > 0),
+);
+
 export function ftsOrQuery(text: string): string {
   const tokens = text
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((token) => token.length > 0);
+    .filter((token) => token.length > 1)
+    .filter((token) => !MATCH_STOPWORDS.has(token.toLocaleLowerCase("en")));
   if (tokens.length === 0) {
     return "";
   }
   return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
+}
+
+/**
+ * How many `turns_fts` rows contain each match token.
+ * A lower count is rarer. The key is the token in English lowercase.
+ * A MATCH that FTS rejects counts as zero so one bad token does not
+ * drop the preview.
+ */
+export function turnTokenCounts(
+  db: Database.Database,
+  query: string,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const stmt = db.prepare(
+    "SELECT count(*) AS n FROM turns_fts WHERE turns_fts MATCH ?",
+  );
+  for (const token of matchTokens(query)) {
+    const key = token.toLocaleLowerCase("en");
+    if (counts.has(key)) {
+      continue;
+    }
+    const quoted = `"${token.replaceAll('"', '""')}"`;
+    try {
+      const row = stmt.get(quoted) as { n: number };
+      counts.set(key, row.n);
+    } catch {
+      counts.set(key, 0);
+    }
+  }
+  return counts;
 }
 
 /**
@@ -632,8 +744,116 @@ function liveFact(row: FactRow, now: number): boolean {
   return true;
 }
 
-function memoryFrom(id: string, text: string, source: MemorySource): Memory {
-  return { id, text, source };
+function memoryFrom(
+  id: string,
+  text: string,
+  source: MemorySource,
+  createdAt?: number,
+  matchText?: string,
+): Memory {
+  const memory: Memory = { id, text, source };
+  if (createdAt !== undefined) {
+    memory.createdAt = createdAt;
+  }
+  if (matchText !== undefined && matchText.length > 0 && matchText !== text) {
+    memory.matchText = matchText;
+  }
+  return memory;
+}
+
+function remember(byId: Map<string, Memory>, memory: Memory): void {
+  const existing = byId.get(memory.id);
+  if (existing === undefined) {
+    byId.set(memory.id, { ...memory });
+    return;
+  }
+  if (
+    memory.matchText !== undefined &&
+    (existing.matchText === undefined ||
+      memory.matchText.length > existing.matchText.length)
+  ) {
+    existing.matchText = memory.matchText;
+  }
+  if (memory.text.length > existing.text.length) {
+    existing.text = memory.text;
+  }
+  if (existing.createdAt === undefined && memory.createdAt !== undefined) {
+    existing.createdAt = memory.createdAt;
+  }
+}
+
+function matchTokens(query: string): string[] {
+  return query.split(/[^\p{L}\p{N}]+/u).filter((token) => {
+    if (token.length < 3) {
+      return false;
+    }
+    return !MATCH_STOPWORDS.has(token.toLocaleLowerCase("en"));
+  });
+}
+
+function hasDigit(token: string): boolean {
+  return /\p{N}/u.test(token);
+}
+
+/**
+ * Whole word from `text` for the best query token.
+ * Stopwords and tokens under 3 characters are skipped, so "is" does not
+ * match inside "This". A token that contains a digit wins, then the
+ * rarer token (`counts` is a `turns_fts` row count; lower is better),
+ * then the longer token, then the earliest. Comparison is
+ * case-insensitive on the original word, so "İ" does not shift the slice.
+ */
+export function matchSpan(
+  text: string,
+  query: string,
+  counts?: ReadonlyMap<string, number>,
+): string | undefined {
+  const tokens = matchTokens(query);
+  if (tokens.length === 0) {
+    return undefined;
+  }
+  let best: { at: number; length: number; token: string } | null = null;
+  for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const word = match[0];
+    const at = match.index;
+    if (word === undefined || at === undefined) {
+      continue;
+    }
+    for (const token of tokens) {
+      if (word.localeCompare(token, "en", { sensitivity: "base" }) !== 0) {
+        continue;
+      }
+      if (best === null || spanBeats(token, at, best, counts)) {
+        best = { at, length: word.length, token };
+      }
+    }
+  }
+  if (best === null) {
+    return undefined;
+  }
+  return text.slice(best.at, best.at + best.length);
+}
+
+function spanBeats(
+  token: string,
+  at: number,
+  best: { at: number; token: string },
+  counts: ReadonlyMap<string, number> | undefined,
+): boolean {
+  const digit = hasDigit(token) ? 0 : 1;
+  const bestDigit = hasDigit(best.token) ? 0 : 1;
+  if (digit !== bestDigit) {
+    return digit < bestDigit;
+  }
+  const rare = counts?.get(token.toLocaleLowerCase("en")) ?? 0;
+  const bestRare = counts?.get(best.token.toLocaleLowerCase("en")) ?? 0;
+  if (rare !== bestRare) {
+    return rare < bestRare;
+  }
+  if (token.length !== best.token.length) {
+    return token.length > best.token.length;
+  }
+  return at < best.at;
 }
 
 function dedupeText(memories: readonly Memory[]): Memory[] {

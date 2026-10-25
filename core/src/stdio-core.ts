@@ -9,12 +9,16 @@ import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { ChatLog } from "./memory/chat-log.ts";
 import { cachedProbe } from "./memory/embed-config.ts";
 import {
-  DEFAULT_EMBED_TIMEOUT_MS,
   HttpEmbedder,
   readEmbedPort,
+  readIndexEmbedTimeoutMs,
   readQueryEmbedTimeoutMs,
 } from "./memory/http-embedder.ts";
-import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
+import {
+  HybridRetriever,
+  readForgottenTurnIds,
+  readRrfWeights,
+} from "./memory/hybrid-retrieve.ts";
 import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
 import {
@@ -49,6 +53,7 @@ export function startStdioCore(
     // Every env read stays above the open. A bad timeout must not create
     // cookie.db, and a test must not fall through to the product directory.
     const queryTimeoutMs = readQueryEmbedTimeoutMs(env);
+    const indexTimeoutMs = readIndexEmbedTimeoutMs(env);
     const store = SqliteMemoryStore.open(memoryDatabasePath(env));
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
@@ -56,7 +61,7 @@ export function startStdioCore(
     });
     const indexEmbedder = new HttpEmbedder({
       port: embedPort,
-      timeoutMs: DEFAULT_EMBED_TIMEOUT_MS,
+      timeoutMs: indexTimeoutMs,
     });
     const vectors = new SqliteVecIndex(store.database());
     const embedUp = cachedProbe(
@@ -67,6 +72,7 @@ export function startStdioCore(
       embedder: indexEmbedder,
       vectors,
       available: embedUp,
+      forgottenTurnIds: () => readForgottenTurnIds(store),
     });
     provider = createLlamaServerProvider({ port, thinking });
     const reranker = new ModelReranker({
@@ -85,7 +91,8 @@ export function startStdioCore(
       weights,
       available: embedUp,
       store,
-      rerank: (query, candidates) => reranker.rerank(query, candidates),
+      rerank: (query, candidates, signal) =>
+        reranker.rerank(query, candidates, signal),
     });
     history = new ChatLog(store, indexer, retriever);
   } catch (error) {
