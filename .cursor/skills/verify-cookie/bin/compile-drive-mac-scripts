@@ -41,7 +41,7 @@ while i < len(lines):
         if i >= len(lines):
             sys.exit("unterminated APPLESCRIPT heredoc")
         blocks.append("\n".join(buf) + "\n")
-    elif "osascript_run -e " in line:
+    elif "osascript_run -e '" in line:
         rest = line.split("osascript_run -e ", 1)[1]
         if not rest.startswith("'"):
             sys.exit("expected a single-quoted osascript -e script")
