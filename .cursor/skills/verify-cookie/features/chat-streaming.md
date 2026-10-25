@@ -49,3 +49,5 @@ Preconditions:
 - One in-flight reply. A second `chat.send` before `chat.done` is an error, not a second stream.
 - Escape closes the popup. It is not the cancel gesture.
 - Do not mark the popup sub-features verified from this transcript. The transcript never opened a window.
+- `drive-core drive` without `--evidence <dir>` prints its usage and exits 2.
+- `drive-mac chat --runtime real` needs a new `mktemp -d /tmp/cookie-m0.XXXXXX` and a shell with no leftover `COOKIE_*` variables on every run. A reused data directory carries the last run's pid files.

@@ -42,3 +42,6 @@ Preconditions:
 - The status line uses the ellipsis character in neighbouring items (`Ask Cookie…`), and the middle dot in `Cookie · on-device · Qwen3.6`. Do not accept three ASCII dots or a hyphen as the same string. While loading, the status item reads `🐾 Cookie · starting model…`. While down, it reads `🐾 Cookie · model offline`. Both are placeholder copy pending John's review. The glyph and VoiceOver label do not change with that copy.
 - Do not drive a Cookie that was already in the menu bar. Start the app under test with a fresh `COOKIE_DATA_DIR` and `COOKIE_LLAMA_PORT=18080`.
 - Template images only. The menu bar does not run the Rive animation.
+- A status line that never reaches `on-device`, or a port other than the one the recipe set, usually means a `COOKIE_*` variable leaked from an earlier shell. Read `dataDirSource` and `port` in `<COOKIE_DATA_DIR>/logs/cookie-shell.log` before calling it a product bug.
+- After `Quit Cookie`, the owned `llama-server` can take about 5 seconds to die. It ignores SIGTERM until the SIGKILL. Poll the pid and the port; do not check once.
+- Reading the menu leaves the app in event-tracking run-loop mode. A quit or SIGTERM sent while that mode is active must still end the app. If it does not, `sample <pid>` before killing it.
