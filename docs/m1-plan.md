@@ -143,7 +143,7 @@ Changes to existing files:
 
 ### Recall eval
 
-`evals/memory-recall/`: 10 tasks, per the design doc's "Chat + memory recall" row. Each task is a fixture history (several dated sessions), a question, and the expected fact. Pass is programmatic: the answer contains the fact. The runner also reports recall@8 of retrieval. The exit bar is 8 of 10 on real Qwen on John's Mac, with zero egress. CI runs the same runner against the stub and fake embedder to check the plumbing, not the score.
+`evals/memory-recall/`: 10 scored tasks (ids 03–12) plus two unscored samples in `examples/`. Pass is a case-insensitive, whitespace-normalized substring: `expectedFact` or any `accept` string, and none of `mustNotContain`. The runner prints retrieved ids and the answer. The exit bar is 8 of 10 on `pnpm eval memory --real` (Qwen on John's Mac, zero egress). `pnpm eval memory --fake` checks plumbing and does not enforce the score. `06-forget-debt-to-daniel` stays in the denominator and is known-blocked until `memory.forget`.
 
 ## Implementation plan
 

@@ -45,6 +45,9 @@ jobs:
       - name: Test
         run: pnpm --filter @cookie-agent/core test
 
+      - name: Recall eval (fake)
+        run: pnpm eval memory --fake
+
   app:
     name: Swift package (macOS)
     runs-on: macos-26

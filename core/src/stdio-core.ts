@@ -6,7 +6,9 @@
 
 import { createInterface } from "node:readline";
 import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
+import { installLoopbackGuard } from "./loopback-guard.ts";
 import { ChatLog } from "./memory/chat-log.ts";
+import { clockFromEnv } from "./memory/clock.ts";
 import { cachedProbe } from "./memory/embed-config.ts";
 import {
   DEFAULT_EMBED_TIMEOUT_MS,
@@ -17,6 +19,7 @@ import {
 import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
 import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
+import { JournalReflector, readReflectIdleMs } from "./memory/reflect.ts";
 import {
   completeText,
   ModelReranker,
@@ -36,6 +39,7 @@ import type { ModelProvider } from "./model/provider.ts";
 export function startStdioCore(
   env: NodeJS.ProcessEnv = process.env,
 ): AgentCore {
+  installLoopbackGuard(env);
   let port: number;
   let thinking: boolean;
   let history: ChatLog;
@@ -46,7 +50,10 @@ export function startStdioCore(
     const embedPort = readEmbedPort(env);
     const weights = readRrfWeights(env);
     const rerankConfig = readRerankConfig(env);
-    const store = SqliteMemoryStore.open(memoryDatabasePath(env));
+    const reflectIdleMs = readReflectIdleMs(env);
+    const store = SqliteMemoryStore.open(memoryDatabasePath(env), {
+      now: clockFromEnv(env),
+    });
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
       timeoutMs: readQueryEmbedTimeoutMs(env),
@@ -84,7 +91,14 @@ export function startStdioCore(
       store,
       rerank: (query, candidates) => reranker.rerank(query, candidates),
     });
-    history = new ChatLog(store, indexer, retriever);
+    const trace = env.COOKIE_RETRIEVAL_TRACE;
+    history = new ChatLog(store, indexer, retriever, {
+      reflector:
+        reflectIdleMs === null
+          ? null
+          : new JournalReflector(store.database(), () => store.currentTime()),
+      tracePath: trace === undefined || trace === "" ? null : trace,
+    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "bad config";
     process.stderr.write(`cookie-core: ${detail}\n`);

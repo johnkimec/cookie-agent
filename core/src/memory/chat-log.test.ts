@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
@@ -11,7 +11,9 @@ import {
   messageErrors,
 } from "../protocol/validate.ts";
 import { ChatLog } from "./chat-log.ts";
+import { JournalReflector } from "./reflect.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
+import type { Memory } from "./types.ts";
 
 const dirs: string[] = [];
 
@@ -197,6 +199,60 @@ describe("chat log wired into the core", () => {
     expect(store.recentTurns("conv-a", 10).map((row) => row.content)).toContain(
       "keep this",
     );
+    store.close();
+  });
+
+  it("reflects the session a new conversation ends, before that turn", async () => {
+    const path = tempDbPath();
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
+    const reflector = new JournalReflector(store.database(), () =>
+      store.currentTime(),
+    );
+    const harness = coreFor(
+      new ChatLog(store, null, null, { reflector }),
+      seen,
+      () => 2_000,
+    );
+    await ready(harness.core, harness.messages);
+    send(harness.core, chat("2", "conv-a", "keep this"));
+    await untilDone(harness.messages, "msg-1");
+    send(harness.core, chat("3", "conv-b", "new chat"));
+    await untilDone(harness.messages, "msg-2");
+    const rows = store
+      .database()
+      .prepare("SELECT entry FROM journal")
+      .all() as Array<{ entry: string }>;
+    expect(rows.map((row) => row.entry)).toEqual(["reflected conv-a"]);
+    store.close();
+  });
+
+  it("writes retrieved ids to the trace file", async () => {
+    const dir = tempDbPath().replace(/cookie\.db$/, "");
+    const trace = join(dir, "retrieval.jsonl");
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(join(dir, "cookie.db"), {
+      now: () => 3_000,
+    });
+    const memory: Memory = { id: "mem-1", text: "alpha", source: "turn" };
+    const harness = coreFor(
+      new ChatLog(
+        store,
+        null,
+        { retrieve: async () => [memory] },
+        { tracePath: trace },
+      ),
+      seen,
+      () => 3_000,
+    );
+    await ready(harness.core, harness.messages);
+    send(harness.core, chat("2", "conv-1", "where is alpha"));
+    await untilDone(harness.messages, "msg-1");
+    const lines = readFileSync(trace, "utf8").trim().split("\n");
+    expect(JSON.parse(lines[0] ?? "{}")).toEqual({
+      conversationId: "conv-1",
+      ids: ["mem-1"],
+    });
     store.close();
   });
 });

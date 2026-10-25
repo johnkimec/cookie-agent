@@ -1,0 +1,293 @@
+{
+  "id": "11-buried-dog-food",
+  "question": "What brand of food did I switch my dog to?",
+  "expectedFact": "Open Farm",
+  "tests": "Buried fact: one off-topic line in a 24-turn debugging session must still be retrieved.",
+  "mustNotContain": [],
+  "setup": "S1 24-turn llama-server cache debugging with the food line at turn 13, S2 short; ask in S3",
+  "sessions": [
+    {
+      "id": "ses-2026-09-27-1500-popup",
+      "startedAt": "2026-09-27T15:00:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What's a good warmup before deadlifts?",
+          "createdAt": "2026-09-27T15:00:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Hip hinges with a dowel, a few glute bridges, then two light ramp-up sets.",
+          "createdAt": "2026-09-27T15:00:09Z"
+        },
+        {
+          "role": "user",
+          "content": "Cool, adding that to my pull day.",
+          "createdAt": "2026-09-27T15:00:16Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-01-1210-menubar",
+      "startedAt": "2026-10-01T12:10:00Z",
+      "surface": "menubar",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Is the TTC running normally on Line 1 this morning?",
+          "createdAt": "2026-10-01T12:10:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I can't check live service from here. The TTC site or app has current alerts.",
+          "createdAt": "2026-10-01T12:10:10Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-04-1930-popup",
+      "startedAt": "2026-10-04T19:30:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Explain Thevenin equivalents like I'm tired.",
+          "createdAt": "2026-10-04T19:30:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Any linear circuit seen from two terminals acts like one voltage source in series with one resistor.",
+          "createdAt": "2026-10-04T19:30:10Z"
+        },
+        {
+          "role": "user",
+          "content": "And Norton is the current source version?",
+          "createdAt": "2026-10-04T19:30:18Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Yes. Same circuit, a current source in parallel with the same resistor.",
+          "createdAt": "2026-10-04T19:30:25Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-09-0150-popup",
+      "startedAt": "2026-10-09T01:50:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Cookie keeps barking at the mail carrier, any tips?",
+          "createdAt": "2026-10-09T01:50:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Reward calm behaviour before the knock, and practise with someone ringing the bell on purpose.",
+          "createdAt": "2026-10-09T01:50:10Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-10-0305-popup",
+      "startedAt": "2026-10-10T03:05:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Okay, long night. Cookie (the app) keeps getting slow after a while. Can we go through it?",
+          "createdAt": "2026-10-10T03:05:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Sure. What does slow mean here: time to first token, or tokens per second?",
+          "createdAt": "2026-10-10T03:05:45Z"
+        },
+        {
+          "role": "user",
+          "content": "First token. It starts around 0.4 s and creeps up to like 1.5 s after a long chat.",
+          "createdAt": "2026-10-10T03:06:26Z"
+        },
+        {
+          "role": "assistant",
+          "content": "That's usually the prompt growing. Is the context staying under the 32K cap?",
+          "createdAt": "2026-10-10T03:07:08Z"
+        },
+        {
+          "role": "user",
+          "content": "I think so. The log says n_ctx 32768 and the prompt was about 9k tokens on the last one.",
+          "createdAt": "2026-10-10T03:07:49Z"
+        },
+        {
+          "role": "assistant",
+          "content": "At 9k tokens, a cold prompt takes a while to process. The cached prefix should help if the start of the prompt stays stable.",
+          "createdAt": "2026-10-10T03:08:31Z"
+        },
+        {
+          "role": "user",
+          "content": "How do I check if the cache is getting hit?",
+          "createdAt": "2026-10-10T03:09:14Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Look for the cached tokens count in the timings, or tokens_cached on the stored turn.",
+          "createdAt": "2026-10-10T03:09:55Z"
+        },
+        {
+          "role": "user",
+          "content": "tokens_cached is 0 on half the turns. That seems bad.",
+          "createdAt": "2026-10-10T03:10:37Z"
+        },
+        {
+          "role": "assistant",
+          "content": "It is. Something near the top of the prompt is probably changing every turn, like a timestamp.",
+          "createdAt": "2026-10-10T03:11:18Z"
+        },
+        {
+          "role": "user",
+          "content": "Oh, the system prompt has the current time in it. Down to the second.",
+          "createdAt": "2026-10-10T03:12:00Z"
+        },
+        {
+          "role": "assistant",
+          "content": "That would bust the cache every turn. Move the time to the end, or round it to the hour.",
+          "createdAt": "2026-10-10T03:12:41Z"
+        },
+        {
+          "role": "user",
+          "content": "Moving it to the end. Rebuilding now. While that builds, random thing: I switched Cookie's food to Open Farm small-breed lamb, she gets half a cup twice a day, the old kibble was giving her itchy skin. Anyway, build's done.",
+          "createdAt": "2026-10-10T03:13:23Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Hope the new food helps her skin. How does first token look after the rebuild?",
+          "createdAt": "2026-10-10T03:14:08Z"
+        },
+        {
+          "role": "user",
+          "content": "0.38 s on turn 1, 0.41 s on turn 12. Way better.",
+          "createdAt": "2026-10-10T03:14:49Z"
+        },
+        {
+          "role": "assistant",
+          "content": "That's the cache working. tokens_cached should be most of the prompt now.",
+          "createdAt": "2026-10-10T03:15:30Z"
+        },
+        {
+          "role": "user",
+          "content": "Yep, like 8.6k of 9k cached. What about RAM? Activity Monitor says 31 GB used.",
+          "createdAt": "2026-10-10T03:16:11Z"
+        },
+        {
+          "role": "assistant",
+          "content": "On a 64 GB M1 Max with a 35B MoE at Q4 plus the embedder, that's expected.",
+          "createdAt": "2026-10-10T03:16:52Z"
+        },
+        {
+          "role": "user",
+          "content": "Should I worry about swap?",
+          "createdAt": "2026-10-10T03:17:33Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Only if memory pressure goes yellow. Green is fine.",
+          "createdAt": "2026-10-10T03:18:13Z"
+        },
+        {
+          "role": "user",
+          "content": "Green. Okay, I'll commit this. Message?",
+          "createdAt": "2026-10-10T03:18:54Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Something like: move the timestamp to the end of the system prompt to keep the prefix cache warm.",
+          "createdAt": "2026-10-10T03:19:34Z"
+        },
+        {
+          "role": "user",
+          "content": "Done. Going to bed.",
+          "createdAt": "2026-10-10T03:20:16Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Good night.",
+          "createdAt": "2026-10-10T03:20:56Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-13-2300-popup",
+      "startedAt": "2026-10-13T23:00:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Give me a high-protein breakfast that isn't eggs.",
+          "createdAt": "2026-10-13T23:00:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Overnight oats with whey and Greek yogurt, about 40 g of protein.",
+          "createdAt": "2026-10-13T23:00:10Z"
+        },
+        {
+          "role": "user",
+          "content": "Perfect, I'll prep that tonight.",
+          "createdAt": "2026-10-13T23:00:17Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-18-0230-popup",
+      "startedAt": "2026-10-18T02:30:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Why does my Swift build say a module is missing after I pulled main?",
+          "createdAt": "2026-10-18T02:30:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Usually a stale package cache. Try resolving packages again, then a clean build.",
+          "createdAt": "2026-10-18T02:30:10Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-20-2200-popup",
+      "startedAt": "2026-10-20T22:00:00Z",
+      "surface": "popup",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Remind me what a buck converter's duty cycle relates to.",
+          "createdAt": "2026-10-20T22:00:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "In an ideal buck converter, Vout = D x Vin.",
+          "createdAt": "2026-10-20T22:00:10Z"
+        }
+      ]
+    },
+    {
+      "id": "ses-2026-10-23-1145-menubar",
+      "startedAt": "2026-10-23T11:45:00Z",
+      "surface": "menubar",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Weather's getting cold. Does Cookie need a jacket for walks?",
+          "createdAt": "2026-10-23T11:45:03Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Small dogs with thin coats often do below about 0 C. A light fleece is plenty for now.",
+          "createdAt": "2026-10-23T11:45:10Z"
+        }
+      ]
+    }
+  ]
+}
