@@ -409,25 +409,30 @@ final class TerminationHopTests: XCTestCase {
     /// block in `.modalPanel` does.
     func testReplyRunsInModalLoopWhileMainQueueIsBlocked() {
         let finished = expectation(description: "modal spin finished")
+        let viaRunLoop = HopFlag()
+        let viaMainQueue = HopFlag()
         DispatchQueue.main.async {
-            var viaRunLoop = false
-            var viaMainQueue = false
             TerminationHop.performDuringTerminate {
-                viaRunLoop = true
+                viaRunLoop.value = true
             }
             DispatchQueue.main.async {
-                viaMainQueue = true
+                viaMainQueue.value = true
             }
             let deadline = Date().addingTimeInterval(1)
-            while !viaRunLoop && Date() < deadline {
+            while !viaRunLoop.value && Date() < deadline {
                 RunLoop.current.run(mode: TerminationHop.modalPanel, before: Date().addingTimeInterval(0.05))
             }
-            XCTAssertTrue(viaRunLoop)
-            XCTAssertFalse(viaMainQueue)
+            XCTAssertTrue(viaRunLoop.value)
+            XCTAssertFalse(viaMainQueue.value)
             finished.fulfill()
         }
         wait(for: [finished], timeout: 3)
     }
+}
+
+/// A class property, not a captured `var`, so a `@Sendable` run-loop block can set it.
+private final class HopFlag: @unchecked Sendable {
+    var value = false
 }
 
 final class RuntimeLaunchTests: XCTestCase {
