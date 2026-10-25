@@ -102,6 +102,17 @@ export interface RuntimeStatus {
   modelId?: string | null;
 }
 
+/**
+ * Proposed optional notification `session.window`.
+ * Protocol version stays `0.1`. Shells that omit it behave as before.
+ */
+export type SessionWindowState = "open" | "closed";
+
+export interface SessionWindowParams {
+  conversationId: string;
+  state: SessionWindowState;
+}
+
 export interface ErrorData {
   reason?: string;
   method?: string;

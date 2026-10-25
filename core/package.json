@@ -12,7 +12,8 @@
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "spike-sqlite": "node scripts/spike-sqlite.mjs"
+    "spike-sqlite": "node scripts/spike-sqlite.mjs",
+    "memory": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/memory/dump-cli.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.77",

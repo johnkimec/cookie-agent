@@ -24,6 +24,8 @@ import { dirname, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CORE_SERVER_NAME } from "./identity.ts";
+import { dumpMemory } from "./memory/dump.ts";
+import { MEMORY_DB_FILENAME } from "./memory/path.ts";
 import {
   nodeSupportsTypeStripping,
   TYPE_STRIP_NODE_ARGS,
@@ -60,6 +62,7 @@ type DriveFeature =
   | "chat-streaming"
   | "model-status"
   | "chat-history"
+  | "memory-persist"
   | "runtime-restart";
 const schemaPath = join(repoRoot, "protocol/schema/cookie-rpc.schema.json");
 const llamaPort = "18080";
@@ -264,6 +267,24 @@ class CoreSession {
     }
     const [code] = (await once(this.child, "exit")) as [number | null];
     return code;
+  }
+
+  /** Keep an earlier process's transcript ahead of this one. */
+  mergeEarlier(earlier: CoreSession): void {
+    const combined = [...earlier.transcript, ...this.transcript];
+    this.transcript.splice(0, this.transcript.length);
+    for (let index = 0; index < combined.length; index += 1) {
+      const entry = combined[index];
+      if (entry === undefined) {
+        continue;
+      }
+      this.transcript.push({
+        seq: index,
+        direction: entry.direction,
+        message: entry.message,
+      });
+    }
+    this.stderr.unshift(...earlier.stderr);
   }
 
   private record(direction: "client" | "server", message: unknown): void {
@@ -1180,6 +1201,154 @@ async function runRuntimeRestart(
   ].join("\n");
 }
 
+const PERSIST_CONVERSATION = "conv-persist";
+
+async function collectReply(
+  session: CoreSession,
+  id: string,
+  text: string,
+  timeoutMs: number,
+): Promise<string> {
+  session.send({
+    jsonrpc: "2.0",
+    id,
+    method: "chat.send",
+    params: { conversationId: PERSIST_CONVERSATION, text },
+  });
+  const ack = await session.response(id, timeoutMs);
+  if (!isRecord(ack.result)) {
+    throw new Error(`chat.send ${id} failed`);
+  }
+  const parts: string[] = [];
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const message = asRecord(
+      await session.next(remainingMs(deadline, `chat ${id}`)),
+      "chat",
+    );
+    if (message.method === "chat.delta") {
+      const params = asRecord(message.params, "delta");
+      if (typeof params.text !== "string" || params.text.length === 0) {
+        throw new Error("empty delta");
+      }
+      parts.push(params.text);
+      continue;
+    }
+    if (message.method === "runtime.status") {
+      continue;
+    }
+    if (message.method !== "chat.done") {
+      throw new Error(`unexpected ${String(message.method)}`);
+    }
+    const params = asRecord(message.params, "done");
+    if (params.finishReason !== "stop") {
+      throw new Error(`finishReason ${String(params.finishReason)}`);
+    }
+    return parts.join("");
+  }
+}
+
+function assertPersistDump(text: string): void {
+  if (!text.includes(HISTORY_CODE_WORD)) {
+    throw new Error("db dump is missing the code word");
+  }
+  let turns = 0;
+  let sessions = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("turn ")) {
+      turns += 1;
+      const row = JSON.parse(line.slice("turn ".length)) as {
+        egress?: unknown;
+      };
+      if (row.egress !== 0) {
+        throw new Error("stored turn egress is not 0");
+      }
+      continue;
+    }
+    if (line.startsWith("session ")) {
+      sessions += 1;
+      const row = JSON.parse(line.slice("session ".length)) as {
+        ended_at?: unknown;
+      };
+      if (row.ended_at !== null) {
+        throw new Error("shutdown set ended_at");
+      }
+    }
+  }
+  if (sessions !== 1) {
+    throw new Error(`sessions ${String(sessions)}`);
+  }
+  if (turns < 4) {
+    throw new Error(`turns ${String(turns)}`);
+  }
+}
+
+async function runMemoryPersist(
+  first: CoreSession,
+  dataDir: string,
+  port: string,
+): Promise<{ summary: string; dbText: string; session: CoreSession }> {
+  await waitForRuntimeUp(first, "real", readTimeoutMs, port);
+  await collectReply(first, "2", HISTORY_FIRST_PROMPT, readTimeoutMs);
+  first.send({ jsonrpc: "2.0", id: "3", method: "shutdown", params: {} });
+  const shutdown = await first.response("3", readTimeoutMs);
+  const shutdownResult = asRecord(shutdown.result, "shutdown result");
+  if (shutdownResult.ok !== true) {
+    throw new Error("shutdown was not ok");
+  }
+  const code = await first.waitForExit();
+  if (code !== 0) {
+    throw new Error(`core exit ${String(code)}`);
+  }
+  const firstStderr = first.stderrText().trim();
+  if (firstStderr !== "") {
+    throw new Error(`stderr: ${firstStderr}`);
+  }
+  forgetPid(first.pid);
+
+  const second = CoreSession.spawn(dataDir, "0", "real", "stub");
+  try {
+    await waitForRuntimeUp(second, "real", readTimeoutMs, port);
+    const reply = await collectReply(
+      second,
+      "2",
+      HISTORY_SECOND_PROMPT,
+      readTimeoutMs,
+    );
+    if (!reply.toLowerCase().includes(HISTORY_CODE_WORD.toLowerCase())) {
+      throw new Error(
+        `relaunch reply did not contain ${HISTORY_CODE_WORD}: ${reply.slice(0, 200)}`,
+      );
+    }
+    second.send({ jsonrpc: "2.0", id: "3", method: "shutdown", params: {} });
+    const again = await second.response("3", readTimeoutMs);
+    const againResult = asRecord(again.result, "second shutdown");
+    if (againResult.ok !== true) {
+      throw new Error("second shutdown was not ok");
+    }
+    const secondCode = await second.waitForExit();
+    if (secondCode !== 0) {
+      throw new Error(`core exit ${String(secondCode)}`);
+    }
+    const secondStderr = second.stderrText().trim();
+    if (secondStderr !== "") {
+      throw new Error(`stderr: ${secondStderr}`);
+    }
+    second.mergeEarlier(first);
+    const dbText = dumpMemory(join(dataDir, MEMORY_DB_FILENAME));
+    assertPersistDump(dbText);
+    return {
+      summary: ["ok", "persist true", "egress 0", ""].join("\n"),
+      dbText,
+      session: second,
+    };
+  } catch (error) {
+    await second.dispose();
+    forgetPid(second.pid);
+    throw error;
+  }
+}
+
 async function doctor(kind: CoreKind, llama: LlamaMode): Promise<number> {
   if (!nodeSupportsTypeStripping(process.version)) {
     process.stdout.write(`not-ok\nnode ${process.version} requires >=22.6\n`);
@@ -1272,6 +1441,7 @@ async function writeEvidence(
   session: CoreSession,
   summary: string,
   timings?: string,
+  dbText?: string,
 ): Promise<void> {
   await mkdir(evidenceDir, { recursive: true });
   const lines = session.transcript
@@ -1289,6 +1459,9 @@ async function writeEvidence(
   await writeFile(join(evidenceDir, "summary.txt"), summary);
   if (timings !== undefined) {
     await writeFile(join(evidenceDir, "timings.txt"), timings);
+  }
+  if (dbText !== undefined) {
+    await writeFile(join(evidenceDir, "db.txt"), dbText);
   }
 }
 
@@ -1325,16 +1498,28 @@ async function driveFeature(
   let session: CoreSession | null = null;
   let summary = "not-ok\n";
   let timings: string | undefined;
+  let dbText: string | undefined;
   let code = 1;
   try {
     if (kind === "real" && llama === "stub") {
-      stub = await startLlamaStub(Number(llamaPort));
+      stub = await startLlamaStub(
+        Number(llamaPort),
+        feature === "memory-persist" ? { recallWord: HISTORY_CODE_WORD } : {},
+      );
     }
     session = CoreSession.spawn(dataDir, deltaMs, kind, llama);
     if (feature === "chat-history") {
       const produced = await runChatHistory(session, port);
       summary = produced.summary;
       timings = produced.timings;
+    } else if (feature === "memory-persist") {
+      if (stub === null) {
+        throw new Error("memory-persist has no llama stub");
+      }
+      const produced = await runMemoryPersist(session, dataDir, port);
+      summary = produced.summary;
+      dbText = produced.dbText;
+      session = produced.session;
     } else if (feature === "runtime-restart") {
       if (stub === null) {
         throw new Error("runtime-restart has no llama stub");
@@ -1371,6 +1556,7 @@ async function driveFeature(
         session,
         summary,
         timings,
+        dbText,
       );
     }
     await stub?.close();
@@ -1398,6 +1584,7 @@ function usage(): number {
       "  drive-core drive chat-streaming --evidence <dir> [--core fake|real]",
       "  drive-core drive model-status --evidence <dir> [--core fake|real]",
       "  drive-core drive chat-history --evidence <dir> --core real --llama external",
+      "  drive-core drive memory-persist --evidence <dir> --core real",
       "  drive-core drive runtime-restart --evidence <dir> --core real",
       "  drive-core drive menu-bar-icon",
       "  drive-core drive hotkey-popup",
@@ -1471,6 +1658,7 @@ async function main(argv: string[]): Promise<number> {
     feature !== "chat-streaming" &&
     feature !== "model-status" &&
     feature !== "chat-history" &&
+    feature !== "memory-persist" &&
     feature !== "runtime-restart"
   ) {
     return usage();
@@ -1491,6 +1679,12 @@ async function main(argv: string[]): Promise<number> {
   if (feature === "chat-history" && llama !== "external") {
     process.stderr.write(
       "chat-history requires --core real --llama external\n",
+    );
+    return usage();
+  }
+  if (feature === "memory-persist" && (kind !== "real" || llama !== "stub")) {
+    process.stderr.write(
+      "memory-persist requires --core real and the built-in stub\n",
     );
     return usage();
   }

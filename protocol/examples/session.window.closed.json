@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "method": "session.window",
+  "params": {
+    "conversationId": "conv-1",
+    "state": "closed"
+  }
+}

@@ -36,6 +36,7 @@ export const paramDefs = [
   "chatDeltaParams",
   "chatDoneParams",
   "runtimeStatusParams",
+  "sessionWindowParams",
   "emptyParams",
 ] as const;
 

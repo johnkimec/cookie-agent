@@ -10,7 +10,7 @@ import {
   CORE_SERVER_VERSION,
   SYSTEM_PROMPT,
 } from "./identity.ts";
-import { ConversationMemory } from "./memory.ts";
+import { type ConversationHistory, ConversationMemory } from "./memory.ts";
 import { isAbortError } from "./model/ai-sdk-provider.ts";
 import type {
   ModelCompletion,
@@ -27,6 +27,7 @@ import {
   PROTOCOL_VERSION,
   type RuntimeState,
   type RuntimeStatus,
+  type SessionWindowParams,
 } from "./protocol/types.ts";
 import {
   isCookieMessage,
@@ -54,6 +55,7 @@ interface Flight {
   messageId: string;
   userText: string;
   sent: string[];
+  startedAt: number;
   cancelled: boolean;
   abort: AbortController;
 }
@@ -73,6 +75,11 @@ export interface AgentCoreOptions {
   emit?: (message: unknown) => void;
   log?: (line: string) => void;
   exit?: (code: number) => void;
+  /**
+   * Turn history. The stdio entry passes a SQLite `ChatLog`.
+   * Tests that omit it keep an in-memory stand-in.
+   */
+  history?: ConversationHistory;
   serverName?: string;
   serverVersion?: string;
 }
@@ -88,7 +95,7 @@ export class AgentCore {
   readonly probeTimeoutMs: number;
   private readonly now: () => number;
   private readonly provider: ModelProvider;
-  private readonly memory = new ConversationMemory();
+  private readonly history: ConversationHistory;
   private readonly emitMessage: (message: unknown) => void;
   private readonly logLine: (line: string) => void;
   private readonly requestExit: (code: number) => void;
@@ -111,6 +118,7 @@ export class AgentCore {
 
   constructor(options: AgentCoreOptions) {
     this.provider = options.provider;
+    this.history = options.history ?? new ConversationMemory();
     this.probeTimeoutMs = options.probeTimeoutMs ?? 1000;
     this.now = options.now ?? (() => Date.now());
     this.serverName = options.serverName ?? CORE_SERVER_NAME;
@@ -237,6 +245,10 @@ export class AgentCore {
   private handleNotification(method: string, params: unknown): void {
     if (this.phase !== "ready") {
       this.logLine(`ignored ${method} before initialize`);
+      return;
+    }
+    if (method === "session.window") {
+      this.onSessionWindow(params);
       return;
     }
     if (method !== "runtime.status") {
@@ -386,6 +398,7 @@ export class AgentCore {
       messageId,
       userText: body.text,
       sent: [],
+      startedAt: this.now(),
       cancelled: false,
       abort: new AbortController(),
     };
@@ -537,7 +550,7 @@ export class AgentCore {
     try {
       stream = this.provider.streamChat({
         system: SYSTEM_PROMPT,
-        messages: this.memory.messagesFor(
+        messages: this.history.messagesFor(
           flight.conversationId,
           flight.userText,
         ),
@@ -630,11 +643,7 @@ export class AgentCore {
       return;
     }
     this.inflight = null;
-    this.memory.commit(
-      flight.conversationId,
-      flight.userText,
-      flight.sent.join(""),
-    );
+    this.commitFlight(flight, usage);
     this.emit(this.doneMessage(flight, finishReason, usage));
   }
 
@@ -645,11 +654,7 @@ export class AgentCore {
     flight.cancelled = true;
     this.inflight = null;
     flight.abort.abort();
-    this.memory.commit(
-      flight.conversationId,
-      flight.userText,
-      flight.sent.join(""),
-    );
+    this.commitFlight(flight, ZERO_USAGE);
     // The aborted request does not return a usage payload. See lessons.
     this.emit(this.doneMessage(flight, "cancelled", ZERO_USAGE));
   }
@@ -708,7 +713,35 @@ export class AgentCore {
     this.emitMessage(message);
   }
 
+  private onSessionWindow(params: unknown): void {
+    if (!paramsAreValid("sessionWindowParams", params)) {
+      this.logLine(
+        `ignored session.window ${paramsErrors("sessionWindowParams", params)}`,
+      );
+      return;
+    }
+    const body = params as SessionWindowParams;
+    this.history.noteWindow(body.conversationId, body.state);
+  }
+
+  private commitFlight(flight: Flight, usage: ModelUsage): void {
+    try {
+      this.history.commit({
+        conversationId: flight.conversationId,
+        userText: flight.userText,
+        assistantText: flight.sent.join(""),
+        modelId: this.provider.modelId,
+        usage,
+        latencyMs: Math.max(0, this.now() - flight.startedAt),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "memory failed";
+      this.logLine(`memory: ${detail}`);
+    }
+  }
+
   private flushAndExit(code: number): void {
+    this.history.close();
     if (!this.ownsStdio) {
       this.finish(code);
       return;
