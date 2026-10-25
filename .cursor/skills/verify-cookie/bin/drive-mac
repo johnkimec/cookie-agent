@@ -77,7 +77,7 @@ cleanup() {
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill "$APP_PID" 2>/dev/null || true
     local attempt
-    for attempt in $(seq 1 30); do
+    for attempt in $(seq 1 40); do
       kill -0 "$APP_PID" 2>/dev/null || break
       sleep 0.5
     done
@@ -151,6 +151,53 @@ pid_is_llama() {
   local pid="$1"
   pid_alive "$pid" || return 1
   ps -p "$pid" -o command= | awk '/llama-server/ { found=1 } END { exit found ? 0 : 1 }'
+}
+
+# cwd of a core child (pnpm or node), not llama-server. Bash 3.2: no associative arrays.
+core_child_cwd() {
+  local app_pid="$1"
+  local queue="$app_pid"
+  local seen=" $app_pid "
+  while [[ -n "$queue" ]]; do
+    local current="${queue%% *}"
+    if [[ "$queue" == "$current" ]]; then
+      queue=""
+    else
+      queue="${queue#* }"
+    fi
+    local children child
+    children="$(pgrep -P "$current" 2>/dev/null || true)"
+    for child in $children; do
+      case "$seen" in
+        *" $child "*) continue ;;
+      esac
+      seen="$seen$child "
+      if [[ -z "$queue" ]]; then
+        queue="$child"
+      else
+        queue="$queue $child"
+      fi
+      local cmd cwd
+      cmd="$(ps -p "$child" -o command= 2>/dev/null || true)"
+      case "$cmd" in
+        *llama-server*) continue ;;
+      esac
+      case "$cmd" in
+        *pnpm*|*@cookie-agent/core*|*fake-core.ts*|*src/index.ts*)
+          cwd="$(lsof -a -p "$child" -d cwd -Fn 2>/dev/null | awk '/^n/ { sub(/^n/, ""); print; exit }' || true)"
+          if [[ -n "$cwd" ]]; then
+            printf '%s\n' "$cwd"
+            return 0
+          fi
+          ;;
+      esac
+    done
+  done
+  return 1
+}
+
+open_support_dir() {
+  printf '%s\n' "$HOME/Library/Application Support/com.johnkimec.cookie-agent"
 }
 
 # System Events names the process after the executable, CookieAgent,
@@ -847,6 +894,124 @@ else
   fi
   log "quit left port ${PORT} listener state unchanged"
 fi
+
+# Finder and `open` pass no COOKIE_* variables and a minimal PATH.
+# LaunchServices does not keep this shell's environment. env -i is the
+# same shape John gets from `open -n`.
+open_clean_check() {
+  if pgrep -x CookieAgent >/dev/null 2>&1; then
+    fail "CookieAgent still running before open launch"
+  fi
+  local support port_before
+  support="$(open_support_dir)"
+  port_before=0
+  if port_listening 8080; then
+    port_before=1
+  fi
+  log "open -n clean env support=$support"
+  env -i \
+    HOME="$HOME" \
+    USER="${USER:-$(id -un)}" \
+    LOGNAME="${USER:-$(id -un)}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    /usr/bin/open -n "$APP"
+  local found="" attempt
+  for attempt in $(seq 1 40); do
+    found="$(pgrep -x CookieAgent 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$found" ]]; then
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ -z "$found" ]]; then
+    fail "open did not start CookieAgent"
+  fi
+  APP_PID="$found"
+  log "open pid=$APP_PID"
+  local cwd="" menu_text=""
+  for attempt in $(seq 1 40); do
+    if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
+      menu_text="$(cat /tmp/cookie-drive-mac-menu.txt || true)"
+      case "$menu_text" in
+        *"core not found"*|*"pnpm not found"*|*"core can't start"*)
+          fail "open launch menu: $menu_text"
+          ;;
+      esac
+    fi
+    cwd="$(core_child_cwd "$APP_PID" || true)"
+    if [[ -n "$cwd" && -f "$cwd/core/package.json" ]]; then
+      break
+    fi
+    cwd=""
+    sleep 0.5
+  done
+  if [[ -z "$cwd" ]]; then
+    fail "core did not start from a directory with core/package.json"
+  fi
+  local expected actual
+  expected="$(cd "$ROOT" && pwd -P)"
+  actual="$(cd "$cwd" && pwd -P)"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "core cwd $actual is not $expected"
+  fi
+  log "open core cwd=$actual"
+  if [[ "$runtime" == "real" ]]; then
+    if ! wait_for_runtime_up; then
+      fail "open launch runtime did not reach up"
+    fi
+    log "open runtime up"
+  fi
+  local pidfile owned=""
+  pidfile="$support/logs/llama-server.pid"
+  if [[ -f "$pidfile" ]]; then
+    owned="$(awk 'NF >= 1 { print $1; exit }' "$pidfile")"
+  fi
+  local term_port="8080"
+  if [[ -f "$support/logs/llama-server.log" ]]; then
+    local parsed
+    parsed="$(awk 'match($0, /--port [0-9]+/) { print substr($0, RSTART+7, RLENGTH-7); exit }' "$support/logs/llama-server.log" || true)"
+    if [[ -n "$parsed" ]]; then
+      term_port="$parsed"
+    fi
+  fi
+  log "pkill -TERM CookieAgent pidfile=${owned:-none} port=$term_port"
+  pkill -TERM CookieAgent || true
+  local exited=0
+  for attempt in $(seq 1 40); do
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      exited=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$exited" != "1" ]]; then
+    fail "CookieAgent still running after SIGTERM"
+  fi
+  wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+  if [[ -n "$owned" ]]; then
+    if pid_is_llama "$owned"; then
+      fail "llama-server ${owned} still alive after SIGTERM"
+    fi
+    if port_listening "$term_port"; then
+      fail "port ${term_port} still listening after SIGTERM"
+    fi
+    log "SIGTERM reaped ${owned} port ${term_port} clear"
+  elif [[ "$port_before" == "0" ]]; then
+    if port_listening 8080; then
+      fail "port 8080 is listening after SIGTERM"
+    fi
+    log "SIGTERM left port 8080 clear"
+  else
+    if ! port_listening 8080; then
+      fail "SIGTERM stopped a server this app did not launch on port 8080"
+    fi
+    log "SIGTERM left an existing port 8080 listener"
+  fi
+}
+
+open_clean_check
 
 log "ok"
 log "Mac proof is pending until this transcript is saved under verify-evidence/ and the feature files are updated."

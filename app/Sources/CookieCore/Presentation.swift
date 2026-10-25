@@ -39,6 +39,29 @@ public enum CookieCopy {
     public static let stillAnswering = "Cookie's still answering."
     /// Placeholder loading copy, pending John's review.
     public static let modelLoading = "Loading the model…"
+    /// Placeholder menu copy, pending John's review.
+    public static let coreNotFound = "🐾 Cookie · core not found"
+    /// Placeholder menu copy, pending John's review.
+    public static let pnpmNotFound = "🐾 Cookie · pnpm not found"
+    /// Placeholder menu copy, pending John's review.
+    public static let commandNotFound = "🐾 Cookie · core can't start"
+}
+
+public enum ShellLaunchFailure: Equatable, Sendable {
+    case coreNotFound
+    case pnpmNotFound
+    case commandNotFound
+
+    public var statusLine: String {
+        switch self {
+        case .coreNotFound:
+            return CookieCopy.coreNotFound
+        case .pnpmNotFound:
+            return CookieCopy.pnpmNotFound
+        case .commandNotFound:
+            return CookieCopy.commandNotFound
+        }
+    }
 }
 
 public enum PopupLayout {

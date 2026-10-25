@@ -1,5 +1,6 @@
 import AppKit
 import CookieCore
+import Darwin
 import SwiftUI
 
 @main
@@ -24,6 +25,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
     private var popup: PopupController?
     private var hotkey: HotkeyCenter?
+    private var signalSources: [DispatchSourceSignal] = []
+
+    override init() {
+        super.init()
+        installQuitSignals()
+    }
+
+    /// `pkill -TERM` must take the same path as Quit. Ignore the signal
+    /// first, or the default action kills the process before the source runs.
+    private func installQuitSignals() {
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler {
+                DispatchQueue.main.async {
+                    NSApp.terminate(nil)
+                }
+            }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)

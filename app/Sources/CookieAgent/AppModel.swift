@@ -11,6 +11,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var runtime = RuntimeStatus(state: .down, modelId: nil)
     @Published var popupOpen = false
     @Published var conversation = PopupConversation()
+    @Published var launchFailure: ShellLaunchFailure?
 
     let localOnly = true
     let conversationID = "conv-\(UUID().uuidString)"
@@ -49,14 +50,20 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     var statusText: String {
-        CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
+        if let launchFailure {
+            return launchFailure.statusLine
+        }
+        return CookieCore.statusLine(runtime: runtime.state, modelID: runtime.modelId)
     }
 
     func start() {
+        let plistRoot = Bundle.main.object(forInfoDictionaryKey: "CookieRepoRoot") as? String
         let launch = CoreLaunch.resolve(
             environment: ProcessInfo.processInfo.environment,
             currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
-            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            plistRepoRoot: plistRoot,
+            bundleURL: Bundle.main.bundleURL
         )
         do {
             try launch.prepareDataDirectory()
@@ -66,9 +73,21 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
         let inherited = !(ProcessInfo.processInfo.environment["COOKIE_DATA_DIR"]?.isEmpty ?? true)
         let portText = parseLlamaPort(launch.environment["COOKIE_LLAMA_PORT"]).map(String.init) ?? "invalid"
+        let command = ([launch.executable] + launch.arguments).joined(separator: " ")
         log(
-            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) core=\(launch.arguments.joined(separator: " ")) cwd=\(launch.workingDirectory.path)"
+            "dataDir=\(dataDir) dataDirSource=\(inherited ? "environment" : "default") port=\(portText) core=\(command) cwd=\(launch.workingDirectory.path) coreRoot=\(launch.coreRootReady) commandReady=\(launch.commandReady) path=\(launch.environment["PATH"] ?? "")"
         )
+        guard launch.coreRootReady, launch.commandReady else {
+            if !launch.coreRootReady {
+                launchFailure = .coreNotFound
+            } else if (launch.executable as NSString).lastPathComponent == "pnpm" {
+                launchFailure = .pnpmNotFound
+            } else {
+                launchFailure = .commandNotFound
+            }
+            log("core launch failed status=\(statusText)")
+            return
+        }
         let transport = ProcessTransport(launch: launch)
         let supervisor = CoreSupervisor(transport: transport)
         self.transport = transport

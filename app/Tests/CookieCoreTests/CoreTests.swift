@@ -72,6 +72,11 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieCopy.localOnly, "Local-only mode")
         XCTAssertEqual(CookieCopy.quit, "Quit Cookie")
         XCTAssertEqual(CookieCopy.onDevice, "on-device")
+        XCTAssertEqual(CookieCopy.coreNotFound, "🐾 Cookie · core not found")
+        XCTAssertEqual(CookieCopy.pnpmNotFound, "🐾 Cookie · pnpm not found")
+        XCTAssertEqual(CookieCopy.commandNotFound, "🐾 Cookie · core can't start")
+        XCTAssertEqual(ShellLaunchFailure.coreNotFound.statusLine, CookieCopy.coreNotFound)
+        XCTAssertEqual(ShellLaunchFailure.pnpmNotFound.statusLine, CookieCopy.pnpmNotFound)
         XCTAssertEqual(PopupLayout.width, 560)
         XCTAssertEqual(PopupLayout.maxHeight, 520)
         XCTAssertEqual(PopupLayout.collapsedHeight, 64)
@@ -167,7 +172,8 @@ final class LaunchTests: XCTestCase {
         let launch = CoreLaunch.resolve(
             environment: [:],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            homeDirectory: home
+            homeDirectory: home,
+            toolSearchPaths: []
         )
         let dataDir = launch.environment["COOKIE_DATA_DIR"] ?? ""
         XCTAssertEqual(
@@ -177,7 +183,10 @@ final class LaunchTests: XCTestCase {
         XCTAssertFalse(dataDir.contains("/tmp/cookie-m0"))
         XCTAssertFalse(dataDir.contains("cookie-agent-"))
         XCTAssertNil(launch.environment["COOKIE_LLAMA_PORT"])
-        XCTAssertEqual(launch.arguments, ["pnpm", "--filter", "@cookie-agent/core", "start"])
+        XCTAssertEqual(launch.executable, "pnpm")
+        XCTAssertEqual(launch.arguments, ["--filter", "@cookie-agent/core", "start"])
+        XCTAssertFalse(launch.commandReady)
+        XCTAssertFalse(launch.coreRootReady)
         XCTAssertTrue(launch.supervisesRuntime)
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/not-a-repo")
     }
@@ -191,15 +200,18 @@ final class LaunchTests: XCTestCase {
                 "COOKIE_CORE_CWD": "/tmp/cookie-repo",
             ],
             currentDirectory: URL(fileURLWithPath: "/tmp/ignored", isDirectory: true),
-            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            toolSearchPaths: []
         )
         XCTAssertEqual(launch.environment["COOKIE_DATA_DIR"], "/tmp/cookie-isolated")
         XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "18080")
+        XCTAssertEqual(launch.executable, "node")
         XCTAssertEqual(
             launch.arguments,
-            ["node", "--experimental-strip-types", "src/fake-core.ts"]
+            ["--experimental-strip-types", "src/fake-core.ts"]
         )
         XCTAssertEqual(launch.workingDirectory.path, "/tmp/cookie-repo")
+        XCTAssertFalse(launch.coreRootReady)
         XCTAssertFalse(launch.supervisesRuntime)
     }
 
@@ -209,7 +221,8 @@ final class LaunchTests: XCTestCase {
         let unset = CoreLaunch.resolve(
             environment: ["OTHER": "kept"],
             currentDirectory: cwd,
-            homeDirectory: home
+            homeDirectory: home,
+            toolSearchPaths: []
         )
         XCTAssertNil(unset.environment["COOKIE_LLAMA_PORT"])
         XCTAssertEqual(unset.environment["OTHER"], "kept")
@@ -217,7 +230,8 @@ final class LaunchTests: XCTestCase {
         let empty = CoreLaunch.resolve(
             environment: ["COOKIE_LLAMA_PORT": ""],
             currentDirectory: cwd,
-            homeDirectory: home
+            homeDirectory: home,
+            toolSearchPaths: []
         )
         XCTAssertNil(empty.environment["COOKIE_LLAMA_PORT"])
     }
@@ -226,7 +240,8 @@ final class LaunchTests: XCTestCase {
         let launch = CoreLaunch.resolve(
             environment: ["COOKIE_LLAMA_PORT": "8080"],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            toolSearchPaths: []
         )
         XCTAssertEqual(launch.environment["COOKIE_LLAMA_PORT"], "8080")
     }
@@ -235,15 +250,117 @@ final class LaunchTests: XCTestCase {
         let fake = CoreLaunch.resolve(
             environment: ["COOKIE_CORE_COMMAND": "pnpm --filter @cookie-agent/core fake-core"],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            toolSearchPaths: []
         )
         XCTAssertFalse(fake.supervisesRuntime)
         let real = CoreLaunch.resolve(
             environment: [:],
             currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
-            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true)
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            toolSearchPaths: []
         )
         XCTAssertTrue(real.supervisesRuntime)
+    }
+
+    func testPlistRepoRootAndBundleFallback() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-root-\(UUID().uuidString)", isDirectory: true)
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        let core = repo.appendingPathComponent("core", isDirectory: true)
+        try FileManager.default.createDirectory(at: core, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("{}".utf8).write(to: core.appendingPathComponent("package.json"))
+        let bundle = repo.appendingPathComponent("dist/Cookie Agent.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
+        let slash = URL(fileURLWithPath: "/", isDirectory: true)
+
+        let fromPlist = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: slash,
+            homeDirectory: home,
+            plistRepoRoot: repo.path,
+            toolSearchPaths: []
+        )
+        XCTAssertTrue(fromPlist.coreRootReady)
+        XCTAssertEqual(fromPlist.workingDirectory.path, repo.path)
+
+        let fromBundle = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: slash,
+            homeDirectory: home,
+            plistRepoRoot: "/tmp/missing-cookie-repo",
+            bundleURL: bundle,
+            toolSearchPaths: []
+        )
+        XCTAssertTrue(fromBundle.coreRootReady)
+        XCTAssertEqual(fromBundle.workingDirectory.path, repo.path)
+
+        let missing = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: slash,
+            homeDirectory: home,
+            plistRepoRoot: "/tmp/missing-cookie-repo",
+            bundleURL: URL(fileURLWithPath: "/tmp/no-such/dist/Cookie Agent.app", isDirectory: true),
+            toolSearchPaths: []
+        )
+        XCTAssertFalse(missing.coreRootReady)
+        XCTAssertEqual(ShellLaunchFailure.coreNotFound.statusLine, "🐾 Cookie · core not found")
+
+        let override = CoreLaunch.resolve(
+            environment: ["COOKIE_CORE_CWD": "/tmp/cookie-override"],
+            currentDirectory: slash,
+            homeDirectory: home,
+            plistRepoRoot: repo.path,
+            toolSearchPaths: []
+        )
+        XCTAssertEqual(override.workingDirectory.path, "/tmp/cookie-override")
+        XCTAssertFalse(override.coreRootReady)
+    }
+
+    func testAugmentedPathAndPnpmResolution() throws {
+        let home = URL(fileURLWithPath: "/Users/john", isDirectory: true)
+        let paths = CoreLaunch.toolSearchPaths(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: home
+        )
+        XCTAssertEqual(paths.first, "/usr/bin")
+        XCTAssertTrue(paths.contains("/opt/homebrew/bin"))
+        XCTAssertTrue(paths.contains("/usr/local/bin"))
+        XCTAssertTrue(paths.contains("/Users/john/Library/pnpm"))
+        XCTAssertTrue(paths.contains("/Users/john/.local/share/pnpm"))
+
+        let bin = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-pnpm-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bin) }
+        let pnpm = bin.appendingPathComponent("pnpm")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: pnpm)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pnpm.path)
+
+        let launch = CoreLaunch.resolve(
+            environment: ["PATH": "/usr/bin:/bin"],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            homeDirectory: home,
+            toolSearchPaths: [bin.path]
+        )
+        XCTAssertEqual(launch.executable, pnpm.path)
+        XCTAssertEqual(launch.arguments, ["--filter", "@cookie-agent/core", "start"])
+        XCTAssertTrue(launch.commandReady)
+        XCTAssertEqual(launch.environment["PATH"], bin.path)
+        XCTAssertTrue(launch.supervisesRuntime)
+
+        let missingTool = CoreLaunch.resolve(
+            environment: ["PATH": "/usr/bin:/bin"],
+            currentDirectory: URL(fileURLWithPath: "/tmp/not-a-repo", isDirectory: true),
+            homeDirectory: home,
+            toolSearchPaths: ["/tmp/cookie-no-tools"]
+        )
+        XCTAssertFalse(missingTool.commandReady)
+        XCTAssertEqual(missingTool.executable, "pnpm")
+        XCTAssertEqual(ShellLaunchFailure.pnpmNotFound.statusLine, "🐾 Cookie · pnpm not found")
+        XCTAssertEqual(ShellLaunchFailure.commandNotFound.statusLine, "🐾 Cookie · core can't start")
     }
 
     func testFindRepoWalksToWorkspace() {
@@ -253,6 +370,14 @@ final class LaunchTests: XCTestCase {
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: repo!.appendingPathComponent("protocol/README.md").path)
         )
+        let launch = CoreLaunch.resolve(
+            environment: [:],
+            currentDirectory: here,
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            toolSearchPaths: []
+        )
+        XCTAssertTrue(launch.coreRootReady)
+        XCTAssertTrue(CoreLaunch.hasCorePackage(launch.workingDirectory))
     }
 }
 
