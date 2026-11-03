@@ -79,9 +79,9 @@ enum PopupPreviewRenderer {
         throw PreviewError("\(kind) preview did not draw its controls")
     }
 
-    private static func view(identified identifier: String, in view: NSView) -> NSView? {
-        if view.accessibilityIdentifier() == identifier { return view }
-        for subview in view.subviews {
+    private static func view(identified identifier: String, in root: NSView) -> NSView? {
+        if root.accessibilityIdentifier() == identifier { return root }
+        for subview in root.subviews {
             if let found = view(identified: identifier, in: subview) { return found }
         }
         return nil
