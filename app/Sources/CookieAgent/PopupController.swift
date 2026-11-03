@@ -21,6 +21,33 @@ final class PopupHostingView: NSHostingView<PopupRoot> {
     override func isAccessibilityElement() -> Bool {
         false
     }
+
+    override func layout() {
+        super.layout()
+        ReplyTextLayout.constrain(self)
+    }
+}
+
+/// Reply text is not rewritten to force a wrap. A finite text-container
+/// width and word wrapping break a token that does not fit the column.
+enum ReplyTextLayout {
+    static func constrain(_ view: NSView) {
+        if let text = view as? NSTextView, !(text is AskTextView) {
+            text.textContainer?.lineBreakMode = .byWordWrapping
+            text.textContainer?.maximumNumberOfLines = 0
+            let width = text.bounds.width
+            if width > 1 {
+                text.textContainer?.widthTracksTextView = true
+                text.textContainer?.containerSize = NSSize(
+                    width: width,
+                    height: CGFloat.greatestFiniteMagnitude
+                )
+            }
+        }
+        for subview in view.subviews {
+            constrain(subview)
+        }
+    }
 }
 
 final class PopupController: NSObject, @unchecked Sendable {
@@ -548,7 +575,7 @@ struct TurnRow: View {
         case .you:
             // fixedSize stays inside the width frame. Outside it, the ideal
             // height is the unwrapped line and the column clips the tail.
-            Text(ReplyLayout.displayText(turn.text))
+            Text(turn.text)
                 .textSelection(.enabled)
                 .multilineTextAlignment(.leading)
                 .lineLimit(nil)
@@ -559,9 +586,9 @@ struct TurnRow: View {
             // returns nil for an infinite width, and the paragraph then
             // stays one line. Inline LaTeX is an attachment in that
             // paragraph, so it wraps with the text once the width is finite.
-            // displayText gives a long token a break the library's word
-            // wrap would otherwise keep on one clipped line.
-            MarkdownView(text: ReplyLayout.displayText(prepareReplyMarkdown(turn.text)))
+            // The string is the model text. ReplyTextLayout sets the
+            // NSTextView container to that width and .byWordWrapping.
+            MarkdownView(text: prepareReplyMarkdown(turn.text))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

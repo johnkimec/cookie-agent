@@ -69,6 +69,7 @@ enum PopupPreviewRenderer {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             host.layoutSubtreeIfNeeded()
+            ReplyTextLayout.constrain(host)
             let field = view(identified: CookieAX.popupInput, in: host) != nil
             let button = view(identified: CookieAX.popupSend, in: host) != nil
             if field, button, needle == nil || containsText(needle!, in: host) {
@@ -90,12 +91,7 @@ enum PopupPreviewRenderer {
     }
 
     private static func containsText(_ needle: String, in view: NSView) -> Bool {
-        if let text = view as? NSTextView {
-            // displayText inserts a zero-width space in a long token, so the
-            // sentinel is not one contiguous run in the text view.
-            let visible = text.string.replacingOccurrences(of: "\u{200B}", with: "")
-            if visible.contains(needle) { return true }
-        }
+        if let text = view as? NSTextView, text.string.contains(needle) { return true }
         return view.subviews.contains { containsText(needle, in: $0) }
     }
 

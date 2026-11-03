@@ -624,7 +624,7 @@ private func laidOutTurnHeight(_ text: String) -> CGFloat {
         Text("cookie")
             .font(.body.monospaced())
             .frame(width: 64, alignment: .leading)
-        Text(ReplyLayout.displayText(text))
+        Text(text)
             .font(.body)
             .lineLimit(nil)
             .fixedSize(horizontal: false, vertical: true)
@@ -738,17 +738,37 @@ final class PopupSizingTests: XCTestCase {
         XCTAssertLessThan(wrapped, 180)
     }
 
-    func testDisplayTextBreaksALongRunAndLeavesShortText() {
-        let word = String(repeating: "A", count: 40)
-        let shown = ReplyLayout.displayText(word)
-        XCTAssertTrue(shown.contains("\u{200B}"))
-        XCTAssertEqual(shown.replacingOccurrences(of: "\u{200B}", with: ""), word)
-        XCTAssertEqual(ReplyLayout.displayText("Hi"), "Hi")
-        let sentence = "The concept of TPS (Transactions per second) stays readable."
-        XCTAssertEqual(
-            ReplyLayout.displayText(sentence).replacingOccurrences(of: "\u{200B}", with: ""),
-            sentence
-        )
+    func testPreparedReplyEqualsTheOriginal() {
+        let word = String(repeating: "Transaction", count: 8)
+        let sentence = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
+        XCTAssertEqual(prepareReplyMarkdown(word), word)
+        XCTAssertEqual(prepareReplyMarkdown(sentence), sentence)
+        XCTAssertFalse(prepareReplyMarkdown(word).contains("\u{200B}"))
+        XCTAssertFalse(sentence.contains("\u{200B}"))
+        let math = "Energy \\(a^2 + b^2\\) and \\[E = mc^2\\]."
+        let shown = prepareReplyMarkdown(math)
+        XCTAssertFalse(shown.contains("\u{200B}"))
+        XCTAssertTrue(shown.contains("$$E = mc^2$$"))
+    }
+
+    @MainActor
+    func testLongTokenWrapsInAWordWrappingTextContainer() {
+        let word = String(repeating: "Transaction", count: 8)
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 180, height: 400))
+        text.string = word
+        text.isHorizontallyResizable = false
+        text.textContainer?.widthTracksTextView = false
+        text.textContainer?.lineBreakMode = .byWordWrapping
+        text.textContainer?.containerSize = NSSize(width: 180, height: CGFloat.greatestFiniteMagnitude)
+        guard let container = text.textContainer, let manager = text.layoutManager else {
+            XCTFail("missing text container")
+            return
+        }
+        manager.ensureLayout(for: container)
+        let used = manager.usedRect(for: container)
+        XCTAssertEqual(text.string, word)
+        XCTAssertFalse(text.string.contains("\u{200B}"))
+        XCTAssertGreaterThan(used.height, 40, "an over-long token wraps by character inside the column")
     }
 
     @MainActor

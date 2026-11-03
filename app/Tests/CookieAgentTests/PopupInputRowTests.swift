@@ -23,6 +23,32 @@ final class PopupInputRowTests: XCTestCase {
         }
     }
 
+    func testStoredReplyEqualsTheOriginal() throws {
+        let text = "Einstein is best known for relativity. END-OF-REPLY-m1-popup "
+            + String(repeating: "Transaction", count: 6)
+        for role in [TurnRole.you, .cookie] {
+            let identifier = role == .you ? CookieAX.turnYou(0) : CookieAX.turnCookie(0)
+            let row = TurnRow(turn: ChatTurn(index: 0, role: role, text: text, streaming: false, badge: nil))
+                .frame(width: PopupLayout.width, alignment: .topLeading)
+            let host = NSHostingView(rootView: row)
+            host.frame = NSRect(x: 0, y: 0, width: PopupLayout.width, height: 200)
+            let window = NSWindow(
+                contentRect: host.frame,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            defer { window.close() }
+            host.layoutSubtreeIfNeeded()
+            let box = try XCTUnwrap(find(identifier, in: host))
+            let value = box.accessibilityValue() as? String
+            XCTAssertEqual(value, text)
+            XCTAssertFalse(value?.contains("\u{200B}") ?? true)
+        }
+    }
+
     func testYouReplyWrapsTheSentinel() throws {
         let text = "Einstein is best known for relativity. END-OF-REPLY-m1-popup. "
             + "This second sentence is wider than the popup column and has to wrap."
@@ -136,7 +162,9 @@ final class PopupInputRowTests: XCTestCase {
     }
 
     private func cookieColumnHeight(_ text: String) -> CGFloat {
-        let shown = ReplyLayout.displayText(prepareReplyMarkdown(text))
+        let shown = prepareReplyMarkdown(text)
+        XCTAssertEqual(shown.replacingOccurrences(of: "\u{200B}", with: ""), shown)
+        XCTAssertFalse(shown.contains("\u{200B}"))
         let row = HStack(alignment: .top, spacing: 12) {
             Text("cookie")
                 .font(.body.monospaced())
