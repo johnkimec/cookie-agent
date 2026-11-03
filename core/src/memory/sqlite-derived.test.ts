@@ -108,7 +108,7 @@ describe("sqlite derived memory", () => {
     again.close();
   });
 
-  it("forgets the linked fact and keeps the pinned profile when the needle is only a word", async () => {
+  it("drops the pinned aboutJohn copy when it is the forgotten fact on that turn", async () => {
     const store = SqliteMemoryStore.open(tempDbPath(), { now: () => 10 });
     store.appendSession({
       id: "ses-1",
@@ -154,14 +154,8 @@ describe("sqlite derived memory", () => {
       toolOptions,
     );
     expect(dropped).toMatchObject({ forgotten: true, factIds: ["fact-1"] });
-    // The needle is "midterm", not the pinned value, so the row stays.
-    expect(store.listProfile()).toEqual([
-      expect.objectContaining({
-        key: "ece_midterm",
-        value: "ECE midterm is Friday",
-        pinned: true,
-      }),
-    ]);
+    // The pin's value is the fact text and its source turn is t1.
+    expect(store.listProfile()).toEqual([]);
     expect(activeFacts(store, 10)).toEqual([]);
     expect(store.factById("fact-1")).toBeNull();
     expect(store.forgottenTurnIds()).toEqual(["t1"]);
@@ -509,12 +503,13 @@ describe("sqlite derived memory", () => {
     );
     expect(
       store.listFacts().some((row) => row.text === "gym bag is packed"),
-    ).toBe(true);
+    ).toBe(false);
     expect(store.listProfile().some((row) => row.value.includes("4417"))).toBe(
       false,
     );
-    // Both remembers cite t1. The gym row is pinned and its value is not
-    // the locker code, so it stays. The gym fact stays too.
+    // Both remembers cite t1, so the gym fact is purged with the locker
+    // fact. The gym row is pinned and its value is not the locker fact,
+    // so the profile row stays.
     expect(store.listProfile().some((row) => row.key === "gym")).toBe(true);
     expect(
       store.listChunks().some((chunk) => chunk.text.includes("4417")),

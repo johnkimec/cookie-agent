@@ -33,6 +33,7 @@ import {
   localDay,
   m1AcPower,
   readReflectIdleMs,
+  readTimeZone,
 } from "./schedule.ts";
 import { abortError, ModelSlot, type TimerQueue } from "./slot.ts";
 import { InMemoryMemoryStore } from "./store.ts";
@@ -304,23 +305,21 @@ describe("memory.remember and memory.forget", () => {
       (await vectors.knn("vec_chunks", embedding, 4)).map((hit) => hit.id),
     ).not.toContain("chunk-1");
     expect(derived.factById("fact-1")).toBeNull();
-    expect(derived.factById("fact-sibling")?.text).toBe(
-      "gym locker is near the door",
-    );
+    expect(derived.factById("fact-sibling")).toBeNull();
     expect(
       derived.listFacts().some((row) => /forgotten|midterm/i.test(row.text)),
     ).toBe(false);
     expect(derived.forgottenTurnIds()).toEqual(["t1"]);
     expect(derived.listChunks()).toEqual([]);
-    // Pinned `ece_midterm` stays: the needle is "midterm", not the value.
-    // Pinned `linked` shares t1 and stays. Unpinned `echo` on that turn goes.
-    // The sibling fact on t1 stays.
+    // Pinned `ece_midterm` is the fact text on t1, so the copy goes.
+    // Pinned `linked` shares t1 but its value is not the fact, so it stays.
+    // Unpinned `echo` on that turn goes. The sibling fact on t1 goes too.
     expect(
       derived
         .listProfile()
         .map((row) => row.key)
         .sort(),
-    ).toEqual(["ece_midterm", "kept", "linked"]);
+    ).toEqual(["kept", "linked"]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
   });
 
@@ -336,8 +335,12 @@ describe("memory.remember and memory.forget", () => {
       now: () => DAY,
       ids: sequentialIds("fact"),
     });
-    derived.insertFact(fact({ id: "a", text: "alpha midterm notes" }));
-    derived.insertFact(fact({ id: "b", text: "beta midterm notes" }));
+    derived.insertFact(
+      fact({ id: "a", text: "alpha midterm notes", sourceTurn: "other" }),
+    );
+    derived.insertFact(
+      fact({ id: "b", text: "beta midterm notes", sourceTurn: "other" }),
+    );
     const short = await tools[MEMORY_FORGET_TOOL]?.execute?.(
       { text: "mid" },
       toolOptions,
@@ -983,6 +986,23 @@ describe("reflect idle defaults", () => {
     expect(() => readReflectIdleMs({ COOKIE_REFLECT_IDLE_MS: "nope" })).toThrow(
       /COOKIE_REFLECT_IDLE_MS/,
     );
+  });
+
+  it("uses the system zone when COOKIE_LOCAL_TZ is not a time zone", () => {
+    const lines: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const system = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      expect(readTimeZone({ COOKIE_LOCAL_TZ: "Not/AZone" })).toBe(system);
+      expect(readTimeZone({})).toBe(system);
+      expect(lines.join("")).toContain("COOKIE_LOCAL_TZ");
+    } finally {
+      process.stderr.write = write;
+    }
   });
 
   it("keeps the step 0 reflector fake as a call log", async () => {

@@ -263,14 +263,18 @@ export function readReflectIdleMs(
 }
 
 export function readTimeZone(env: NodeJS.ProcessEnv = process.env): string {
+  const system = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const raw = env.COOKIE_LOCAL_TZ;
   if (raw === undefined || raw === "") {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    return system;
   }
   try {
     Intl.DateTimeFormat("en-US", { timeZone: raw });
   } catch {
-    throw new Error("COOKIE_LOCAL_TZ must be an IANA time zone");
+    process.stderr.write(
+      `cookie-core: COOKIE_LOCAL_TZ ${raw} is not an IANA time zone; using ${system}\n`,
+    );
+    return system;
   }
   return raw;
 }
