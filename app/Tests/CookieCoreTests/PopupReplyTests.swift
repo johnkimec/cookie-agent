@@ -710,7 +710,7 @@ final class PopupSizingTests: XCTestCase {
         )
         XCTAssertEqual(
             PopupMetrics.inputRowHeight(draft: "", showsNotice: true),
-            PopupLayout.collapsedHeight
+            PopupLayout.inputRowVerticalPadding * 2 + PopupMetrics.inputLineHeight + 20
         )
         XCTAssertLessThanOrEqual(PopupLayout.collapsedHeight, 72)
         let eight = Array(repeating: "line", count: 8).joined(separator: "\n")

@@ -40,9 +40,9 @@ public enum PopupMetrics {
         return CGFloat(lines) * inputLineHeight
     }
 
-    /// Height of the mascot row. A one-line draft, with or without the
-    /// loading line, is the collapsed row. Further draft lines grow the
-    /// field. The panel's extra height does not.
+    /// Height of the mascot row. A one-line draft with no loading line is
+    /// the collapsed row. The loading line and further draft lines grow it.
+    /// The panel's extra height does not.
     public static func inputRowHeight(draft: String, showsNotice: Bool) -> CGFloat {
         let notice: CGFloat = showsNotice ? 20 : 0
         return max(

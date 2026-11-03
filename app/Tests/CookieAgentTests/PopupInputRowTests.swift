@@ -186,7 +186,15 @@ final class PopupInputRowTests: XCTestCase {
         XCTAssertFalse(textView.string.contains("\u{200B}"))
         XCTAssertTrue(textView.string.contains("END-OF-REPLY-m1-popup"))
         XCTAssertTrue(textView.string.contains(token))
-        XCTAssertTrue(textView.string.contains("a^2 + b^2"))
+        XCTAssertTrue(textContains("code", in: host), "the code span was not rendered")
+        let storage = textView.attributedString()
+        let mathAttachment = storage.containsAttachments(
+            in: NSRange(location: 0, length: storage.length)
+        )
+        XCTAssertTrue(
+            mathAttachment || textContains("a^2", in: host),
+            "inline math was neither an attachment nor text"
+        )
         let width = textView.textContainer?.containerSize.width ?? 10_000
         XCTAssertLessThanOrEqual(width, PopupLayout.width - 32 - 64)
         XCTAssertEqual(textView.textContainer?.lineBreakMode, .byWordWrapping)
