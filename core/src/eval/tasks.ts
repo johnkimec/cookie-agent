@@ -26,8 +26,11 @@ export interface RecallTask {
   /**
    * Turn ids that must all be in the top 8.
    * Task 08 uses this for the lab-partner intro, which is a required step.
+   * Each id is checked against {@link requiredFacts}, not `expectedFact`.
    */
   requiredIds?: string[];
+  /** Fact that one required id must carry. Keyed by that id. */
+  requiredFacts?: Record<string, string>;
   /** Turn ids that must not rank above the expected hit. */
   distractorIds?: string[];
   /** Scored on `--real` only. `--fake` still replays it. */
@@ -165,7 +168,8 @@ export function storedTurnId(
 
 /**
  * Why a listed id is wrong, or null.
- * Expected and required turns must carry the fact or an accept entry.
+ * An expected turn must carry `expectedFact` or an accept entry.
+ * A required turn must carry its own `requiredFacts` entry.
  * A distractor must carry a `mustNotContain` string.
  * Ids are the ones {@link storedTurns} derives.
  */
@@ -173,8 +177,7 @@ export function listedTurnIssue(task: RecallTask): string | null {
   const byId = new Map(
     storedTurns(task.sessions).map((turn) => [turn.id, turn.content]),
   );
-  const required = task.requiredIds ?? [];
-  for (const id of [...(task.expectedIds ?? []), ...required]) {
+  for (const id of task.expectedIds ?? []) {
     const text = byId.get(id);
     if (text === undefined) {
       return `${task.id} ${id} is not a stored turn`;
@@ -184,6 +187,19 @@ export function listedTurnIssue(task: RecallTask): string | null {
       (task.accept ?? []).some((entry) => textContains(text, entry));
     if (!carries) {
       return `${task.id} ${id} does not carry the fact`;
+    }
+  }
+  for (const id of task.requiredIds ?? []) {
+    const text = byId.get(id);
+    if (text === undefined) {
+      return `${task.id} ${id} is not a stored turn`;
+    }
+    const fact = task.requiredFacts?.[id];
+    if (typeof fact !== "string" || fact === "") {
+      return `${task.id} ${id} has no requiredFact`;
+    }
+    if (!textContains(text, fact)) {
+      return `${task.id} ${id} does not carry its requiredFact`;
     }
   }
   for (const id of task.distractorIds ?? []) {

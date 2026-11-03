@@ -76,6 +76,27 @@ describe("memory recall eval tasks", () => {
     }
   });
 
+  it("checks task 08 required turns against Marcus Lee, not Bahen", () => {
+    const task = readTask(
+      join(evalDir, "tasks", "08-lab-partner-meeting.json"),
+    ) as TaskFile & {
+      accept?: string[];
+      requiredFacts?: Record<string, string>;
+    };
+    expect(task.accept).toBeUndefined();
+    expect(task.requiredFacts).toEqual({
+      "ses-2026-10-07-2040-popup-1-user": "Marcus Lee",
+      "ses-2026-10-07-2040-popup-2-assistant": "Marcus Lee",
+    });
+    expect(listedTurnIssue(task as never)).toBeNull();
+  });
+
+  it("documents that task 11 lists only the turns that carry the string", () => {
+    const task = readTask(join(evalDir, "tasks", "11-buried-dog-food.json"));
+    expect(task.tests).toMatch(/only the turns that carry the string/);
+    expect(listedTurnIssue(task as never)).toBeNull();
+  });
+
   it("validates the two unscored samples", () => {
     for (const file of ["01-ece-midterm.json", "02-office-hours.json"]) {
       const task = readTask(join(evalDir, "examples", file));
