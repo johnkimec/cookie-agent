@@ -54,6 +54,14 @@ export interface LlamaStubOptions {
   script?: (
     record: StubChatRequest,
   ) => StubScriptTurn | Promise<StubScriptTurn>;
+  /**
+   * When set, each completion is one chunk of this text.
+   * The recall-word script is not used. `script` wins when both are set.
+   */
+  replyText?: (
+    messages: unknown,
+    body?: Record<string, unknown>,
+  ) => string | Promise<string>;
 }
 
 export interface LlamaStub {
@@ -260,10 +268,13 @@ async function writeChat(
     return;
   }
   const recall = options.recallWord;
+  const scripted = options.replyText;
   const chunks =
-    recall === undefined
-      ? STUB_REPLY_CHUNKS
-      : [recallReply(record.messages, recall)];
+    scripted !== undefined
+      ? [await scripted(record.messages, record.body)]
+      : recall === undefined
+        ? [...STUB_REPLY_CHUNKS]
+        : [recallReply(record.messages, recall)];
   const slow = lastUserText(record.messages) === STUB_SLOW_USER_TEXT;
   for (let index = 0; index < chunks.length; index += 1) {
     if (index > 0 && slow) {
@@ -285,7 +296,7 @@ async function writeChat(
   const usage = usageFor(
     record.messages,
     chunks.join(""),
-    recall !== undefined,
+    recall !== undefined || scripted !== undefined,
   );
   response.write(
     `data: ${JSON.stringify(stopChunk(usage.input, usage.output))}\n\n`,

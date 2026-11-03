@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ChatLog } from "./chat-log.ts";
 import { FakeEmbedder } from "./embedder.ts";
 import { createMemoryRuntime } from "./runtime.ts";
 import { readReflectIdleMs } from "./schedule.ts";
@@ -18,34 +19,6 @@ afterEach(() => {
 });
 
 const FACT = "amber marker from the quiet session";
-
-/**
- * Stand-in for `ChatLog.beginAndReflect`, which exists only on PR #27.
- * A new conversation id ends the previous session. Await the runtime's
- * reflector before the first retrieval of the new turn.
- */
-async function checkpointThenRetrieve(
-  store: SqliteMemoryStore,
-  reflect: (sessionId: string) => Promise<void>,
-  nextId: string,
-  retrieve: () => Promise<string[]>,
-): Promise<string[]> {
-  const open = store
-    .listSessions()
-    .filter((session) => session.endedAt === null)
-    .map((session) => session.id);
-  store.beginConversation(nextId);
-  for (const id of open) {
-    if (id === nextId) {
-      continue;
-    }
-    const ended = store.session(id);
-    if (ended !== null && ended.endedAt !== null) {
-      await reflect(id);
-    }
-  }
-  return retrieve();
-}
 
 describe("reflect checkpoint", () => {
   it("COOKIE_REFLECT_IDLE_MS=0 commits facts before the next retrieval", async () => {
@@ -107,15 +80,20 @@ describe("reflect checkpoint", () => {
       },
     });
     let retrieves = 0;
-    const found = await checkpointThenRetrieve(
+    let found: string[] = [];
+    const log = new ChatLog(
       store,
-      (sessionId) => runtime.reflector.reflect(sessionId),
-      "conv-b",
-      async () => {
-        retrieves += 1;
-        return store.listFacts().map((fact) => fact.text);
+      null,
+      {
+        retrieve: async () => {
+          retrieves += 1;
+          found = store.listFacts().map((fact) => fact.text);
+          return [];
+        },
       },
+      { reflector: runtime.reflector },
     );
+    await log.messagesFor("conv-b", "what about the amber marker");
     expect(factsDuringModel).toBe(0);
     expect(retrieves).toBe(1);
     expect(found).toContain(FACT);
