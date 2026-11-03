@@ -9,9 +9,9 @@ import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { ChatLog } from "./memory/chat-log.ts";
 import { cachedProbe, resolveEmbedder } from "./memory/embed-config.ts";
 import {
-  DEFAULT_EMBED_TIMEOUT_MS,
   HttpEmbedder,
   readEmbedPort,
+  readIndexEmbedTimeoutMs,
   readQueryEmbedTimeoutMs,
 } from "./memory/http-embedder.ts";
 import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
@@ -54,17 +54,21 @@ export async function startStdioCore(
     timeZone = readTimeZone(env);
     const weights = readRrfWeights(env);
     const rerankConfig = readRerankConfig(env);
+    // Every env read stays above the open. A bad timeout must not create
+    // cookie.db, and a test must not fall through to the product directory.
+    const queryTimeoutMs = readQueryEmbedTimeoutMs(env);
+    const indexTimeoutMs = readIndexEmbedTimeoutMs(env);
     store = SqliteMemoryStore.open(memoryDatabasePath(env));
     // One index for the indexer, retrieval, and forget. A down embed
     // server must not leave forget deleting a different in-memory index.
     vectors = new SqliteVecIndex(store.database());
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
-      timeoutMs: readQueryEmbedTimeoutMs(env),
+      timeoutMs: queryTimeoutMs,
     });
     const indexEmbedder = new HttpEmbedder({
       port: embedPort,
-      timeoutMs: DEFAULT_EMBED_TIMEOUT_MS,
+      timeoutMs: indexTimeoutMs,
     });
     const embedUp = cachedProbe(
       async () => (await queryEmbedder.health()) === "up",
@@ -92,7 +96,8 @@ export async function startStdioCore(
       weights,
       available: embedUp,
       store,
-      rerank: (query, candidates) => reranker.rerank(query, candidates),
+      rerank: (query, candidates, signal) =>
+        reranker.rerank(query, candidates, signal),
     });
     history = new ChatLog(store, indexer, retriever);
   } catch (error) {

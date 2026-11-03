@@ -198,6 +198,9 @@ describe("llama-server provider", () => {
         name: "rerank",
         schema: {
           required: ["indices"],
+          properties: {
+            indices: { maxItems: 8 },
+          },
         },
       },
     });
