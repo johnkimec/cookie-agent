@@ -720,44 +720,301 @@ if "DRIVE_PROCESS_NAME" not in signal or "DRIVE_BUNDLE_ID" not in signal:
     sys.exit("signal_verified_app_pid does not require the per-run identity")
 import re
 
+# Any kill whose arguments mention APP_PID is rejected outside
+# signal_verified_app_pid. The one exception is a lone -0 liveness probe.
+# An eval that contains kill, and every pkill or killall, is rejected
+# everywhere, including inside that helper. The verb is concatenated so the
+# targeting lint, which scans this file, does not see those words.
 verb = "ki" + "ll"
-app = '"$APP_PID"'
-other = '"$pid"'
-forms = ("-9", "-KILL", "-s 9", "-s KILL", "-TERM", "-15", "")
-app_pid_signals = []
-fixtures = []
-for form in forms:
-    if form:
-        sample = verb + " " + form + " " + app
-        pattern = re.escape(verb) + r"\s+" + r"\s+".join(re.escape(part) for part in form.split()) + r"\s+" + re.escape(app)
-    else:
-        sample = verb + " " + app
-        pattern = re.escape(verb) + r"\s+" + re.escape(app)
-    app_pid_signals.append(pattern)
-    fixtures.append(sample)
+pk = "p" + verb
+ev = "ev" + "al"
+quoted = '"$' + "APP_PID" + '"'
+braced = '"${' + "APP_PID" + '}"'
+unquoted = "$" + "APP_PID"
+unbraced = "${" + "APP_PID" + "}"
+bare = "APP_PID"
+other = '"$' + "pid" + '"'
+decoy = '"$' + "DECOY_PID" + '"'
+word = re.compile(r"(?<![A-Za-z0-9_])" + verb + r"(?![A-Za-z0-9_])")
+pk_word = re.compile(r"(?<![A-Za-z0-9_])" + pk + r"(?![A-Za-z0-9_])")
+all_word = re.compile(r"(?<![A-Za-z0-9_])" + verb + r"all(?![A-Za-z0-9_])")
+ev_word = re.compile(r"(?<![A-Za-z0-9_])" + ev + r"(?![A-Za-z0-9_])")
+mentioned = re.compile(
+    r"\$\{APP_PID\b|\$APP_PID\b|(?<![A-Za-z0-9_$])APP_PID(?![A-Za-z0-9_])"
+)
 
 
-def outside_app_pid_signals(source):
-    start = source.index("signal_verified_app_pid() {")
-    end = source.index("\nDECOY_DATA=", start)
-    outside = source[:start] + "\n" + source[end:]
+def join_continuations(source):
+    lines = source.splitlines(keepends=True)
+    joined = []
+    buf = ""
+    for line in lines:
+        if line.endswith("\\\n"):
+            buf += line[:-2] + " "
+        elif line.endswith("\\"):
+            buf += line[:-1] + " "
+        else:
+            joined.append(buf + line)
+            buf = ""
+    if buf:
+        joined.append(buf)
+    return "".join(joined)
+
+
+def command_tail(source, start):
+    chars = []
+    quote = ""
+    index = start
+    limit = len(source)
+    while index < limit:
+        char = source[index]
+        if quote:
+            chars.append(char)
+            index += 1
+            if char == "\\" and quote == '"' and index < limit:
+                chars.append(source[index])
+                index += 1
+                continue
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            chars.append(char)
+            index += 1
+            continue
+        if char in "\n;|&":
+            break
+        if char == "#" and (not chars or chars[-1].isspace()):
+            break
+        chars.append(char)
+        index += 1
+    return "".join(chars)
+
+
+def shell_tokens(tail):
+    tokens = []
+    index = 0
+    limit = len(tail)
+    while index < limit:
+        while index < limit and tail[index].isspace():
+            index += 1
+        if index >= limit:
+            break
+        quote = ""
+        buf = []
+        while index < limit:
+            char = tail[index]
+            if quote:
+                buf.append(char)
+                index += 1
+                if char == "\\" and quote == '"' and index < limit:
+                    buf.append(tail[index])
+                    index += 1
+                    continue
+                if char == quote:
+                    quote = ""
+                continue
+            if char.isspace():
+                break
+            if char in "\"'":
+                quote = char
+                buf.append(char)
+                index += 1
+                continue
+            buf.append(char)
+            index += 1
+        if buf:
+            tokens.append("".join(buf))
+    return tokens
+
+
+def redir_only(token):
+    return re.fullmatch(r"\d*(?:>>|<<|[<>]&?|&[<>]|<>)", token) is not None
+
+
+def is_lone_zero(tokens):
+    signal = None
+    ended = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if "<" in token or ">" in token:
+            if redir_only(token) and index + 1 < len(tokens):
+                index += 2
+            else:
+                index += 1
+            continue
+        if not ended and token == "--":
+            ended = True
+            index += 1
+            continue
+        if not ended and token == "-0" and signal is None:
+            signal = "0"
+            index += 1
+            continue
+        if not ended and token.startswith("-") and token != "-":
+            return False
+        index += 1
+    return signal == "0"
+
+
+def outside_helper(source):
+    marker = "signal_verified_app_pid() {"
+    start = source.find(marker)
+    if start < 0:
+        sys.exit("signal_verified_app_pid is missing")
+    end = source.find("\nDECOY_DATA=", start)
+    if end < 0:
+        sys.exit("DECOY_DATA marker is missing after signal_verified_app_pid")
+    return source[:start] + "\n" + source[end:]
+
+
+def line_at(source, index):
+    line_start = source.rfind("\n", 0, index) + 1
+    line_end = source.find("\n", index)
+    if line_end < 0:
+        line_end = len(source)
+    return source[line_start:line_end].strip()
+
+
+def signal_violations(source):
+    text_now = join_continuations(source)
     found = []
-    for pattern in app_pid_signals:
-        if re.search(pattern, outside):
-            found.append(pattern)
-    return found
+    for pattern, label in ((pk_word, pk), (all_word, verb + "all")):
+        for match in pattern.finditer(text_now):
+            found.append(label + ": " + line_at(text_now, match.start()))
+    for line in text_now.splitlines():
+        if ev_word.search(line) and word.search(line):
+            found.append(ev + ": " + line.strip())
+    outside = outside_helper(text_now)
+    for match in word.finditer(outside):
+        tail = command_tail(outside, match.end())
+        if not mentioned.search(tail):
+            continue
+        if is_lone_zero(shell_tokens(tail)):
+            continue
+        found.append(verb + ": " + line_at(outside, match.start()))
+    unique = []
+    seen = set()
+    for item in found:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
 
 
-leaked = outside_app_pid_signals(text)
+def wrap(body):
+    return "signal_verified_app_pid() {\n:\n}\nDECOY_DATA=\n" + body + "\n"
+
+
+rejected = [
+    verb + " -9 " + quoted,
+    verb + " -KILL " + quoted,
+    verb + " -s 9 " + quoted,
+    verb + " -s KILL " + quoted,
+    verb + " -TERM " + quoted,
+    verb + " -15 " + quoted,
+    verb + " " + quoted,
+    verb + " -SIGKILL " + quoted,
+    verb + " -s SIGKILL " + quoted,
+    verb + " -n 9 " + quoted,
+    verb + " -HUP " + quoted,
+    verb + " -INT " + quoted,
+    verb + " -SIGTERM " + quoted,
+    verb + " -- " + quoted,
+    verb + " -9 -- " + quoted,
+    verb + " -9 " + braced,
+    verb + " -9 " + unbraced,
+    verb + " -9 " + unquoted,
+    verb + " -9 " + bare,
+    verb + " -9 '" + unquoted + "'",
+    "command " + verb + " -9 " + quoted,
+    "builtin " + verb + " -9 " + quoted,
+    "/bin/" + verb + " -9 " + quoted,
+    "/usr/bin/" + verb + " -9 " + quoted,
+    verb + "\t-9\t" + quoted,
+    verb + "\t-SIGKILL\t" + unquoted,
+    "command\t" + verb + "\t-9\t" + quoted,
+    verb + "  -9   " + quoted,
+    ev + ' "' + verb + " -9 " + unquoted + '"',
+    ev + ' "' + verb + " -9 " + other + '"',
+    pk + " -P",
+    verb + "all CookieAgent",
+    verb + " -s 0 " + quoted,
+    verb + " -n 0 " + quoted,
+    verb + " -0 -9 " + quoted,
+    verb + " -- -0 " + quoted,
+    verb + " -0 " + quoted + " || " + verb + " -9 " + quoted,
+]
+allowed = [
+    verb + " -0 " + quoted,
+    verb + " -0 " + unquoted,
+    verb + " -0 " + braced,
+    verb + " -0 " + unbraced,
+    verb + " -0 " + bare,
+    verb + " -0 -- " + quoted,
+    "if ! " + verb + " -0 " + quoted + " 2>/dev/null",
+    "command " + verb + " -0 " + quoted,
+    "builtin " + verb + " -0 " + quoted,
+    "/bin/" + verb + " -0 " + quoted,
+    verb + "\t-0\t" + quoted,
+    verb + " -9 " + other,
+    verb + " -0 " + other,
+    verb + " -SIGKILL " + other,
+    verb + " -9 " + decoy,
+    verb + " " + other,
+    'p="$APP_PID"; ' + verb + " -9 " + '"$p"',
+    ev + ' "echo ok"',
+]
+inside_ok = (
+    "signal_verified_app_pid() {\n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\n"
+    + verb
+    + " -TERM "
+    + quoted
+    + "\n"
+    + verb
+    + " -SIGKILL "
+    + braced
+    + "\n"
+    + verb
+    + " -- "
+    + unquoted
+    + "\n}\nDECOY_DATA=\n"
+)
+inside_pk = "signal_verified_app_pid() {\n" + pk + " -P\n}\nDECOY_DATA=\n"
+inside_all = (
+    "signal_verified_app_pid() {\n" + verb + "all CookieAgent\n}\nDECOY_DATA=\n"
+)
+inside_ev = (
+    "signal_verified_app_pid() {\n"
+    + ev
+    + ' "'
+    + verb
+    + " -9 "
+    + unquoted
+    + '"\n}\nDECOY_DATA=\n'
+)
+
+leaked = signal_violations(text)
 if leaked:
-    sys.exit("APP_PID signal outside signal_verified_app_pid: " + ", ".join(leaked))
-marker = "signal_verified_app_pid() {\n:\n}\nDECOY_DATA=\n"
-for sample in fixtures:
-    if not outside_app_pid_signals(marker + sample + "\n"):
+    sys.exit("APP_PID signal outside signal_verified_app_pid: " + " | ".join(leaked))
+for sample in rejected:
+    if not signal_violations(wrap(sample)):
         sys.exit("fixture was not caught: " + sample)
-safe = marker + verb + " -9 " + other + "\n" + verb + " -0 " + app + "\n"
-if outside_app_pid_signals(safe):
-    sys.exit("a non-APP_PID signal or a liveness probe was treated as an APP_PID signal")
+for sample in allowed:
+    hit = signal_violations(wrap(sample))
+    if hit:
+        sys.exit("allowed fixture was flagged: " + sample + " | " + " | ".join(hit))
+if signal_violations(inside_ok):
+    sys.exit("a signal inside signal_verified_app_pid was flagged")
+for sample in (inside_pk, inside_all, inside_ev):
+    if not signal_violations(sample):
+        sys.exit("fixture inside signal_verified_app_pid was not caught: " + sample)
 stopped = body("stop_verified_drive_pids", "\ntrap cleanup EXIT")
 if '"$cohort"' not in stopped:
     sys.exit("stop_verified_drive_pids does not pass the cohort to verify")
