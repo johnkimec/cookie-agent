@@ -246,7 +246,7 @@ interface Anchor {
 }
 
 function anchor(path: string): Anchor | null {
-  let current = resolveLeaf(path);
+  let current = resolvePath(path);
   const segments: string[] = [];
   while (current !== dirname(current)) {
     try {
@@ -266,7 +266,7 @@ function anchor(path: string): Anchor | null {
 function isInsideDataDir(dir: string, fallback: string): boolean {
   const parentStat = tryStatDir(fallback);
   if (parentStat !== null) {
-    const leaf = resolveLeaf(dir);
+    const leaf = resolvePath(dir);
     let current = leaf;
     while (current !== dirname(current)) {
       try {
@@ -303,7 +303,7 @@ function isInsideDataDir(dir: string, fallback: string): boolean {
 
 function tryStatDir(path: string): { dev: number; ino: number } | null {
   try {
-    const stat = statSync(resolveLeaf(path));
+    const stat = statSync(resolvePath(path));
     if (!stat.isDirectory()) {
       return null;
     }
@@ -313,9 +313,41 @@ function tryStatDir(path: string): { dev: number; ino: number } | null {
   }
 }
 
-function resolveLeaf(path: string): string {
-  let current = resolve(path);
-  for (let hop = 0; hop <= SYMLINK_HOP_CAP; hop += 1) {
+/** Resolve every component, not only the final symlink. */
+function resolvePath(path: string): string {
+  const absolute = resolve(path);
+  const parts = absolute
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  let built = absolute.startsWith("/") ? "/" : "";
+  let hops = 0;
+  for (const part of parts) {
+    if (part === "..") {
+      built = dirname(built);
+      if (absolute.startsWith("/") && built === "") {
+        built = "/";
+      }
+      continue;
+    }
+    built = built === "/" ? `/${part}` : join(built, part);
+    built = followSymlinkChain(built, () => {
+      hops += 1;
+      if (hops > SYMLINK_HOP_CAP) {
+        throw new SymlinkLimitError("symlink chain exceeds 40 hops");
+      }
+    });
+  }
+  return built === "" ? "/" : built;
+}
+
+function followSymlinkChain(path: string, onHop: () => void): string {
+  let current = path;
+  const seen = new Set<string>();
+  for (;;) {
+    if (seen.has(current)) {
+      throw new SymlinkLimitError("symlink loop");
+    }
+    seen.add(current);
     let stat: ReturnType<typeof lstatSync>;
     try {
       stat = lstatSync(current);
@@ -325,12 +357,9 @@ function resolveLeaf(path: string): string {
     if (!stat.isSymbolicLink()) {
       return current;
     }
-    if (hop === SYMLINK_HOP_CAP) {
-      throw new SymlinkLimitError("symlink chain exceeds 40 hops");
-    }
+    onHop();
     current = resolve(dirname(current), readlinkSync(current));
   }
-  throw new SymlinkLimitError("symlink chain exceeds 40 hops");
 }
 
 function segmentEqual(left: string, right: string): boolean {

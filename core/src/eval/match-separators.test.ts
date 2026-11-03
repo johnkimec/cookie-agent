@@ -21,7 +21,19 @@ describe("match separators", () => {
     );
   });
 
-  it("keeps a date and a day number separate from the amount", () => {
+  it("joins a thousands group after a word and keeps clock times", () => {
+    expect(
+      answerMatches({ expectedFact: "170 g" }, "She eats 1 170 g a day"),
+    ).toBe(false);
+    expect(answerMatches({ expectedFact: "170 g" }, "about 1\u2009170 g")).toBe(
+      false,
+    );
+    expect(answerMatches({ expectedFact: "170 g" }, "target is 1 170 g.")).toBe(
+      false,
+    );
+    expect(
+      answerMatches({ expectedFact: "1 170 g" }, "She eats 1 170 g a day"),
+    ).toBe(true);
     expect(answerMatches({ expectedFact: "10:30" }, "Nov 7 10:30")).toBe(true);
     expect(
       answerMatches(
@@ -30,8 +42,11 @@ describe("match separators", () => {
       ),
     ).toBe(true);
     expect(
-      answerMatches({ expectedFact: "170 g" }, "Day 3 170 g of protein"),
+      answerMatches({ expectedFact: "10:30" }, "Saturday, November 7 10:30 am"),
     ).toBe(true);
+    expect(
+      answerMatches({ expectedFact: "170 g" }, "Day 3 170 g of protein"),
+    ).toBe(false);
   });
 
   it("treats a hyphen as a boundary and a thousands space as 1170", () => {

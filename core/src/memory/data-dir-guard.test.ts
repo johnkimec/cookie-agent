@@ -126,6 +126,24 @@ describe("data dir guard", () => {
       memoryDataDir({ NODE_ENV: "TEST", HOME: home, COOKIE_DATA_DIR: loopA }),
     ).toThrow(/default data directory/);
     expect(existsSync(target)).toBe(false);
+    const loopDir = join(parent, "loop-dir");
+    symlinkSync(loopDir, loopDir);
+    expect(() =>
+      memoryDataDir({
+        NODE_ENV: "TEST",
+        HOME: home,
+        COOKIE_DATA_DIR: join(loopDir, "sub"),
+      }),
+    ).toThrow(/default data directory/);
+    const link = join(parent, "to-data");
+    symlinkSync(target, link);
+    expect(() =>
+      memoryDataDir({
+        NODE_ENV: "TEST",
+        HOME: home,
+        COOKIE_DATA_DIR: join(link, "sub"),
+      }),
+    ).toThrow(/default data directory/);
   });
 
   it("reads an NFSHomeDirectory value that dscl wraps onto the next line", () => {

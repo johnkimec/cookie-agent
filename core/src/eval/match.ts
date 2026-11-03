@@ -5,9 +5,11 @@
  * stays separate, so "10:30 in", "3 Bahen", "170 grams", and "10:30 a.m."
  * keep a letter-or-number boundary.
  * A space, NBSP (U+00A0), thin space (U+2009), or narrow no-break space
- * (U+202F) joins a digit to a following group of exactly three digits, so
- * "1 170" is "1170". "Nov 7 10:30" and "Day 3 170" stay split. A hyphen is
- * a boundary, so "-170 g" and "150-170 g" contain "170 g".
+ * (U+202F) always joins a digit to a following group of exactly three
+ * digits, so "1 170" and "Day 3 170" both become a thousands number.
+ * "Nov 7 10:30" stays split because only two digits follow. A hyphen is
+ * a boundary, so "-170 g" and "150-170 g" contain "170 g". "10:30" still
+ * matches "10:30 am" because a joined am/pm is a boundary.
  */
 export function normalizeMatchText(value: string): string {
   return value
@@ -15,7 +17,7 @@ export function normalizeMatchText(value: string): string {
     .replace(/[\u00a0\u2009\u202f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/(?<![\p{L}] )(\d) (?=\d{3}(?!\d))/gu, "$1")
+    .replace(/(\d) (?=\d{3}(?!\d))/g, "$1")
     .replace(/(\d)\s+(kg|lb|ml|am|pm|g|%)(?![\p{L}\p{N}])/gu, "$1$2");
 }
 
@@ -82,8 +84,9 @@ function contains(haystack: string, needle: string): boolean {
   // A comma or dot next to a digit is not a boundary: "170 g" is inside
   // "1,170 g", and "5 kg" is inside ".5 kg" and "0.5 kg". A trailing "." is.
   const beforeDigit = /^\d/.test(normalized) ? "(?<![.,])" : "";
+  const timeTail = /\d$/.test(normalized) ? "(?:am|pm)?" : "";
   const pattern = new RegExp(
-    `(?<![\\p{L}\\p{N}])(?<!\\d[.,])${beforeDigit}${escaped}(?![\\p{L}\\p{N}])(?![.,]\\d)`,
+    `(?<![\\p{L}\\p{N}])(?<!\\d[.,])${beforeDigit}${escaped}${timeTail}(?![\\p{L}\\p{N}])(?![.,]\\d)`,
     "u",
   );
   return pattern.test(haystack);
