@@ -430,8 +430,9 @@ async function startServers(options: RunMemoryEvalOptions): Promise<Servers> {
     await writeServerEvidence(options.evidenceDir, "llama", ports.llamaPort);
     await writeServerEvidence(options.evidenceDir, "embed", ports.embedPort);
     // The core talks to the stub. Fixture assistant lines are the script.
-    // Reflect and the final question have no script, so they are forwarded
-    // to the real server at temperature 0.
+    // A reflect prompt is answered with empty JSON, so --real does not
+    // test fact extraction. The final question is forwarded to the real
+    // server at temperature 0.
     const llama = await startLlamaStub(0, {
       replyText: (messages, body) =>
         scriptedOrReal(messages, body, script, ports.llamaPort),

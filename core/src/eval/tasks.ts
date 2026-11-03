@@ -170,10 +170,17 @@ export function storedTurnId(
  * Why a listed id is wrong, or null.
  * An expected turn must carry `expectedFact` or an accept entry.
  * A required turn must carry its own `requiredFacts` entry.
+ * `requiredFacts` without `requiredIds` is an error.
  * A distractor must carry a `mustNotContain` string.
  * Ids are the ones {@link storedTurns} derives.
  */
 export function listedTurnIssue(task: RecallTask): string | null {
+  if (
+    task.requiredFacts !== undefined &&
+    (task.requiredIds === undefined || task.requiredIds.length === 0)
+  ) {
+    return `${task.id} requiredFacts without requiredIds`;
+  }
   const byId = new Map(
     storedTurns(task.sessions).map((turn) => [turn.id, turn.content]),
   );
