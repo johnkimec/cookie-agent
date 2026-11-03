@@ -624,8 +624,9 @@ private func laidOutTurnHeight(_ text: String) -> CGFloat {
         Text("cookie")
             .font(.body.monospaced())
             .frame(width: 64, alignment: .leading)
-        Text(text)
+        Text(ReplyLayout.displayText(text))
             .font(.body)
+            .lineLimit(nil)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -731,5 +732,49 @@ final class PopupSizingTests: XCTestCase {
             "the one-line sentinel wraps inside the popup column"
         )
         XCTAssertLessThan(wrapped, 120)
+    }
+
+    func testDisplayTextBreaksALongRunAndLeavesShortText() {
+        let word = String(repeating: "A", count: 40)
+        let shown = ReplyLayout.displayText(word)
+        XCTAssertTrue(shown.contains("\u{200B}"))
+        XCTAssertEqual(shown.replacingOccurrences(of: "\u{200B}", with: ""), word)
+        XCTAssertEqual(ReplyLayout.displayText("Hi"), "Hi")
+        let sentence = "The concept of TPS (Transactions per second) stays readable."
+        XCTAssertEqual(
+            ReplyLayout.displayText(sentence).replacingOccurrences(of: "\u{200B}", with: ""),
+            sentence
+        )
+    }
+
+    @MainActor
+    func testLongSingleWordWrapsInsideTheColumn() {
+        let word = String(repeating: "Transaction", count: 8)
+        let one = laidOutTurnHeight("Hi")
+        let wrapped = laidOutTurnHeight(word)
+        XCTAssertGreaterThan(wrapped, one + 8, "a long token wraps instead of clipping")
+        XCTAssertLessThan(wrapped, 200)
+    }
+
+    func testThreeShortExchangesStayUnderTheCap() {
+        let texts = [
+            "hey cookie!",
+            "Hi! How can I help you?",
+            "say something long",
+            "The concept of TPS (Transactions per second) is how many commits a database finishes.",
+            "this ui is kinda chopped",
+            "I'm sorry to hear that. I'll pass that along.",
+        ]
+        let estimated = PopupMetrics.panelHeight(turnTexts: texts, draft: "", showsNotice: false)
+        XCTAssertLessThan(estimated, PopupLayout.maxHeight)
+        let measured = PopupMetrics.panelHeight(
+            turnTexts: texts,
+            draft: "",
+            showsNotice: false,
+            measuredTranscript: 150
+        )
+        XCTAssertEqual(measured, PopupLayout.collapsedHeight + 150 + 1)
+        XCTAssertLessThan(measured, 230)
+        XCTAssertGreaterThan(PopupLayout.maxHeight - measured, 40)
     }
 }

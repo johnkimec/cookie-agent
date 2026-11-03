@@ -31,6 +31,92 @@ final class PopupInputRowTests: XCTestCase {
         XCTAssertLessThan(wrapped, 120)
     }
 
+    func testOnDeviceBadgeHugsItsLabel() throws {
+        let text = "The concept of TPS (Transactions per second) is how many commits a database finishes."
+        let turn = ChatTurn(index: 0, role: .cookie, text: text, streaming: false, badge: CookieCopy.onDevice)
+        let row = TurnRow(turn: turn)
+            .padding(.horizontal, 16)
+            .frame(width: PopupLayout.width, alignment: .topLeading)
+        let host = NSHostingView(rootView: row)
+        host.sizingOptions = [.intrinsicContentSize]
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: PopupLayout.width, height: 160),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.frame = window.contentView?.bounds ?? .zero
+        defer { window.close() }
+        window.orderBack(nil)
+        let deadline = Date().addingTimeInterval(3)
+        var badge: NSView?
+        var reply: NSView?
+        while Date() < deadline {
+            host.layoutSubtreeIfNeeded()
+            badge = find(CookieAX.badge(0), in: host)
+            reply = find(CookieAX.turnCookie(0), in: host)
+            if badge != nil, reply != nil { break }
+            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+        }
+        let capsule = try XCTUnwrap(badge, "on-device badge did not appear")
+        let replyBox = try XCTUnwrap(reply, "cookie reply did not appear")
+        XCTAssertGreaterThan(capsule.bounds.width, 36, "the label is visible")
+        XCTAssertLessThan(capsule.bounds.width, 140, "the capsule hugs the on-device label")
+        XCTAssertLessThan(capsule.bounds.height, 32)
+        XCTAssertGreaterThan(replyBox.bounds.width, capsule.bounds.width * 2, "the badge does not take the reply column")
+    }
+
+    func testThreeShortExchangesDoNotFillTheCap() throws {
+        let lines = [
+            "hey cookie!",
+            "Hi! How can I help you?",
+            "say something long",
+            "The concept of TPS (Transactions per second) is how many commits a database finishes.",
+            "this ui is kinda chopped",
+            "I'm sorry to hear that. I'll pass that along.",
+        ]
+        var turns: [ChatTurn] = []
+        for (offset, line) in lines.enumerated() {
+            let role: TurnRole = offset.isMultiple(of: 2) ? .you : .cookie
+            let index = offset / 2
+            turns.append(ChatTurn(
+                index: index,
+                role: role,
+                text: line,
+                streaming: false,
+                badge: role == .cookie ? CookieCopy.onDevice : nil
+            ))
+        }
+        let model = previewModel(turns: turns)
+        let probe = Probe()
+        let host = NSHostingView(rootView: Hosted(model: model, height: 1200, probe: probe))
+        host.sizingOptions = [.intrinsicContentSize]
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: PopupLayout.width, height: 1200),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.frame = window.contentView?.bounds ?? .zero
+        defer { window.close() }
+        window.orderBack(nil)
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            host.layoutSubtreeIfNeeded()
+            if probe.row > 1, probe.transcript > 40 { break }
+            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertLessThanOrEqual(probe.row, 72)
+        XCTAssertGreaterThan(probe.transcript, 40)
+        XCTAssertLessThan(probe.transcript, 260, "three short exchanges do not stretch the transcript to the cap")
+        let panel = probe.transcript + probe.row + 1
+        XCTAssertLessThan(panel, PopupLayout.maxHeight - 20)
+    }
+
     func testCookieMarkdownAndInlineMathWrap() throws {
         let plain = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
         let math = "Einstein is best known for relativity, and \\(a^2 + b^2\\) still holds. END-OF-REPLY-m1-popup"
@@ -79,6 +165,7 @@ final class PopupInputRowTests: XCTestCase {
 
     private final class Probe {
         var row: CGFloat = 0
+        var transcript: CGFloat = 0
     }
 
     private struct Hosted: View {
@@ -90,6 +177,7 @@ final class PopupInputRowTests: XCTestCase {
             PopupRoot(model: model)
                 .frame(width: PopupLayout.width, height: height, alignment: .bottom)
                 .onPreferenceChange(InputRowHeightKey.self) { probe.row = $0 }
+                .onPreferenceChange(TranscriptFrameKey.self) { probe.transcript = $0.height }
         }
     }
 

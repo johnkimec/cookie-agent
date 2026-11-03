@@ -60,7 +60,12 @@ public enum PopupMetrics {
             for text in turnTexts {
                 lines += estimatedLines(text, width: 400)
             }
-            transcript = CGFloat(lines) * inputLineHeight + CGFloat(turnTexts.count) * 16 + 16
+            // Spacing matches the transcript stack (12 pt between turns,
+            // 16 pt top, 8 pt bottom). A per-turn 16 pt pad pushed three
+            // short exchanges up against the 320 pt cap and left a gap.
+            let spacing = CGFloat(max(0, turnTexts.count - 1)) * 12
+            let padding = 16 + PopupLayout.transcriptBottomInset
+            transcript = CGFloat(lines) * inputLineHeight + spacing + padding
         }
         return min(PopupLayout.maxHeight, input + transcript + 1)
     }

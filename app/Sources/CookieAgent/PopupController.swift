@@ -241,12 +241,12 @@ final class PopupController: NSObject, @unchecked Sendable {
     }
 }
 
-private struct TranscriptFrame: Equatable, Sendable {
+struct TranscriptFrame: Equatable, Sendable {
     var height: CGFloat
     var minY: CGFloat
 }
 
-private struct TranscriptFrameKey: PreferenceKey {
+struct TranscriptFrameKey: PreferenceKey {
     static var defaultValue: TranscriptFrame {
         TranscriptFrame(height: 0, minY: 0)
     }
@@ -291,10 +291,32 @@ struct PopupRoot: View {
             }
             inputRow
         }
-        .frame(width: PopupLayout.width)
-        .frame(minHeight: PopupLayout.collapsedHeight)
+        .frame(width: PopupLayout.width, height: layoutHeight, alignment: .top)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement(children: .contain)
+    }
+
+    /// Window height is the transcript plus the input row plus the divider.
+    /// It reaches `PopupLayout.maxHeight` only when that sum would pass it.
+    private var layoutHeight: CGFloat {
+        PopupMetrics.panelHeight(
+            turnTexts: model.conversation.turns.map(\.text),
+            draft: model.conversation.draft,
+            showsNotice: showsNotice,
+            measuredTranscript: transcriptFrame.height > 1 ? transcriptFrame.height : nil
+        )
+    }
+
+    /// The scroll view's height. Extra proposal from a tall window used to
+    /// stretch this view and the measurement then locked the panel at 320.
+    private var transcriptSlot: CGFloat {
+        guard !model.conversation.turns.isEmpty else { return 0 }
+        return max(1, layoutHeight - inputRowCap - 1)
+    }
+
+    private var showsNotice: Bool {
+        popupLoadingLine(runtime: model.runtime.state) != nil
+            || model.conversation.refusalLine(runtime: model.runtime.state) != nil
     }
 
     private var transcript: some View {
@@ -313,6 +335,7 @@ struct PopupRoot: View {
                     .padding(.top, 16)
                     .padding(.bottom, PopupLayout.transcriptBottomInset)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .fixedSize(horizontal: false, vertical: true)
                     IdentifiedBox(
                         identifier: CookieAX.transcriptBottom,
                         label: "transcript"
@@ -320,6 +343,7 @@ struct PopupRoot: View {
                     .frame(width: 8, height: 8)
                     .id(CookieAX.transcriptBottom)
                 }
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background {
                     GeometryReader { geo in
@@ -352,9 +376,8 @@ struct PopupRoot: View {
                 guard pin.pinnedToBottom else { return }
                 proxy.scrollTo(CookieAX.transcriptBottom, anchor: .bottom)
             }
-            .frame(maxHeight: .infinity)
         }
-        .frame(maxHeight: .infinity)
+        .frame(height: transcriptSlot)
         .layoutPriority(1)
     }
 
@@ -372,9 +395,11 @@ struct PopupRoot: View {
     }
 
     private var inputRowCap: CGFloat {
-        let showsNotice = popupLoadingLine(runtime: model.runtime.state) != nil
-            || model.conversation.refusalLine(runtime: model.runtime.state) != nil
-        return PopupMetrics.inputRowHeight(draft: model.conversation.draft, showsNotice: showsNotice)
+        PopupMetrics.inputRowHeight(draft: model.conversation.draft, showsNotice: showsNotice)
+    }
+
+    private var fieldHeight: CGFloat {
+        PopupMetrics.clampedInputHeight(lineCount: PopupMetrics.inputLineCount(model.conversation.draft))
     }
 
     private var inputRow: some View {
@@ -397,6 +422,7 @@ struct PopupRoot: View {
                 )
                 .accessibilityLabel(CookieCopy.ask)
                 .frame(maxWidth: .infinity)
+                .frame(height: fieldHeight)
                 if let loading = popupLoadingLine(runtime: model.runtime.state) {
                     IdentifiedText(
                         text: loading,
@@ -430,7 +456,7 @@ struct PopupRoot: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, PopupLayout.inputRowVerticalPadding)
-        .frame(minHeight: PopupLayout.collapsedHeight, maxHeight: inputRowCap)
+        .frame(height: inputRowCap)
         .fixedSize(horizontal: false, vertical: true)
         .background {
             GeometryReader { geo in
@@ -460,6 +486,33 @@ struct PopupRoot: View {
     }
 }
 
+/// The `on-device` label on a cookie reply. `fixedSize` keeps it on the
+/// text. Without that, the capsule takes the width the reply needs and the
+/// line clips.
+struct OnDeviceBadge: View {
+    var text: String
+    var index: Int
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
+            .fixedSize()
+            .background {
+                IdentifiedBox(
+                    identifier: CookieAX.badge(index),
+                    label: text,
+                    value: text
+                )
+            }
+    }
+}
+
 struct TurnRow: View {
     var turn: ChatTurn
 
@@ -468,9 +521,12 @@ struct TurnRow: View {
             Text(turn.role.rawValue)
                 .font(.body.monospaced())
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .frame(width: 64, alignment: .leading)
             reply
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
                 .background {
                     IdentifiedBox(
                         identifier: identifier,
@@ -478,6 +534,11 @@ struct TurnRow: View {
                         value: turn.text
                     )
                 }
+            if let badge = turn.badge {
+                OnDeviceBadge(text: badge, index: turn.index)
+                    .fixedSize()
+                    .layoutPriority(0)
+            }
         }
     }
 
@@ -487,9 +548,10 @@ struct TurnRow: View {
         case .you:
             // fixedSize stays inside the width frame. Outside it, the ideal
             // height is the unwrapped line and the column clips the tail.
-            Text(turn.text)
+            Text(ReplyLayout.displayText(turn.text))
                 .textSelection(.enabled)
                 .multilineTextAlignment(.leading)
+                .lineLimit(nil)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .cookie:
@@ -497,7 +559,9 @@ struct TurnRow: View {
             // returns nil for an infinite width, and the paragraph then
             // stays one line. Inline LaTeX is an attachment in that
             // paragraph, so it wraps with the text once the width is finite.
-            MarkdownView(text: prepareReplyMarkdown(turn.text))
+            // displayText gives a long token a break the library's word
+            // wrap would otherwise keep on one clipped line.
+            MarkdownView(text: ReplyLayout.displayText(prepareReplyMarkdown(turn.text)))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -1040,6 +1040,7 @@ end axid
 
 set replyHeight to 0
 set dotWidth to 0
+set badgeWidth to 0
 set inputHeight to 0
 set windowHeight to 0
 set bottomPlace to "outside"
@@ -1059,12 +1060,13 @@ tell application "System Events"
     set nodes to entire contents of popupWindow
     set replyElem to missing value
     set dotElem to missing value
+    set badgeElem to missing value
     set inputElem to missing value
     set bottomElem to missing value
     set mascotElem to missing value
     repeat with elem in nodes
       set theId to my axid(elem)
-      if theId is "cookie.badge.on-device.0" then error "per-message badge cookie.badge.on-device.0 is still present"
+      if theId is "cookie.badge.on-device.0" and badgeElem is missing value then set badgeElem to elem
       if theId is "__TURN_ID__" and replyElem is missing value then set replyElem to elem
       if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
       if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
@@ -1073,6 +1075,7 @@ tell application "System Events"
     end repeat
     if replyElem is missing value then error "missing __TURN_ID__"
     if dotElem is missing value then error "missing cookie.badge.on-device"
+    if badgeElem is missing value then error "missing cookie.badge.on-device.0"
     if inputElem is missing value then error "missing cookie.popup.input"
     if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
     if mascotElem is missing value then error "missing cookie.popup.mascot"
@@ -1080,6 +1083,7 @@ tell application "System Events"
     set replyHeight to item 2 of (get size of replyElem)
     set replyWidth to item 1 of (get size of replyElem)
     set dotWidth to item 1 of (get size of dotElem)
+    set badgeWidth to item 1 of (get size of badgeElem)
     set inputHeight to item 2 of (get size of inputElem)
     set windowHeight to item 2 of (get size of popupWindow)
     set bLeft to item 1 of (get position of bottomElem)
@@ -1103,7 +1107,7 @@ tell application "System Events"
     end if
   end tell
 end tell
-return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
+return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "badgeWidth " & badgeWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
 APPLESCRIPT
 )"
   script="${script//__ROW_PAD__/$pad}"
@@ -1181,7 +1185,7 @@ for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     if len(parts) == 2:
         vals[parts[0]] = parts[1].strip()
 need = [
-    "replyHeight", "dotWidth", "inputHeight", "windowHeight", "bottom", "gap",
+    "replyHeight", "dotWidth", "badgeWidth", "inputHeight", "windowHeight", "bottom", "gap",
     "rowHeight", "replyLeft", "replyWidth", "windowLeft", "windowWidth",
 ]
 missing = [key for key in need if key not in vals]
@@ -1190,6 +1194,7 @@ if missing:
     sys.exit(1)
 reply_height = float(vals["replyHeight"])
 dot_width = float(vals["dotWidth"])
+badge_width = float(vals["badgeWidth"])
 input_height = float(vals["inputHeight"])
 window_height = float(vals["windowHeight"])
 gap = float(vals["gap"])
@@ -1208,6 +1213,8 @@ ok = (
     56 <= row_height <= 72
     and vals["bottom"] == "inside"
     and 4 < dot_width < 40
+    and 36 < badge_width < 140
+    and reply_width > badge_width * 2
     and input_height < 48
     and 0 <= gap <= 16
     and frame_inside
@@ -1215,7 +1222,8 @@ ok = (
 if mode == "long":
     ok = ok and reply_height > 40 and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
 elif mode == "short":
-    ok = ok and reply_height > 30 and 40 < window_height < max_height
+    # A one-line exchange stays near its content. 319 would still be under the cap.
+    ok = ok and reply_height > 30 and 80 < window_height < 260
 else:
     print("unknown mode " + mode)
     sys.exit(1)

@@ -107,7 +107,7 @@ enum PopupPreviewRenderer {
                 role: .cookie,
                 text: "Einstein is best known for relativity. END-OF-REPLY-m1-popup",
                 streaming: false,
-                badge: nil
+                badge: CookieCopy.onDevice
             ),
         ])
         return model
@@ -118,7 +118,7 @@ enum PopupPreviewRenderer {
         let line = "The transcript grows until the panel reaches its maximum height and then scrolls.\n"
         model.conversation = PopupConversation(turns: [
             ChatTurn(index: 0, role: .you, text: "tell me more", streaming: false, badge: nil),
-            ChatTurn(index: 0, role: .cookie, text: String(repeating: line, count: 16), streaming: false, badge: nil),
+            ChatTurn(index: 0, role: .cookie, text: String(repeating: line, count: 16), streaming: false, badge: CookieCopy.onDevice),
         ])
         return model
     }

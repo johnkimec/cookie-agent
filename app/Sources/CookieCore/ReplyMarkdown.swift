@@ -87,3 +87,30 @@ private func displayMathClose(_ chars: [Character], from start: Int) -> Int? {
     }
     return nil
 }
+
+/// Layout string for a reply. A run with no break stays one line and the
+/// column clips it, including a long token such as a sentinel. A zero-width
+/// space every 12 characters gives word wrap a break without changing the
+/// characters a reader sees. The accessibility value stays the model text.
+public enum ReplyLayout {
+    public static func displayText(_ text: String) -> String {
+        let limit = 12
+        var result = ""
+        result.reserveCapacity(text.count + text.count / limit)
+        var run = 0
+        for character in text {
+            if character.isWhitespace || character.isNewline {
+                run = 0
+                result.append(character)
+                continue
+            }
+            if run == limit {
+                result.append("\u{200B}")
+                run = 0
+            }
+            result.append(character)
+            run += 1
+        }
+        return result
+    }
+}
