@@ -219,6 +219,19 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
     return this.readSession(id);
   }
 
+  /** Sessions that a new conversation id will end. */
+  openSessionIds(): string[] {
+    this.requireOpen();
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM sessions
+         WHERE ended_at IS NULL
+         ORDER BY started_at, id`,
+      )
+      .all() as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   turnCount(sessionId: string): number {
     this.requireOpen();
     const row = this.db

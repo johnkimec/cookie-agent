@@ -681,7 +681,29 @@ export class AgentCore {
     }
     this.inflight = null;
     this.commitFlight(flight, usage);
-    this.emit(this.doneMessage(flight, finishReason, usage));
+    const done = this.doneMessage(flight, finishReason, usage);
+    const flush = (
+      this.history as ConversationHistory & {
+        flushIndex?: () => Promise<void>;
+      }
+    ).flushIndex;
+    if (
+      process.env.COOKIE_INDEX_BEFORE_DONE === "1" &&
+      typeof flush === "function"
+    ) {
+      void flush.call(this.history).then(
+        () => {
+          this.emit(done);
+          this.settleChat(flight, finishReason);
+        },
+        () => {
+          this.emit(done);
+          this.settleChat(flight, finishReason);
+        },
+      );
+      return;
+    }
+    this.emit(done);
     this.settleChat(flight, finishReason);
   }
 
