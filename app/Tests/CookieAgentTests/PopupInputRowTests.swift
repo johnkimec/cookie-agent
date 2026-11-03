@@ -220,7 +220,9 @@ final class PopupInputRowTests: XCTestCase {
             .padding(.horizontal, 16)
             .frame(width: PopupLayout.width, alignment: .topLeading)
         let host = NSHostingView(rootView: row)
-        host.sizingOptions = [.intrinsicContentSize]
+        // Intrinsic sizing collapses MarkdownView to zero before `.task`
+        // parses, so the cookie path keeps the window's width and height.
+        host.sizingOptions = role == .you ? [.intrinsicContentSize] : []
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: PopupLayout.width, height: 400),
             styleMask: [.borderless],
@@ -236,17 +238,20 @@ final class PopupInputRowTests: XCTestCase {
         // displayText may insert a break inside a long token. The first 12
         // characters of END-OF-REPLY stay contiguous.
         let needle = text.contains("END-OF-REPLY") ? "END-OF-REPLY" : String(text.prefix(12))
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(role == .you ? 1 : 5)
         var height: CGFloat = 0
         var previous: CGFloat = 0
         var stable = 0
         while Date() < deadline {
             host.layoutSubtreeIfNeeded()
-            if let box = find(identifier, in: host) {
+            if role == .cookie {
+                if let used = laidOutTextHeight(needle, in: host) {
+                    height = used
+                }
+            } else if let box = find(identifier, in: host) {
                 height = box.bounds.height
             }
-            let drawn = role == .you || contains(needle, in: host)
-            if drawn, height > 1, abs(height - previous) < 0.5 {
+            if height > 1, abs(height - previous) < 0.5 {
                 stable += 1
                 if stable >= 2 { break }
             } else {
@@ -259,9 +264,19 @@ final class PopupInputRowTests: XCTestCase {
         return height
     }
 
-    private func contains(_ needle: String, in view: NSView) -> Bool {
-        if let text = view as? NSTextView, text.string.contains(needle) { return true }
-        return view.subviews.contains { contains(needle, in: $0) }
+    private func laidOutTextHeight(_ needle: String, in view: NSView) -> CGFloat? {
+        if let text = view as? NSTextView,
+           text.string.contains(needle),
+           let container = text.textContainer,
+           let manager = text.layoutManager {
+            manager.ensureLayout(for: container)
+            let used = manager.usedRect(for: container).height
+            if used > 1 { return used }
+        }
+        for subview in view.subviews {
+            if let found = laidOutTextHeight(needle, in: subview) { return found }
+        }
+        return nil
     }
 
     private func find(_ identifier: String, in view: NSView) -> NSView? {
