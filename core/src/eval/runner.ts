@@ -503,7 +503,15 @@ async function runTask(
     error = error === null ? missing : `${error}; ${missing}`;
   }
   const journalRows = countJournal(dataDir);
-  const forgotten = forgottenProbeFor(task.id, dataDir);
+  let forgotten: string[] | null | undefined;
+  try {
+    forgotten = forgottenProbeFor(task.id, dataDir);
+  } catch (caught) {
+    const detail =
+      caught instanceof Error ? caught.message : "forgotten probe failed";
+    error = error === null ? detail : `${error}; ${detail}`;
+    forgotten = undefined;
+  }
   if (!options.keepData) {
     rmSync(dataDir, { recursive: true, force: true });
     const at = owned.indexOf(dataDir);
@@ -785,8 +793,10 @@ function expectIds(
 }
 
 /**
- * Forgotten ids for task 06. A throw fails that task only:
- * null is the known-blocked result, and other tasks do not call the probe.
+ * Forgotten ids for task 06.
+ * Null is the known-blocked result (the method is missing).
+ * A throw is an error for that task, not a known-blocked miss.
+ * Other tasks do not call the probe.
  */
 export function forgottenProbeFor(
   taskId: string,
@@ -798,8 +808,10 @@ export function forgottenProbeFor(
   }
   try {
     return probe(dataDir);
-  } catch {
-    return null;
+  } catch (caught) {
+    const detail =
+      caught instanceof Error ? caught.message : "forgotten probe failed";
+    throw new Error(`forgotten probe failed: ${detail}`);
   }
 }
 

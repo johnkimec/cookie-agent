@@ -13,6 +13,9 @@ import type { Retrieve } from "./retrieve.ts";
 import type { SqliteMemoryStore } from "./sqlite-store.ts";
 import type { Memory, TurnRecord } from "./types.ts";
 
+/** A hung reflect must not hold the next chat turn. */
+const DEFAULT_REFLECT_TIMEOUT_MS = 30_000;
+
 export interface ChatLogHooks {
   /**
    * Set when `COOKIE_REFLECT_IDLE_MS` is a non-empty string.
@@ -21,6 +24,8 @@ export interface ChatLogHooks {
   reflector?: Reflector | null;
   /** `COOKIE_RETRIEVAL_TRACE`. One JSON line per retrieve. */
   tracePath?: string | null;
+  /** How long `reflect` may run before the chat continues. Default 30s. */
+  reflectTimeoutMs?: number;
 }
 
 /** Recent turns loaded into one prompt, then cut to the local token budget. */
@@ -37,6 +42,7 @@ export class ChatLog implements ConversationHistory {
   private readonly retriever: { retrieve: Retrieve } | null;
   private readonly reflector: Reflector | null;
   private readonly tracePath: string | null;
+  private readonly reflectTimeoutMs: number;
   private readonly reflectPending = new Set<string>();
   private indexTail: Promise<void> = Promise.resolve();
 
@@ -51,6 +57,8 @@ export class ChatLog implements ConversationHistory {
     this.retriever = retriever;
     this.reflector = hooks.reflector ?? null;
     this.tracePath = hooks.tracePath ?? null;
+    this.reflectTimeoutMs =
+      hooks.reflectTimeoutMs ?? DEFAULT_REFLECT_TIMEOUT_MS;
   }
 
   /**
@@ -201,7 +209,7 @@ export class ChatLog implements ConversationHistory {
     }
     for (const id of [...this.reflectPending]) {
       try {
-        await reflector.reflect(id);
+        await this.reflectWithin(reflector, id);
         this.reflectPending.delete(id);
       } catch (error) {
         const detail =
@@ -210,6 +218,29 @@ export class ChatLog implements ConversationHistory {
       }
     }
     return session;
+  }
+
+  /**
+   * Bound the await. A reflector that ignores the clock still loses
+   * the race, the error is logged, and the session stays pending.
+   */
+  private reflectWithin(reflector: Reflector, id: string): Promise<void> {
+    const timeoutMs = this.reflectTimeoutMs;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("reflect timed out"));
+      }, timeoutMs);
+      reflector.reflect(id).then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   private traceRetrieval(

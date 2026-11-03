@@ -57,6 +57,10 @@ describe("recall answer match", () => {
     expect(answerMatches({ expectedFact: "170 g" }, "It is 1170 g.")).toBe(
       false,
     );
+    expect(answerMatches({ expectedFact: "10:30am" }, "at 10:30 am.")).toBe(
+      true,
+    );
+    expect(answerMatches({ expectedFact: "50 %" }, "down 50%.")).toBe(true);
     expect(
       answerMatches(
         { expectedFact: "Priya", mustNotContain: ["170 g"] },
@@ -69,6 +73,25 @@ describe("recall answer match", () => {
         "Priya lifted 170 g.",
       ),
     ).toBe(false);
+  });
+
+  it("does not glue a number to the word that follows it", () => {
+    expect(
+      answerMatches({ expectedFact: "10:30" }, "10:30 in the morning"),
+    ).toBe(true);
+    expect(answerMatches({ expectedFact: "Bahen" }, "at 3 Bahen")).toBe(true);
+    expect(
+      answerMatches(
+        { expectedFact: "170 grams" },
+        "Daily target is 170 grams.",
+      ),
+    ).toBe(true);
+    expect(
+      answerMatches({ expectedFact: "grams" }, "Daily target is 170 grams."),
+    ).toBe(true);
+    expect(answerMatches({ expectedFact: "170 g" }, "170 grams")).toBe(false);
+    expect(answerMatches({ expectedFact: "10:30" }, "10:30 a.m.")).toBe(true);
+    expect(answerMatches({ expectedFact: "a.m." }, "10:30 a.m.")).toBe(true);
   });
 
   it("rejects an accept entry that is too weak or already in the question", () => {

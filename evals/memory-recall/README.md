@@ -19,11 +19,11 @@ Each file in `tasks/` and `examples/` is one JSON object matching [`task.schema.
 
 ## Pass check
 
-Normalize by trimming, lowercasing, collapsing whitespace, and removing a space between a number and its unit. `170 g` and `170g` are the same string. A task passes when the answer contains `expectedFact` or any `accept` string, and contains no `mustNotContain` string. The runner also prints the retrieved memory ids for the question turn.
+Normalize by trimming, lowercasing, collapsing whitespace, and removing a space before a known unit (`g`, `kg`, `lb`, `ml`, `am`, `pm`, `%`). `170 g` and `170g` are the same string. A space before any other word stays, so `10:30 in the morning`, `at 3 Bahen`, `170 grams`, and `10:30 a.m.` keep their boundaries. A task passes when the answer contains `expectedFact` or any `accept` string, and contains no `mustNotContain` string. The runner also prints the retrieved memory ids for the question turn.
 
 The bar is 8 of 10 on `pnpm eval memory --real`. That command needs an explicit llama port and embed port: `--llama-port` and `--embed-port`, or `COOKIE_LLAMA_PORT` and `COOKIE_EMBED_PORT`. It does not default to 8080 or 8081. Fixture assistant lines are replayed by a scripted stub. Reflect and the final question are the calls that reach the real model, at temperature 0. The evidence directory stores each server's `/props` and `/v1/models` response. `pnpm eval memory --fake` uses a scripted model and a fake embedder. It proves the plumbing. A score under 8 does not fail that command.
 
-`06-forget-debt-to-daniel` still runs and still counts in the 10. It passes only when `store.forgottenTurnIds()` includes the debt turn. Until that method exists it is labeled `known-blocked` and it is not skipped.
+`06-forget-debt-to-daniel` still runs and still counts in the 10. It passes only when `store.forgottenTurnIds()` includes the debt turn. Until that method exists it is labeled `known-blocked` and it is not skipped. A throw from the probe is an error on that task, not `known-blocked`.
 
 ## Runner
 

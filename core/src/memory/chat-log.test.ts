@@ -283,6 +283,47 @@ describe("chat log wired into the core", () => {
     store.close();
   });
 
+  it("times out a hung reflect and still finishes the chat", async () => {
+    const path = tempDbPath();
+    const seen: ModelMessage[][] = [];
+    const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
+    let calls = 0;
+    const reflector: Reflector = {
+      async reflect() {
+        calls += 1;
+        await new Promise(() => undefined);
+      },
+    };
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        lines.push(String(chunk));
+        return true;
+      });
+    try {
+      const harness = coreFor(
+        new ChatLog(store, null, null, { reflector, reflectTimeoutMs: 20 }),
+        seen,
+        () => 2_000,
+      );
+      await ready(harness.core, harness.messages);
+      send(harness.core, chat("2", "conv-a", "keep this"));
+      await untilDone(harness.messages, "msg-1");
+      send(harness.core, chat("3", "conv-b", "new chat"));
+      await untilDone(harness.messages, "msg-2");
+      expect(calls).toBe(1);
+      expect(lines.join("")).toContain(
+        "cookie-core: reflect failed: reflect timed out",
+      );
+      const rows = store.database().prepare("SELECT id FROM journal").all();
+      expect(rows).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    store.close();
+  });
+
   it("writes retrieved ids to the trace file", async () => {
     const dir = tempDbPath().replace(/cookie\.db$/, "");
     const trace = join(dir, "retrieval.jsonl");

@@ -340,6 +340,7 @@ describe("stdio core", () => {
       await llama.close();
       await rm(dataDir, { recursive: true, force: true });
     }
+  });
 
   it("exits on a bad COOKIE_RERANK without speaking protocol", async () => {
     const client = new StdioClient(isolated({ COOKIE_RERANK: "yes" }).env);
