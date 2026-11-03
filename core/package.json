@@ -15,7 +15,8 @@
     "spike-sqlite": "node scripts/spike-sqlite.mjs",
     "check-embed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/check-embed.ts",
     "bench-retrieval": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/bench-retrieval.ts",
-    "memory": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/memory/dump-cli.ts"
+    "memory": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/memory/dump-cli.ts",
+    "eval": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/eval/cli.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.77",

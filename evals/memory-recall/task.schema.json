@@ -8,6 +8,16 @@
     "id": { "type": "string", "minLength": 1 },
     "question": { "type": "string", "minLength": 1 },
     "expectedFact": { "type": "string", "minLength": 1 },
+    "accept": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "mustNotContain": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "tests": { "type": "string", "minLength": 1 },
+    "setup": { "type": "string", "minLength": 1 },
     "sessions": {
       "type": "array",
       "minItems": 2,
