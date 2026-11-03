@@ -32,8 +32,8 @@ export const REFLECT_SYSTEM_PROMPT = [
   "Set contradicts to an existing fact id when the new fact replaces it, otherwise null.",
   "Do not copy secrets, credentials, or verbatim screen text.",
   "profile entries are only stable facts John stated, or facts seen in 3 or more sessions.",
-  "Each profile entry includes sourceTurns, an array of turn ids from this prompt that support the value.",
-  "Cite only ids that appear in the Turns list. Use an empty array when you cannot cite one.",
+  "Each profile entry includes sourceTurns, an array of ids from this prompt that support the value.",
+  "Cite turn ids from the Turns list or fact ids from Active facts. Use an empty array when you cannot cite one.",
 ].join(" ");
 
 export interface ReflectExtraction {
@@ -115,10 +115,16 @@ export class LocalReflector implements Reflector {
       return;
     }
     throwIfAborted(signal);
-    const prompt = renderReflectPrompt(
-      sessionId,
+    const selected = selectReflectContext(
       turns,
       this.options.derived.listFacts(),
+      REFLECT_PROMPT_TOKEN_CAP,
+      forgotten,
+    );
+    const prompt = renderReflectPrompt(
+      sessionId,
+      selected.turns,
+      selected.facts,
       forgotten,
     );
     let raw: string;
@@ -139,7 +145,12 @@ export class LocalReflector implements Reflector {
     const planned = await this.planFacts(extracted.facts, turnById, forgotten);
     const now = this.options.now();
     const journal = this.planJournal(sessionId, extracted.journal, now);
-    const profile = this.planProfile(extracted.profile, now, turns);
+    const profile = this.planProfile(
+      extracted.profile,
+      now,
+      selected.turns,
+      selected.facts,
+    );
     const summary = cleanSummary(extracted.summary);
     const promptTurnIds = turns.map((turn) => turn.id);
     let toEmbed: FactRecord[] = [];
@@ -177,21 +188,28 @@ export class LocalReflector implements Reflector {
       for (const id of blocked) {
         sourceTurns.add(id);
       }
-      const forgottenTurnText: string[] = [];
-      for (const session of this.options.store.listSessions()) {
-        for (const turn of this.options.store.recentTurns(session.id, 10_000)) {
-          if (forgottenNow.has(turn.id)) {
-            forgottenTurnText.push(turn.content);
-          }
-        }
-      }
+      const freshIds = [...forgottenNow].filter((id) => !forgotten.has(id));
+      const fresh = new Set(freshIds);
+      const sessionTurns = this.options.store.recentTurns(sessionId, 10_000);
+      const sessionTurnIds = new Set(sessionTurns.map((turn) => turn.id));
+      const forgottenTurnText = [
+        ...sessionTurns
+          .filter((turn) => forgottenNow.has(turn.id))
+          .map((turn) => turn.content),
+        ...this.options.store
+          .turnsByIds(freshIds.filter((id) => !sessionTurnIds.has(id)))
+          .map((turn) => turn.content),
+      ];
       const forgottenFactText = [
         ...droppedFacts.map((fact) => fact.text),
         ...this.options.derived
           .listFacts()
           .filter(
             (fact) =>
-              fact.sourceTurn !== null && forgottenNow.has(fact.sourceTurn),
+              fact.sourceTurn !== null &&
+              forgottenNow.has(fact.sourceTurn) &&
+              (fresh.has(fact.sourceTurn) ||
+                sessionTurnIds.has(fact.sourceTurn)),
           )
           .map((fact) => fact.text),
       ];
@@ -335,6 +353,7 @@ export class LocalReflector implements Reflector {
     rows: ReflectProfile[],
     now: number,
     turns: readonly TurnRecord[],
+    facts: readonly FactRecord[],
   ): ProfileRecord[] {
     const planned: ProfileRecord[] = [];
     for (const row of rows) {
@@ -346,7 +365,11 @@ export class LocalReflector implements Reflector {
       if (key.length === 0 || value.length === 0) {
         continue;
       }
-      const sourceTurns = resolveProfileSources(row.sourceTurns ?? [], turns);
+      const sourceTurns = resolveProfileSources(
+        row.sourceTurns ?? [],
+        turns,
+        facts,
+      );
       planned.push({
         key,
         value,
@@ -415,22 +438,66 @@ function cleanSummary(summary: string): string | null {
 }
 
 /**
- * Cited ids that are in this run's prompt. A missing, empty, or
- * entirely invalid citation records every prompt turn. Over-deleting
- * is acceptable: the next reflect rebuilds the profile.
+ * Cited ids from this run's capped prompt. A turn id must be in the
+ * Turns list. A fact id must be in Active facts, and it is stored as
+ * that fact's source turn. A missing, empty, or entirely invalid
+ * citation records every prompt turn plus every shown fact's source
+ * turn. A valid citation still records a fact source that is not in
+ * the Turns list, so a cross-session reword stays tied to that fact.
+ * Over-deleting is acceptable: the next reflect rebuilds the profile.
  */
 export function resolveProfileSources(
   cited: readonly string[],
   promptTurns: readonly TurnRecord[],
+  promptFacts: readonly FactRecord[] = [],
 ): string[] {
-  const allowed = new Set(promptTurns.map((turn) => turn.id));
-  const valid = [
-    ...new Set(cited.filter((id) => id.length > 0 && allowed.has(id))),
-  ];
-  if (valid.length > 0) {
-    return valid;
+  const turnIds = promptTurns.map((turn) => turn.id);
+  const allowed = new Set(turnIds);
+  const factById = new Map(promptFacts.map((fact) => [fact.id, fact]));
+  const valid: string[] = [];
+  for (const raw of cited) {
+    const id = raw.trim();
+    if (id.length === 0) {
+      continue;
+    }
+    if (allowed.has(id)) {
+      pushId(valid, id);
+      continue;
+    }
+    const fact = factById.get(id);
+    if (fact?.sourceTurn !== null && fact?.sourceTurn !== undefined) {
+      pushId(valid, fact.sourceTurn);
+    }
   }
-  return promptTurns.map((turn) => turn.id);
+  if (valid.length === 0) {
+    const fallback = [...turnIds];
+    for (const id of factSourceTurns(promptFacts)) {
+      pushId(fallback, id);
+    }
+    return fallback;
+  }
+  for (const id of factSourceTurns(promptFacts)) {
+    if (!allowed.has(id)) {
+      pushId(valid, id);
+    }
+  }
+  return valid;
+}
+
+function factSourceTurns(facts: readonly FactRecord[]): string[] {
+  const ids: string[] = [];
+  for (const fact of facts) {
+    if (fact.sourceTurn !== null && fact.sourceTurn.length > 0) {
+      pushId(ids, fact.sourceTurn);
+    }
+  }
+  return ids;
+}
+
+function pushId(ids: string[], id: string): void {
+  if (id.length > 0 && !ids.includes(id)) {
+    ids.push(id);
+  }
 }
 
 export function promoteProfile(row: ReflectProfile): boolean {

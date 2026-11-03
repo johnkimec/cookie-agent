@@ -214,6 +214,19 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
     return rows.map(turnFromRow);
   }
 
+  turnsByIds(ids: readonly string[]): TurnRecord[] {
+    this.requireOpen();
+    const unique = [...new Set(ids.filter((id) => id.length > 0))];
+    if (unique.length === 0) {
+      return [];
+    }
+    const marks = unique.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM turns WHERE id IN (${marks})`)
+      .all(...unique) as TurnRow[];
+    return rows.map(turnFromRow);
+  }
+
   session(id: string): SessionRecord | null {
     this.requireOpen();
     return this.readSession(id);

@@ -1070,13 +1070,12 @@ function dropProfileFor(
 }
 
 /**
- * A pinned row drops for a secret number, when the forget needle
- * equals the value, when the needle is the key with a possessive
- * (`my name`), or when it is the pinned copy of a forgotten fact:
- * same source turn and the same text. A pinned name with no source
- * turn stays. An unpinned row drops when the needle or a forgotten
- * fact equals the key or the value, or when any of its source
- * turns was forgotten.
+ * A row with source turns drops when any of those turns is forgotten,
+ * pinned or not. A pin with no source turns is one John set by hand:
+ * it drops for a secret number, when the needle equals the value,
+ * when the needle is `my` plus the key, or when it is the pinned copy
+ * of a forgotten fact. An unpinned row also drops when the needle or
+ * a forgotten fact equals the key or the value.
  */
 export function profileRowDropped(
   row: ProfileRecord,
@@ -1086,6 +1085,9 @@ export function profileRowDropped(
   secretTexts: readonly string[],
 ): boolean {
   if (valueHasSecret(row.value, secretTexts)) {
+    return true;
+  }
+  if (profileSourceIds(row).some((id) => sourceTurns.has(id))) {
     return true;
   }
   if (row.pinned) {

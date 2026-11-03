@@ -312,14 +312,14 @@ describe("memory.remember and memory.forget", () => {
     expect(derived.forgottenTurnIds()).toEqual(["t1"]);
     expect(derived.listChunks()).toEqual([]);
     // Pinned `ece_midterm` is the fact text on t1, so the copy goes.
-    // Pinned `linked` shares t1 but its value is not the fact, so it stays.
-    // Unpinned `echo` on that turn goes. The sibling fact on t1 goes too.
+    // Pinned `linked` cites t1, so it goes with that turn. `kept` has
+    // no source turn. Unpinned `echo` on that turn goes too.
     expect(
       derived
         .listProfile()
         .map((row) => row.key)
         .sort(),
-    ).toEqual(["kept", "linked"]);
+    ).toEqual(["kept"]);
     await expect(retrieve("midterm")).resolves.toEqual([]);
   });
 

@@ -110,6 +110,16 @@ interface Script {
 
 export function scriptedAnswer(messages: unknown, script: Script): string {
   if (isReflectPrompt(messages)) {
+    const session = JSON.stringify(messages).match(/Session ([A-Za-z0-9_-]+)/);
+    const id = session?.[1];
+    if (id !== undefined) {
+      return JSON.stringify({
+        journal: `Reflected ${id}.`,
+        summary: "",
+        facts: [],
+        profile: [],
+      });
+    }
     return EMPTY_REFLECT_REPLY;
   }
   if (script.text !== null) {

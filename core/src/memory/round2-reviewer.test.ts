@@ -285,10 +285,7 @@ describe("round2 adversarial (reviewer)", () => {
       "name=John",
       "pronouns=he/him",
     ]);
-    expect(after.map((row) => `${row.key}=${row.value}`).sort()).toEqual([
-      "name=John",
-      "pronouns=he/him",
-    ]);
+    expect(after.map((row) => `${row.key}=${row.value}`).sort()).toEqual([]);
     h.runtime.scheduler.stop();
     h.store.close();
   });
