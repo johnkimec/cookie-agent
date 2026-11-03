@@ -419,10 +419,51 @@ expect_refuse "home-inside-data" "$DATA/nested" "$SAFE_DATA" "$REAL" "HOME is th
 expect_refuse "empty-data" "$SAFE_HOME" "" "$REAL" "COOKIE_DATA_DIR is empty"
 expect_allow "temp" "$SAFE_HOME" "$SAFE_DATA" "$REAL"
 expect_allow "sibling" "$SAFE_HOME" "$REAL/Library/Application Support/com.johnkimec.cookie-agent-extra" "$REAL"
+expect_refuse "missing-leaf" "$SAFE_HOME" "$DATA/does-not-exist" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
 
 account_home="$(directory_service_home)"
 expect_refuse "account-home" "$account_home" "$SAFE_DATA" "" "HOME is the real home"
 expect_allow "overridden-home" "$SAFE_HOME" "$SAFE_DATA" ""
+
+# (b) Startup HOME is a different directory. The data dir is a symlink to the
+# account home from dscl/getent. The string check against startup HOME misses
+# it. The directory-service home must still refuse it. Do not create that
+# directory under the account home.
+spoof_home="$(mktemp -d "$FIXTURE/spoof-home.XXXXXX")"
+ln -s "$account_home/Library/Application Support/com.johnkimec.cookie-agent" "$FIXTURE/spoof-link"
+expect_refuse "startup-home-spoof" "$SAFE_HOME" "$FIXTURE/spoof-link" "$spoof_home" "COOKIE_DATA_DIR is the real cookie data directory"
+
+# (a) Bind-mount alias of the home, the stand-in for /System/Volumes/Data.
+# realpath strings differ. st_dev+st_ino match. Skip when unprivileged.
+alias_mount="$ISO/System/Volumes/Data/Users/samkim"
+mkdir -p "$alias_mount"
+if mount --bind "$REAL" "$alias_mount" 2>/dev/null; then
+  expect_refuse "bind-alias" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  ln -s "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent" "$FIXTURE/aliaslink"
+  expect_refuse "bind-alias-symlink" "$SAFE_HOME" "$FIXTURE/aliaslink" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  umount "$alias_mount" || {
+    printf 'umount of bind alias failed\n' >&2
+    exit 1
+  }
+else
+  printf '%s\n' "SKIP bind mount (not root)"
+fi
+
+pref_home="$FIXTURE/prefs-home"
+pref_dir="$pref_home/Library/Preferences"
+mkdir -p "$pref_dir"
+printf 'drive\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist"
+printf 'product\n' >"$pref_dir/com.johnkimec.cookie-agent.plist"
+printf 'other\n' >"$pref_dir/unrelated.plist"
+remove_drive_preference_plists "$pref_home"
+if [[ -f "$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist" ]]; then
+  printf 'drive preference plist was left in place\n' >&2
+  exit 1
+fi
+if [[ ! -f "$pref_dir/com.johnkimec.cookie-agent.plist" || ! -f "$pref_dir/unrelated.plist" ]]; then
+  printf 'preference cleanup removed a plist that is not a drive bundle\n' >&2
+  exit 1
+fi
 
 ISOLATE_ROOT=""
 ensure_isolate_root
@@ -479,28 +520,57 @@ if launch.index("assert_isolated_data_dir") > launch.index('"$bin" &'):
     sys.exit("assert_isolated_data_dir is after the direct launch")
 if "HOME=" not in launch.split('"$bin" &', 1)[0]:
     sys.exit("direct launch does not set HOME before the binary")
-nonempty = 'if [[ -n "${COOKIE_DATA_DIR:-}" ]]; then'
-if nonempty not in launch:
-    sys.exit("launch_verified lost the non-empty COOKIE_DATA_DIR branch")
-then_part, after_then = launch.split(nonempty, 1)[1].split("else", 1)
-if 'launch_data="$COOKIE_DATA_DIR"' not in then_part:
-    sys.exit("non-empty COOKIE_DATA_DIR is not the launch data directory")
-else_part, after_fi = after_then.split("fi", 1)
+if "isolate_dir data" in launch:
+    sys.exit("the empty COOKIE_DATA_DIR branch is still in launch_verified")
+assign = 'launch_data="$COOKIE_DATA_DIR"'
 assert_line = 'assert_isolated_data_dir "$launch_home" "$launch_data"'
-if assert_line in else_part:
-    sys.exit("assert_isolated_data_dir is only reachable from the empty COOKIE_DATA_DIR branch")
-if assert_line not in after_fi:
-    sys.exit("assert_isolated_data_dir does not run when COOKIE_DATA_DIR is non-empty")
-if after_fi.index(assert_line) > after_fi.index('"$bin" &'):
+if assign not in launch or assert_line not in launch:
+    sys.exit("launch_verified does not assert the caller COOKIE_DATA_DIR")
+if launch.index(assign) > launch.index(assert_line):
+    sys.exit("assert runs before the caller data directory is copied")
+if launch.index(assert_line) > launch.index('"$bin" &'):
     sys.exit("a non-empty COOKIE_DATA_DIR launches before assert_isolated_data_dir")
+if 'CFFIXED_USER_HOME="$launch_home"' not in launch:
+    sys.exit("direct launch does not set CFFIXED_USER_HOME")
+if 'PNPM_HOME="$pnpm_home"' not in launch or 'COREPACK_HOME="$corepack_home"' not in launch:
+    sys.exit("direct launch does not keep pnpm and corepack on the real home")
 
 opened = body("open_clean_check", "\nopen_clean_status=0")
 if opened.index("assert_isolated_data_dir") > opened.index("/usr/bin/open -n"):
     sys.exit("assert_isolated_data_dir is after open -n")
 env = opened.split("env -i", 1)[1].split("/usr/bin/open -n", 1)[0]
-for needle in ('HOME="$isolate_home"', 'COOKIE_DATA_DIR="$isolate_data"'):
+for needle in (
+    'HOME="$isolate_home"',
+    'CFFIXED_USER_HOME="$isolate_home"',
+    'COOKIE_DATA_DIR="$isolate_data"',
+    'PNPM_HOME="$pnpm_home"',
+    'COREPACK_HOME="$corepack_home"',
+):
     if needle not in env:
         sys.exit("open-clean launch env missing " + needle)
+open_cmd = opened.split("/usr/bin/open -n", 1)[1]
+for needle in (
+    '--env "HOME=$isolate_home"',
+    '--env "COOKIE_DATA_DIR=$isolate_data"',
+    '--env "CFFIXED_USER_HOME=$isolate_home"',
+):
+    if needle not in open_cmd:
+        sys.exit("open-clean did not pass " + needle)
+if "dataDir=${isolate_data} dataDirSource=environment" not in opened:
+    sys.exit("open-clean does not require dataDirSource=environment")
+if opened.index("dataDir=${isolate_data} dataDirSource=environment") < opened.index("/usr/bin/open -n"):
+    sys.exit("dataDir check is before the open launch")
+for fail_line in (
+    'fail "open started more than one process:$fresh"',
+    'fail "open did not start a new instance of $BIN"',
+    'fail "refusing to drive open pid: $reason"',
+):
+    if fail_line not in opened:
+        sys.exit("missing fail: " + fail_line)
+    at = opened.index(fail_line)
+    prior = opened.rfind("stop_verified_drive_pids", 0, at)
+    if prior == -1 or at - prior > 400:
+        sys.exit("open-clean fail does not stop a verified pid: " + fail_line)
 if 'HOME="$HOME"' in text:
     sys.exit("a launch still passes the real HOME through")
 if "assert_isolated_data_dir" not in launch or "assert_isolated_data_dir" not in opened:

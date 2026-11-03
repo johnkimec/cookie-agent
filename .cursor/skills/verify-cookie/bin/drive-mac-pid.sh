@@ -346,60 +346,166 @@ remove_isolate_root() {
   esac
 }
 
-# Realpath HOME and COOKIE_DATA_DIR and compare them case-insensitively with
-# the real home and with $REAL_HOME/Library/Application Support/com.johnkimec.cookie-agent.
-# APFS is usually case-insensitive, so a mixed-case spelling is the same directory.
-# Exit 4 before any launch when HOME is the real home, or either path is that
-# data directory or inside it. Arguments override the current environment so a
-# launch can pass its own HOME without changing the shell.
+# Per-run bundle ids write com.johnkimec.cookie-agent.drive.<hex>.plist.
+# The product plist has no ".drive." segment and stays.
+remove_drive_preference_plists() {
+  local home="$1"
+  local dir="$home/Library/Preferences"
+  local plist base
+  [[ -d "$dir" ]] || return 0
+  for plist in "$dir"/com.johnkimec.cookie-agent.drive.*.plist; do
+    [[ -f "$plist" ]] || continue
+    base="$(basename "$plist")"
+    case "$base" in
+      com.johnkimec.cookie-agent.drive.[0-9a-f]*.plist)
+        rm -f "$plist"
+        ;;
+    esac
+  done
+}
+
+drive_preference_plist_present() {
+  local home="$1"
+  local dir="$home/Library/Preferences"
+  local plist base
+  [[ -d "$dir" ]] || return 1
+  for plist in "$dir"/com.johnkimec.cookie-agent.drive.*.plist; do
+    [[ -f "$plist" ]] || continue
+    base="$(basename "$plist")"
+    case "$base" in
+      com.johnkimec.cookie-agent.drive.[0-9a-f]*.plist)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Real homes are the startup HOME and the dscl/getent home. A wrong startup
+# HOME must not hide the account home. Case-insensitive realpath still
+# applies. st_dev+st_ino catches a firmlink or bind mount whose path strings
+# stay different, including a missing leaf whose existing parent is that
+# directory. Exit 4 before any launch.
 assert_isolated_data_dir() {
   local home="${1-${HOME-}}"
   local data="${2-${COOKIE_DATA_DIR-}}"
-  local real_home="${3-${REAL_HOME-}}"
-  if [[ -z "$real_home" ]]; then
-    real_home="$(directory_service_home)" || isolation_fail "cannot resolve the real home"
+  local startup_home="${3-${REAL_HOME-}}"
+  local service_home=""
+  service_home="$(directory_service_home || true)"
+  if [[ -z "$startup_home" && -z "$service_home" ]]; then
+    isolation_fail "cannot resolve the real home"
   fi
   local reason="" code=0
-  reason="$(python3 - "$home" "$data" "$real_home" <<'PY'
+  reason="$(python3 - "$home" "$data" "$startup_home" "$service_home" <<'PY'
 import os
 import sys
 
-home, data, real_home = sys.argv[1:]
+home, data, startup_home, service_home = sys.argv[1:5]
+DATA_TAIL = ("Library", "Application Support", "com.johnkimec.cookie-agent")
 
-def resolve(path, label):
-    if path == "":
-        print("%s is empty" % label)
-        sys.exit(1)
-    try:
-        resolved = os.path.realpath(path)
-    except OSError as exc:
-        print("cannot realpath %s (%s): %s" % (label, path, exc))
-        sys.exit(2)
+def fold(path):
+    resolved = os.path.realpath(path).rstrip("/")
     if resolved == "":
-        print("cannot realpath %s (%s)" % (label, path))
-        sys.exit(2)
-    return resolved.rstrip("/").casefold()
+        raise OSError("empty realpath")
+    return resolved.casefold()
 
 def within(child, parent):
     return child == parent or child.startswith(parent + "/")
 
-home_key = resolve(home, "HOME")
-data_key = resolve(data, "COOKIE_DATA_DIR")
-real_home_key = resolve(real_home, "the real home")
-real_data = os.path.join(
-    real_home,
-    "Library",
-    "Application Support",
-    "com.johnkimec.cookie-agent",
-)
-real_data_key = resolve(real_data, "the real cookie data directory")
-if home_key == real_home_key:
+def stat_id(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+def chain_ids(path):
+    ids = []
+    current = path
+    seen = set()
+    while current and current not in seen:
+        seen.add(current)
+        ident = stat_id(current)
+        if ident is not None:
+            ids.append(ident)
+        parent = os.path.dirname(current.rstrip("/"))
+        if not parent or parent == current:
+            break
+        current = parent
+    return ids
+
+if home == "":
+    print("HOME is empty")
+    sys.exit(1)
+if data == "":
+    print("COOKIE_DATA_DIR is empty")
+    sys.exit(1)
+
+real_homes = [raw for raw in (startup_home, service_home) if raw != ""]
+if not real_homes:
+    print("cannot resolve the real home")
+    sys.exit(2)
+
+try:
+    home_key = fold(home)
+    data_key = fold(data)
+except OSError as exc:
+    print("cannot realpath HOME or COOKIE_DATA_DIR: %s" % exc)
+    sys.exit(2)
+
+home_keys = []
+data_keys = []
+home_inodes = set()
+data_inodes = set()
+for raw in real_homes:
+    try:
+        home_keys.append(fold(raw))
+        data_path = raw
+        for part in DATA_TAIL:
+            data_path = os.path.join(data_path, part)
+        data_keys.append(fold(data_path))
+    except OSError as exc:
+        print("cannot realpath a real home (%s): %s" % (raw, exc))
+        sys.exit(2)
+    ident = stat_id(raw)
+    if ident is not None:
+        home_inodes.add(ident)
+    ident = stat_id(data_path)
+    if ident is not None:
+        data_inodes.add(ident)
+
+for real_home_key in home_keys:
+    if home_key == real_home_key:
+        print("HOME is the real home (%s)" % home)
+        sys.exit(1)
+for real_data_key in data_keys:
+    if within(home_key, real_data_key):
+        print("HOME is the real cookie data directory or inside it (%s)" % home)
+        sys.exit(1)
+    if within(data_key, real_data_key):
+        print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+        sys.exit(1)
+
+def hits(ids, forbidden):
+    return any(item in forbidden for item in ids)
+
+home_ids = chain_ids(home)
+if hits(home_ids, home_inodes):
     print("HOME is the real home (%s)" % home)
     sys.exit(1)
-if within(home_key, real_data_key):
+if hits(home_ids, data_inodes):
     print("HOME is the real cookie data directory or inside it (%s)" % home)
     sys.exit(1)
-if within(data_key, real_data_key):
+
+data_ids = chain_ids(data)
+# A sibling under the home is a different directory. Match the home inode
+# only when this path itself is that home. Match the data-directory inode
+# on this path or any existing parent, so a missing leaf inside a firmlink
+# of the data directory is still refused.
+if stat_id(data) is not None and stat_id(data) in home_inodes:
+    print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+    sys.exit(1)
+if hits(data_ids, data_inodes):
     print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
     sys.exit(1)
 sys.exit(0)
