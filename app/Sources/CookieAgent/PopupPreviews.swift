@@ -74,7 +74,9 @@ enum PopupPreviewRenderer {
             if field, button, needle == nil || containsText(needle!, in: host) {
                 return
             }
-            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+            // `.common` is kCFRunLoopCommonModes, which CFRunLoopRunSpecific
+            // rejects, so MarkdownView's parse task never runs.
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         throw PreviewError("\(kind) preview did not draw its controls")
     }

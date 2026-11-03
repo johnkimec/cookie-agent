@@ -59,7 +59,7 @@ final class PopupInputRowTests: XCTestCase {
             badge = find(CookieAX.badge(0), in: host)
             reply = find(CookieAX.turnCookie(0), in: host)
             if badge != nil, reply != nil { break }
-            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         let capsule = try XCTUnwrap(badge, "on-device badge did not appear")
         let replyBox = try XCTUnwrap(reply, "cookie reply did not appear")
@@ -109,7 +109,7 @@ final class PopupInputRowTests: XCTestCase {
         while Date() < deadline {
             host.layoutSubtreeIfNeeded()
             if probe.row > 1, probe.transcript > 40 { break }
-            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         XCTAssertLessThanOrEqual(probe.row, 72)
         XCTAssertGreaterThan(probe.transcript, 40)
@@ -226,7 +226,7 @@ final class PopupInputRowTests: XCTestCase {
             host.layoutSubtreeIfNeeded()
             button = find(CookieAX.popupSend, in: host)
             if probe.row > 1, button != nil { break }
-            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         let control = try XCTUnwrap(button, "send button did not appear")
         XCTAssertGreaterThan(probe.row, 1)
@@ -269,7 +269,7 @@ final class PopupInputRowTests: XCTestCase {
                 stable = 0
             }
             previous = height
-            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         XCTAssertGreaterThan(height, 1)
         return height
