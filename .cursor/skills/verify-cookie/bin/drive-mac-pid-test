@@ -743,8 +743,9 @@ xs_word = re.compile(r"(?<![A-Za-z0-9_])" + xs + r"(?![A-Za-z0-9_])")
 # A statement-start assignment. The value has to end that word, and a name
 # that keeps going through "kill" (kill_count) is a different statement.
 assign_word = re.compile(
-    r"(?:^|[\n;&|(`])\s*"
-    r"(?:(?:builtin|command|export|local|declare)\s+)*"
+    r"(?:^|[\n;&|(`]|\{|\b(?:then|do|else)\b)\s*"
+    r"(?:(?:builtin|command|export|local|declare|readonly|typeset|alias)"
+    r"(?:\s+-[A-Za-z]+)*\s+)*"
     r"(?!" + verb + r"[A-Za-z0-9_])"
     r"[A-Za-z_][A-Za-z0-9_]*="
     + "(?:"
@@ -890,8 +891,12 @@ def is_lone_zero(tokens):
 
 
 def heredoc_end(source, index):
-    if not source.startswith("<<", index) or source.startswith("<<<", index):
+    if not source.startswith("<<", index):
         return None
+    # A here-string is three < characters. Skipping only the first leaves
+    # the next call looking at << and treating the operand as a heredoc.
+    if source.startswith("<<<", index):
+        return index + 3
     match = heredoc_op.match(source, index)
     if not match:
         return None
@@ -965,21 +970,79 @@ def closing_brace(source, open_at):
     return -1
 
 
-def exact_brace_line(source, after):
+def heredoc_delim(line):
+    idx = 0
+    while idx < len(line):
+        at = line.find("<<", idx)
+        if at < 0:
+            return None
+        if line.startswith("<<<", at):
+            idx = at + 3
+            continue
+        match = heredoc_op.match(line, at)
+        if not match:
+            idx = at + 2
+            continue
+        delim = match.group(2)
+        if delim is None:
+            delim = match.group(3)
+        if delim is None:
+            delim = match.group(4)
+        if not delim:
+            idx = at + 2
+            continue
+        return delim, match.group(1) == "-"
+    return None
+
+
+def column0_close(source, after):
+    # Same end the runtime sed /^}/ uses: the first later line that begins
+    # with } in column 0. The returned index is the character after that }.
     pos = source.find("\n", after)
     if pos < 0:
-        return -1
+        return -1, ""
     pos += 1
     while pos < len(source):
         newline = source.find("\n", pos)
         if newline < 0:
-            if source[pos:] == "}":
-                return pos + 1
-            return -1
-        if source[pos:newline] == "}":
-            return pos + 1
+            line = source[pos:]
+            if line.startswith("}"):
+                return pos + 1, line
+            return -1, ""
+        line = source[pos:newline]
+        if line.startswith("}"):
+            return pos + 1, line
         pos = newline + 1
-    return -1
+    return -1, ""
+
+
+def assert_indented_region(source, open_at, line_start):
+    pos = source.find("\n", open_at)
+    if pos < 0:
+        return
+    pos += 1
+    delim = None
+    strip_tabs = False
+    while pos < line_start:
+        newline = source.find("\n", pos)
+        if newline < 0 or newline > line_start:
+            line = source[pos:line_start]
+            next_pos = line_start
+        else:
+            line = source[pos:newline]
+            next_pos = newline + 1
+        if delim is not None:
+            check = line.lstrip("\t") if strip_tabs else line
+            if check == delim:
+                delim = None
+            pos = next_pos
+            continue
+        if line.strip() and not line[:1].isspace():
+            sys.exit("signal_verified_app_pid region has a column-0 line")
+        found = heredoc_delim(line)
+        if found is not None:
+            delim, strip_tabs = found
+        pos = next_pos
 
 
 def outside_helper(source):
@@ -988,20 +1051,21 @@ def outside_helper(source):
     if start < 0:
         sys.exit("signal_verified_app_pid is missing")
     open_at = start + marker.rfind("{")
-    # A heredoc apostrophe used to keep closing_brace() inside a quote, so
-    # the exempt region ran past the helper. End at whichever comes first,
-    # and refuse the source when the two ends are not the same brace.
-    brace_end = closing_brace(source, open_at)
-    line_end = exact_brace_line(source, open_at)
-    if brace_end < 0 or line_end < 0:
+    line_end, close_line = column0_close(source, open_at)
+    if line_end < 0:
         sys.exit("signal_verified_app_pid has no closing brace")
-    if brace_end != line_end:
-        sys.exit("signal_verified_app_pid closing brace and the line `}` disagree")
-    end = min(brace_end, line_end)
+    if close_line.rstrip() != "}":
+        sys.exit("signal_verified_app_pid closing line is not exactly }")
     decoy = source.find("\nDECOY_DATA=", start)
-    if decoy < 0 or end > decoy:
+    if decoy < 0 or line_end > decoy:
         sys.exit("signal_verified_app_pid region extends past DECOY_DATA=")
-    return source[:start] + "\n" + source[end:]
+    # line_end points at the character after the column-0 }. The line itself
+    # starts one character earlier.
+    assert_indented_region(source, open_at, line_end - 1)
+    brace_end = closing_brace(source, open_at)
+    if brace_end < 0 or brace_end != line_end:
+        sys.exit("signal_verified_app_pid closing brace and the line `}` disagree")
+    return source[:start] + "\n" + source[line_end:]
 
 
 def without_comment_lines(source):
@@ -1053,7 +1117,14 @@ def signal_violations(source):
 
 
 def wrap(body):
-    return "signal_verified_app_pid() {\n:\n}\nDECOY_DATA=\n" + body + "\n"
+    return "signal_verified_app_pid() {\n  :\n}\nDECOY_DATA=\n" + body + "\n"
+
+
+def caught(source):
+    try:
+        return bool(signal_violations(source))
+    except SystemExit:
+        return True
 
 
 rejected = [
@@ -1104,6 +1175,18 @@ rejected = [
     "k=/bin/" + verb,
     "k=/usr/bin/" + verb,
     "k=$'" + verb + "'",
+    "readonly k=" + verb,
+    "typeset k=" + verb,
+    "alias k=" + verb,
+    "local k=" + verb,
+    "declare k=" + verb,
+    "export k=" + verb,
+    "local -r k=" + verb,
+    "declare -r k=" + verb,
+    "if true; then k=" + verb,
+    "do k=" + verb,
+    "else k=" + verb,
+    "{ k=" + verb + "; }",
     "# do not " + verb + " APP_PID here\n" + verb + " -9 " + quoted,
 ]
 # By design the check does not catch aliasing through another variable,
@@ -1138,30 +1221,30 @@ allowed = [
     verb + "_count=" + verb,
 ]
 inside_ok = (
-    "signal_verified_app_pid() {\n"
+    "signal_verified_app_pid() {\n  "
     + verb
     + " -9 "
     + quoted
-    + "\n"
+    + "\n  "
     + verb
     + " -TERM "
     + quoted
-    + "\n"
+    + "\n  "
     + verb
     + " -SIGKILL "
     + braced
-    + "\n"
+    + "\n  "
     + verb
     + " -- "
     + unquoted
     + "\n}\nDECOY_DATA=\n"
 )
-inside_pk = "signal_verified_app_pid() {\n" + pk + " -P\n}\nDECOY_DATA=\n"
+inside_pk = "signal_verified_app_pid() {\n  " + pk + " -P\n}\nDECOY_DATA=\n"
 inside_all = (
-    "signal_verified_app_pid() {\n" + verb + "all CookieAgent\n}\nDECOY_DATA=\n"
+    "signal_verified_app_pid() {\n  " + verb + "all CookieAgent\n}\nDECOY_DATA=\n"
 )
 inside_ev = (
-    "signal_verified_app_pid() {\n"
+    "signal_verified_app_pid() {\n  "
     + ev
     + ' "'
     + verb
@@ -1183,7 +1266,7 @@ for sample in allowed:
 if signal_violations(inside_ok):
     sys.exit("a signal inside signal_verified_app_pid was flagged")
 between_helper = (
-    "signal_verified_app_pid() {\n:\n}\n"
+    "signal_verified_app_pid() {\n  :\n}\n"
     "added_after() {\n"
     + verb
     + " -9 "
@@ -1194,7 +1277,7 @@ if not signal_violations(between_helper):
     sys.exit("a function added after signal_verified_app_pid was exempt")
 heredoc_apostrophe = (
     "signal_verified_app_pid() {\n"
-    "cat <<EOF\n"
+    "  cat <<EOF\n"
     "don't\n"
     "EOF\n"
     "}\n"
@@ -1207,7 +1290,7 @@ if not signal_violations(heredoc_apostrophe):
     sys.exit("heredoc apostrophe hid a " + verb + " after the helper")
 heredoc_brace = (
     "signal_verified_app_pid() {\n"
-    "cat <<EOF\n"
+    "  cat <<EOF\n"
     "}\n"
     "EOF\n"
     "}\n"
@@ -1223,7 +1306,7 @@ except SystemExit as exc:
         sys.exit("heredoc brace failed for the wrong reason: " + message)
 if not brace_failed:
     sys.exit("a heredoc line `}` ended the helper region silently")
-past_decoy = "signal_verified_app_pid() {\n:\nDECOY_DATA=\n}\n"
+past_decoy = "signal_verified_app_pid() {\n  :\nDECOY_DATA=\n}\n"
 past_failed = False
 try:
     signal_violations(past_decoy)
@@ -1234,6 +1317,78 @@ except SystemExit as exc:
         sys.exit("region past DECOY_DATA failed for the wrong reason: " + message)
 if not past_failed:
     sys.exit("a helper region past DECOY_DATA was accepted")
+quote = "'"
+skew = "$" + quote + "\\" + quote + quote
+n87 = (
+    "signal_verified_app_pid() {\n"
+    "  echo {\n"
+    "}  \n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\n"
+    "helper_g() {\n"
+    "  echo }\n"
+    "}\n"
+    "DECOY_DATA=\n"
+)
+n88 = (
+    "signal_verified_app_pid() {\n"
+    "  local q="
+    + skew
+    + "\n"
+    "}  \n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\n"
+    "helper_g() {\n"
+    "  local q2="
+    + skew
+    + "\n"
+    "}\n"
+    "DECOY_DATA=\n"
+)
+n92 = (
+    "signal_verified_app_pid() {\n"
+    "  echo {\n"
+    "} # end helper\n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\n"
+    "helper_g() {\n"
+    "  echo }\n"
+    "}\n"
+    "DECOY_DATA=\n"
+)
+n91 = (
+    "signal_verified_app_pid() {\n"
+    "  echo {\n"
+    "  :; }\n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\n"
+    "helper_g() {\n"
+    "  echo }\n"
+    "}\n"
+    "DECOY_DATA=\n"
+)
+for name, sample in (("n-87", n87), ("n-88", n88), ("n-91", n91), ("n-92", n92)):
+    if not caught(sample):
+        sys.exit(name + " was not flagged")
+here_string = (
+    "signal_verified_app_pid() {\n"
+    "  x=$(cat <<< \"don't\")\n"
+    "}\n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\nDECOY_DATA=\n"
+)
+if not signal_violations(here_string):
+    sys.exit("here-string hid a " + verb + " after the helper")
 for sample in (inside_pk, inside_all, inside_ev):
     if not signal_violations(sample):
         sys.exit("fixture inside signal_verified_app_pid was not caught: " + sample)
