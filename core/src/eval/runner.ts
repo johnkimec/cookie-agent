@@ -818,15 +818,12 @@ export function forgottenProbeFor(
 /**
  * `store.forgottenTurnIds()` with no callback.
  * Null means the method is not on this store (#18 has not landed).
+ * An `open()` throw or a non-array return throws, so task 06 is an error.
  */
 function probeForgottenTurnIds(dataDir: string): string[] | null {
   const path = join(dataDir, "cookie.db");
-  let store: SqliteMemoryStore;
-  try {
-    store = SqliteMemoryStore.open(path);
-  } catch {
-    return null;
-  }
+  // An open throw is an error. Only a missing method is known-blocked.
+  const store = SqliteMemoryStore.open(path);
   try {
     const candidate = store as SqliteMemoryStore & {
       forgottenTurnIds?: () => string[];
@@ -836,7 +833,7 @@ function probeForgottenTurnIds(dataDir: string): string[] | null {
     }
     const ids = candidate.forgottenTurnIds();
     if (!Array.isArray(ids)) {
-      return null;
+      throw new Error("forgottenTurnIds() did not return an array");
     }
     return ids.filter((id): id is string => typeof id === "string");
   } finally {
