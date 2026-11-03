@@ -11,7 +11,7 @@ function task(extra: Partial<RecallTask>): RecallTask {
   };
 }
 
-describe("r0633b requiredFacts", () => {
+describe("task validator", () => {
   it("rejects requiredFacts when requiredIds is missing", () => {
     expect(
       listedTurnIssue(
