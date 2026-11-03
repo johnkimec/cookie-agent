@@ -1,7 +1,7 @@
 /**
  * `pnpm eval memory --fake` and `pnpm eval memory --real`.
  *
- * `--fake` is CI plumbing. A score under 8/10 still exits 0.
+ * `--fake` exits 1 below 8 of the 9 lexical tasks.
  * `--real` exits 1 when the score is under 8/10.
  * Egress off loopback exits 1 in either mode.
  */

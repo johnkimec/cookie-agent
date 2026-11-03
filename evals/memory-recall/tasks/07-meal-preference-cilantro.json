@@ -2,6 +2,11 @@
   "id": "07-meal-preference-cilantro",
   "question": "Suggest a quick dinner for tonight. Is there anything I don't eat?",
   "expectedFact": "cilantro",
+  "expectedIds": [
+    "ses-2026-09-30-2310-popup-1-user",
+    "ses-2026-09-30-2310-popup-2-assistant"
+  ],
+  "distractorIds": [],
   "tests": "Preference: a stated food dislike from an old session shapes a new suggestion.",
   "mustNotContain": [],
   "setup": "S1 meal preferences, S2 staples; ask in S3",
