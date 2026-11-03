@@ -24,11 +24,12 @@ final class PopupInputRowTests: XCTestCase {
     }
 
     func testYouReplyWrapsTheSentinel() throws {
-        let text = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
+        let text = "Einstein is best known for relativity. END-OF-REPLY-m1-popup. "
+            + "This second sentence is wider than the popup column and has to wrap."
         let one = try turnHeight(role: .you, text: "Hi")
         let wrapped = try turnHeight(role: .you, text: text)
         XCTAssertGreaterThan(wrapped, one + 8)
-        XCTAssertLessThan(wrapped, 120)
+        XCTAssertLessThan(wrapped, 180)
     }
 
     func testOnDeviceBadgeHugsItsLabel() throws {
@@ -118,15 +119,17 @@ final class PopupInputRowTests: XCTestCase {
     }
 
     func testCookieMarkdownAndInlineMathWrap() throws {
-        let plain = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
-        let math = "Einstein is best known for relativity, and \\(a^2 + b^2\\) still holds. END-OF-REPLY-m1-popup"
+        let plain = "Einstein is best known for relativity. END-OF-REPLY-m1-popup. "
+            + "This second sentence is wider than the popup column and has to wrap."
+        let math = "Einstein is best known for relativity, and \\(a^2 + b^2\\) still holds. "
+            + "END-OF-REPLY-m1-popup. This second sentence is wider than the popup column and has to wrap."
         let one = try turnHeight(role: .cookie, text: "Hi")
         let wrapped = try turnHeight(role: .cookie, text: plain)
         let withMath = try turnHeight(role: .cookie, text: math)
         XCTAssertGreaterThan(wrapped, one + 8, "markdown paragraph wraps a long line")
         XCTAssertGreaterThan(withMath, one + 8, "inline LaTeX stays in the wrapping paragraph")
-        XCTAssertLessThan(wrapped, 160)
-        XCTAssertLessThan(withMath, 200)
+        XCTAssertLessThan(wrapped, 220)
+        XCTAssertLessThan(withMath, 260)
     }
 
     private func previewModel(turns: [ChatTurn]) -> AppModel {
@@ -229,12 +232,27 @@ final class PopupInputRowTests: XCTestCase {
         host.frame = window.contentView?.bounds ?? .zero
         defer { window.close() }
         window.orderBack(nil)
+        let identifier = role == .you ? CookieAX.turnYou(0) : CookieAX.turnCookie(0)
+        // displayText may insert a break inside a long token. The first 12
+        // characters of END-OF-REPLY stay contiguous.
+        let needle = text.contains("END-OF-REPLY") ? "END-OF-REPLY" : String(text.prefix(12))
         let deadline = Date().addingTimeInterval(3)
-        var height = host.fittingSize.height
+        var height: CGFloat = 0
+        var previous: CGFloat = 0
+        var stable = 0
         while Date() < deadline {
             host.layoutSubtreeIfNeeded()
-            height = host.fittingSize.height
-            if role == .you || (height > 1 && contains(text, in: host)) { break }
+            if let box = find(identifier, in: host) {
+                height = box.bounds.height
+            }
+            let drawn = role == .you || contains(needle, in: host)
+            if drawn, height > 1, abs(height - previous) < 0.5 {
+                stable += 1
+                if stable >= 2 { break }
+            } else {
+                stable = 0
+            }
+            previous = height
             RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
         }
         XCTAssertGreaterThan(height, 1)

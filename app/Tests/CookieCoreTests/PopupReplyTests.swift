@@ -722,16 +722,20 @@ final class PopupSizingTests: XCTestCase {
 
     @MainActor
     func testSentinelReplyWrapsAtThePopupWidth() {
-        let line = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
+        // The short sentence fits the column once the badge no longer takes
+        // its width. A second sentence makes the reply wider than the popup
+        // so the test still fails if the line stays clipped.
+        let line = "Einstein is best known for relativity. END-OF-REPLY-m1-popup. "
+            + "This second sentence is wider than the popup column and has to wrap."
         let one = laidOutTurnHeight("Hi")
         let wrapped = laidOutTurnHeight(line)
         XCTAssertGreaterThan(one, 0)
         XCTAssertGreaterThan(
             wrapped,
             one + 8,
-            "the one-line sentinel wraps inside the popup column"
+            "a reply wider than the column wraps instead of clipping"
         )
-        XCTAssertLessThan(wrapped, 120)
+        XCTAssertLessThan(wrapped, 180)
     }
 
     func testDisplayTextBreaksALongRunAndLeavesShortText() {
