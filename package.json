@@ -12,6 +12,7 @@
     "typecheck": "pnpm --filter @cookie-agent/core typecheck",
     "test": "pnpm --filter @cookie-agent/core test",
     "spike-sqlite": "pnpm --filter @cookie-agent/core spike-sqlite",
-    "memory": "pnpm --filter @cookie-agent/core memory"
+    "memory": "pnpm --filter @cookie-agent/core memory",
+    "eval": "node --experimental-strip-types --disable-warning=ExperimentalWarning core/src/eval/cli.ts"
   }
 }
