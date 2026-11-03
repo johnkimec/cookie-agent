@@ -95,11 +95,14 @@ export class ChatLog implements ConversationHistory {
         messages.push({ role: turn.role, content: turn.content });
       }
     }
+    const omitTurnIds = new Set(prior.map((turn) => turn.id));
     const memories =
-      signal?.aborted === true ? [] : await this.safeRetrieve(userText, signal);
+      signal?.aborted === true
+        ? []
+        : await this.safeRetrieve(userText, signal, omitTurnIds);
     this.traceRetrieval(conversationId, memories);
     const block = renderRetrieved(memories, LOCAL_RETRIEVED_TOKEN_BUDGET, {
-      omitTurnIds: new Set(prior.map((turn) => turn.id)),
+      omitTurnIds,
     });
     if (block.length > 0) {
       messages.push({ role: "user", content: block });
@@ -108,13 +111,17 @@ export class ChatLog implements ConversationHistory {
     return messages;
   }
 
-  private async safeRetrieve(query: string, signal?: AbortSignal) {
+  private async safeRetrieve(
+    query: string,
+    signal?: AbortSignal,
+    omitTurnIds?: ReadonlySet<string>,
+  ) {
     const retriever = this.retriever;
     if (retriever === null || query.trim() === "" || signal?.aborted === true) {
       return [];
     }
     try {
-      return await retriever.retrieve(query, signal);
+      return await retriever.retrieve(query, signal, omitTurnIds);
     } catch {
       return [];
     }
