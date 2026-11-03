@@ -1,15 +1,16 @@
 /**
  * Case-insensitive, whitespace-collapsed substring.
- * A space between a number and its unit is removed, so "170 g" and
- * "170g" are the same needle.
+ * A space before a known unit (`g`, `kg`, `lb`, `ml`, `am`, `pm`, `%`)
+ * is removed, so "170 g" and "170g" are the same needle. Any other word
+ * stays separate, so "10:30 in", "3 Bahen", "170 grams", and "10:30 a.m."
+ * keep a letter-or-number boundary.
  */
-
 export function normalizeMatchText(value: string): string {
   return value
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/(\d)\s+(?=[a-z])/g, "$1");
+    .replace(/(\d)\s+(kg|lb|ml|am|pm|g|%)(?![\p{L}\p{N}])/gu, "$1$2");
 }
 
 export interface AnswerCheck {

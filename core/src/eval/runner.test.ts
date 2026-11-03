@@ -422,12 +422,12 @@ describe("memory recall runner", () => {
     ).toBe(false);
   });
 
-  it("turns a forgotten-id throw into a task-06 miss", () => {
-    expect(
+  it("labels a forgotten-id throw as an error, not a known-blocked miss", () => {
+    expect(() =>
       forgottenProbeFor(FORGET_TASK_ID, "/tmp/none", () => {
         throw new Error("forgottenTurnIds exploded");
       }),
-    ).toBeNull();
+    ).toThrow(/forgotten probe failed: forgottenTurnIds exploded/);
     expect(
       forgottenProbeFor("03-lab-partner", "/tmp/none", () => {
         throw new Error("should not run");

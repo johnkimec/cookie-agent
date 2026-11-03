@@ -12,8 +12,11 @@ export const RERANK_KEEP = 8;
  */
 export const RERANK_PREVIEW_CHARS = 100;
 
-/** Short JSON of indices. Eight small integers fit. */
-export const RERANK_MAX_TOKENS = 32;
+/**
+ * Short JSON of indices. 32 cut off a full 8-index answer on the Mac.
+ * 64 covers a pretty-printed list of two-digit indices (49 Qwen3 tokens).
+ */
+export const RERANK_MAX_TOKENS = 64;
 
 export const DEFAULT_RERANK_TIMEOUT_MS = 1500;
 
@@ -33,6 +36,7 @@ export const RERANK_RESPONSE_FORMAT = {
       indices: {
         type: "array",
         items: { type: "integer" },
+        maxItems: RERANK_KEEP,
       },
     },
   },
@@ -75,7 +79,7 @@ export function rerankPrompt(
   memories: readonly Memory[],
 ): string {
   const lines = memories.slice(0, RERANK_CANDIDATES).map((memory, index) => {
-    const preview = memory.text
+    const preview = rerankPreview(memory)
       .replace(/\s+/g, " ")
       .slice(0, RERANK_PREVIEW_CHARS);
     return `${index}. ${preview}`;
@@ -89,6 +93,24 @@ export function rerankPrompt(
     "",
     ...lines,
   ].join("\n");
+}
+
+/**
+ * A collapsed chunk keeps its own text on `matchText` and the full turn
+ * on `text`. Preview the chunk. A short BM25 token stays off this path
+ * so the preview is still the turn.
+ */
+function rerankPreview(memory: Memory): string {
+  const chunk = memory.matchText;
+  if (
+    chunk !== undefined &&
+    chunk !== memory.text &&
+    chunk.length >= 24 &&
+    memory.text.includes(chunk)
+  ) {
+    return chunk;
+  }
+  return memory.text;
 }
 
 /**

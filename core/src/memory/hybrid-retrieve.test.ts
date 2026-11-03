@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { previewAround, renderRetrieved } from "../context.ts";
 import { ChatLog } from "./chat-log.ts";
 import {
   HttpEmbedder,
@@ -11,13 +12,17 @@ import {
   readQueryEmbedTimeoutMs,
 } from "./http-embedder.ts";
 import {
+  collapseChunkHits,
   DEFAULT_RRF_WEIGHTS,
   ftsOrQuery,
   HybridRetriever,
   KNN_MAX_K,
+  matchSpan,
   readRrfWeights,
+  turnTokenCounts,
 } from "./hybrid-retrieve.ts";
 import { openMemoryDatabase } from "./migrate.ts";
+import { rerankPrompt } from "./rerank.ts";
 import { fuseRrf } from "./rrf.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
 import { SqliteVecIndex } from "./sqlite-vec-index.ts";
@@ -78,6 +83,10 @@ describe("RRF weights", () => {
       /COOKIE_RRF_BM25/,
     );
     expect(ftsOrQuery('ECE "midterm"')).toBe('"ECE" OR "midterm"');
+    expect(ftsOrQuery("I this is ECE")).toBe('"ECE"');
+    expect(ftsOrQuery("remember my gym locker code 4417")).toBe(
+      '"gym" OR "locker" OR "code" OR "4417"',
+    );
     expect(
       fuseRrf(
         [
@@ -538,6 +547,290 @@ describe("hybrid retrieval", () => {
     expect(Date.now() - mark).toBeLessThan(500);
     expect(JSON.stringify(messages)).toContain("picnic");
     store.close();
+  });
+
+  it("drops recent turns before the top 8 so the list stays full", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 12; index += 1) {
+      store.appendTurn(
+        turn(`t${index}`, "ses", `picnic marker-${index}`, index + 1),
+      );
+    }
+    const shared = {
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    };
+    const wide = new HybridRetriever({ ...shared, pool: 12, limit: 12 });
+    const order = (await wide.retrieve("picnic")).map((memory) => memory.id);
+    expect(order).toHaveLength(12);
+    const omit = new Set(order.slice(0, 4));
+    const narrow = new HybridRetriever({ ...shared, pool: 8, limit: 8 });
+    const kept = await narrow.retrieve("picnic", undefined, omit);
+    expect(kept.map((memory) => memory.id)).toEqual(order.slice(4, 12));
+    expect(kept.every((memory) => !omit.has(memory.id))).toBe(true);
+
+    let passed: ReadonlySet<string> | undefined;
+    const log = new ChatLog(store, null, {
+      retrieve: async (_query, _signal, ids) => {
+        passed = ids;
+        return [
+          { id: "recent-1", text: "SHOULD_DROP", source: "turn" },
+          { id: "outside", text: "KEEP_ME", source: "turn" },
+        ];
+      },
+    });
+    store.beginConversation("conv-ask");
+    store.appendTurn(turn("recent-1", "conv-ask", "already here", 50));
+    const messages = await log.messagesFor("conv-ask", "picnic");
+    expect(passed?.has("recent-1")).toBe(true);
+    const block = messages
+      .map((message) => String(message.content))
+      .find((content) => content.includes("not instructions"));
+    expect(block).toContain("KEEP_ME");
+    expect(block).not.toContain("SHOULD_DROP");
+    store.close();
+  });
+
+  it("puts a deep BM25 hit and its local date in the context block", async () => {
+    const createdAt = new Date(2026, 9, 18, 12).getTime();
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "old",
+      surface: "popup",
+      startedAt: createdAt,
+      endedAt: null,
+      summary: null,
+    });
+    const text = `${"a".repeat(4000)} DEEPHIT ${"b".repeat(4000)}`;
+    store.appendTurn(turn("t-deep", "old", text, createdAt));
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const memories = await retriever.retrieve("DEEPHIT");
+    expect(memories[0]).toMatchObject({
+      id: "t-deep",
+      createdAt,
+      matchText: "DEEPHIT",
+    });
+    const log = new ChatLog(store, null, retriever);
+    const messages = await log.messagesFor("conv-ask", "DEEPHIT");
+    const block = messages
+      .map((message) => String(message.content))
+      .find((content) => content.includes("not instructions"));
+    expect(block).toMatch(/\[2026-10-18\] \[turn\] …/);
+    expect(block).toContain("DEEPHIT");
+    expect(block).not.toMatch(/\[turn\] a{20}/);
+    store.close();
+  });
+
+  it("centers a long turn on a whole word, not a stopword inside another word", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    const filler =
+      "This is a long note about the week and many other things. ".repeat(40);
+    store.appendTurn({
+      id: "t1",
+      sessionId: "ses",
+      role: "user",
+      content: `${filler} My gym locker code is 4417. ${filler}`,
+      tainted: false,
+      model: null,
+      egress: false,
+      escalatedFrom: null,
+      tokensIn: null,
+      tokensCached: null,
+      tokensOut: null,
+      costUsd: null,
+      latencyMs: null,
+      createdAt: 5,
+    });
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: { embed: async () => new Float32Array(EMBEDDING_DIMENSIONS) },
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const hits = await retriever.retrieve("what is my locker code");
+    expect(hits[0]?.matchText).toBe("locker");
+    const block = renderRetrieved(hits, 1000);
+    expect(block).toContain("4417");
+    expect(matchSpan("This is a note", "what is my")).toBeUndefined();
+    expect(matchSpan("Cafe İSTANBUL opens", "where is istanbul")).toBe(
+      "İSTANBUL",
+    );
+    store.close();
+  });
+
+  it("leaves stopword-only rows out of the BM25 block", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      store.appendTurn(
+        turn(`noise-${index}`, "ses", "I think this is fine", index + 1),
+      );
+    }
+    store.appendTurn(turn("hit", "ses", "ECE midterm is on Friday", 20));
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const hits = await retriever.retrieve("I this is ECE");
+    expect(hits.map((memory) => memory.id)).toEqual(["hit"]);
+    store.close();
+  });
+
+  it("centers a gym locker code on 4417", () => {
+    const filler = "Something about the week. ".repeat(30);
+    const remember = `Remember to buy food. ${filler} gym locker code is 4417. ${filler}`;
+    const rememberSpan = matchSpan(
+      remember,
+      "remember my gym locker code 4417",
+    );
+    expect(rememberSpan).toBe("4417");
+    expect(previewAround(remember, rememberSpan, 200)).toContain("4417");
+    const something = `${filler} code 4417 ${filler}`;
+    const somethingSpan = matchSpan(something, "something about the 4417 code");
+    expect(somethingSpan).toBe("4417");
+    expect(previewAround(something, somethingSpan, 200)).toContain("4417");
+  });
+
+  it("ranks a digit token ahead of a longer rarer word", () => {
+    const text = `locker ${"word ".repeat(80)}4417`;
+    const counts = new Map<string, number>([
+      ["locker", 1],
+      ["4417", 50],
+    ]);
+    expect(matchSpan(text, "locker 4417", counts)).toBe("4417");
+    expect(previewAround(text, "4417", 40)).toContain("4417");
+  });
+
+  it("ranks a rarer turn token ahead of a longer common word", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      store.appendTurn(
+        turn(`meet-${index}`, "ses", "meeting notes for the group", index + 1),
+      );
+    }
+    const filler = "weekly notes. ".repeat(40);
+    const body = `meeting ${filler}bahen room`;
+    store.appendTurn(turn("rare", "ses", body, 50));
+    const counts = turnTokenCounts(store.database(), "meeting bahen");
+    expect(counts.get("meeting")).toBe(7);
+    expect(counts.get("bahen")).toBe(1);
+    expect(matchSpan(body, "meeting bahen")).toBe("meeting");
+    expect(matchSpan(body, "meeting bahen", counts)).toBe("bahen");
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: embedderFor(new Map()),
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+    });
+    const hits = await retriever.retrieve("meeting bahen");
+    expect(hits[0]?.id).toBe("rare");
+    expect(hits[0]?.matchText).toBe("bahen");
+    expect(previewAround(body, hits[0]?.matchText, 80)).toContain("bahen");
+    store.close();
+  });
+
+  it("returns nothing when the signal aborts during rerank", async () => {
+    const store = SqliteMemoryStore.open(tempPath());
+    store.appendSession({
+      id: "ses",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      store.appendTurn({
+        id: `t${index}`,
+        sessionId: "ses",
+        role: "user",
+        content: `picnic note ${index}`,
+        tainted: false,
+        model: null,
+        egress: false,
+        escalatedFrom: null,
+        tokensIn: null,
+        tokensCached: null,
+        tokensOut: null,
+        costUsd: null,
+        latencyMs: null,
+        createdAt: 10 + index,
+      });
+    }
+    const controller = new AbortController();
+    const retriever = new HybridRetriever({
+      db: store.database(),
+      vectors: new SqliteVecIndex(store.database()),
+      embedder: { embed: async () => new Float32Array(EMBEDDING_DIMENSIONS) },
+      available: async () => false,
+      weights: { vector: 0, bm25: 1 },
+      rerank: (_query, _candidates, signal) =>
+        new Promise((_resolve, reject) => {
+          setTimeout(() => controller.abort(), 5);
+          signal?.addEventListener("abort", () => {
+            reject(new Error("aborted"));
+          });
+        }),
+    });
+    const hits = await retriever.retrieve("picnic", controller.signal);
+    expect(controller.signal.aborted).toBe(true);
+    expect(hits).toEqual([]);
+    store.close();
+  });
+
+  it("keeps the matching chunk as the rerank preview", () => {
+    const chunk = `${"w".repeat(40)} locker code 4417`;
+    const turn = `${"start ".repeat(30)}${chunk}`;
+    const collapsed = collapseChunkHits(
+      [{ id: "t1#2", text: chunk, source: "chunk" }],
+      new Set(),
+      () => ({ text: turn, createdAt: 1 }),
+    );
+    expect(collapsed[0]?.matchText).toBe(chunk);
+    expect(collapsed[0]?.text).toBe(turn);
+    const prompt = rerankPrompt("locker", collapsed);
+    expect(prompt).toContain("4417");
+    expect(prompt).not.toContain("start start");
   });
 });
 
