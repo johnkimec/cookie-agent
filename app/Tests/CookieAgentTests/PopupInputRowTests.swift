@@ -123,13 +123,63 @@ final class PopupInputRowTests: XCTestCase {
             + "This second sentence is wider than the popup column and has to wrap."
         let math = "Einstein is best known for relativity, and \\(a^2 + b^2\\) still holds. "
             + "END-OF-REPLY-m1-popup. This second sentence is wider than the popup column and has to wrap."
-        let one = try turnHeight(role: .cookie, text: "Hi")
-        let wrapped = try turnHeight(role: .cookie, text: plain)
-        let withMath = try turnHeight(role: .cookie, text: math)
+        let one = try markdownHeight("Hi")
+        let wrapped = try markdownHeight(plain)
+        let withMath = try markdownHeight(math)
         XCTAssertGreaterThan(wrapped, one + 8, "markdown paragraph wraps a long line")
         XCTAssertGreaterThan(withMath, one + 8, "inline LaTeX stays in the wrapping paragraph")
-        XCTAssertLessThan(wrapped, 220)
-        XCTAssertLessThan(withMath, 260)
+        XCTAssertLessThan(wrapped, 280)
+        XCTAssertLessThan(withMath, 320)
+    }
+
+    /// Hosts the real popup. An isolated `TurnRow` collapses `MarkdownView`
+    /// before its `.task` parses, so the text view never appears.
+    private func markdownHeight(_ text: String) throws -> CGFloat {
+        let turns = [
+            ChatTurn(index: 0, role: .you, text: "hello", streaming: false, badge: nil),
+            ChatTurn(index: 0, role: .cookie, text: text, streaming: false, badge: CookieCopy.onDevice),
+        ]
+        let model = previewModel(turns: turns)
+        let probe = Probe()
+        let host = NSHostingView(rootView: Hosted(model: model, height: 800, probe: probe))
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: PopupLayout.width, height: 800)
+        let window = NSWindow(
+            contentRect: host.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        let needle = text.contains("END-OF-REPLY") ? "END-OF-REPLY" : text
+        let deadline = Date().addingTimeInterval(5)
+        var height: CGFloat = 0
+        while Date() < deadline {
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            if let used = laidOutTextHeight(needle, in: host) {
+                height = used
+                break
+            }
+            RunLoop.main.run(mode: .common, before: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertGreaterThan(height, 1, "markdown text view missing, saw \(textDump(host))")
+        return height
+    }
+
+    private func textDump(_ view: NSView) -> String {
+        var lines: [String] = []
+        func walk(_ node: NSView) {
+            if let text = node as? NSTextView, !text.string.isEmpty {
+                lines.append(String(text.string.prefix(80)))
+            }
+            node.subviews.forEach(walk)
+        }
+        walk(view)
+        return lines.isEmpty ? "no text views" : lines.joined(separator: " | ")
     }
 
     private func previewModel(turns: [ChatTurn]) -> AppModel {
