@@ -740,15 +740,31 @@ decoy = '"$' + "DECOY_PID" + '"'
 xs = "xargs"
 word = re.compile(r"(?<![A-Za-z0-9_])" + verb + r"(?![A-Za-z0-9_])")
 xs_word = re.compile(r"(?<![A-Za-z0-9_])" + xs + r"(?![A-Za-z0-9_])")
+# A statement-start assignment. The value has to end that word, and a name
+# that keeps going through "kill" (kill_count) is a different statement.
 assign_word = re.compile(
-    r"(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*="
+    r"(?:^|[\n;&|(`])\s*"
+    r"(?:(?:builtin|command|export|local|declare)\s+)*"
+    r"(?!" + verb + r"[A-Za-z0-9_])"
+    r"[A-Za-z_][A-Za-z0-9_]*="
     + "(?:"
     + verb
     + "|'"
     + verb
     + "'|\""
     + verb
-    + "\")(?![A-Za-z0-9_])"
+    + '"|/'
+    + "usr/bin/"
+    + verb
+    + "|/bin/"
+    + verb
+    + r"|\$'"
+    + verb
+    + "')"
+    + r"(?=$|[\s;&|<>)`])"
+)
+heredoc_op = re.compile(
+    r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z_][A-Za-z0-9_]*))"
 )
 pk_word = re.compile(r"(?<![A-Za-z0-9_])" + pk + r"(?![A-Za-z0-9_])")
 all_word = re.compile(r"(?<![A-Za-z0-9_])" + verb + r"all(?![A-Za-z0-9_])")
@@ -873,12 +889,53 @@ def is_lone_zero(tokens):
     return signal == "0"
 
 
+def heredoc_end(source, index):
+    if not source.startswith("<<", index) or source.startswith("<<<", index):
+        return None
+    match = heredoc_op.match(source, index)
+    if not match:
+        return None
+    delim = match.group(2)
+    if delim is None:
+        delim = match.group(3)
+    if delim is None:
+        delim = match.group(4)
+    if not delim:
+        return None
+    strip_tabs = match.group(1) == "-"
+    newline = source.find("\n", match.end())
+    if newline < 0:
+        return len(source)
+    pos = newline + 1
+    while pos <= len(source):
+        next_nl = source.find("\n", pos)
+        if next_nl < 0:
+            line = source[pos:]
+            end = len(source)
+        else:
+            line = source[pos:next_nl]
+            end = next_nl + 1
+        if strip_tabs:
+            line = line.lstrip("\t")
+        if line == delim:
+            return end
+        if next_nl < 0:
+            return len(source)
+        pos = end
+    return len(source)
+
+
 def closing_brace(source, open_at):
     depth = 0
     quote = ""
     index = open_at
     limit = len(source)
     while index < limit:
+        if not quote:
+            skipped = heredoc_end(source, index)
+            if skipped is not None and skipped > index:
+                index = skipped
+                continue
         char = source[index]
         if quote:
             if char == "\\" and quote == '"' and index + 1 < limit:
@@ -908,16 +965,42 @@ def closing_brace(source, open_at):
     return -1
 
 
+def exact_brace_line(source, after):
+    pos = source.find("\n", after)
+    if pos < 0:
+        return -1
+    pos += 1
+    while pos < len(source):
+        newline = source.find("\n", pos)
+        if newline < 0:
+            if source[pos:] == "}":
+                return pos + 1
+            return -1
+        if source[pos:newline] == "}":
+            return pos + 1
+        pos = newline + 1
+    return -1
+
+
 def outside_helper(source):
     marker = "signal_verified_app_pid() {"
     start = source.find(marker)
     if start < 0:
         sys.exit("signal_verified_app_pid is missing")
-    # Exempt only this function. A later function, even one that sits before
-    # DECOY_DATA=, is scanned.
-    end = closing_brace(source, start + marker.rfind("{"))
-    if end < 0:
+    open_at = start + marker.rfind("{")
+    # A heredoc apostrophe used to keep closing_brace() inside a quote, so
+    # the exempt region ran past the helper. End at whichever comes first,
+    # and refuse the source when the two ends are not the same brace.
+    brace_end = closing_brace(source, open_at)
+    line_end = exact_brace_line(source, open_at)
+    if brace_end < 0 or line_end < 0:
         sys.exit("signal_verified_app_pid has no closing brace")
+    if brace_end != line_end:
+        sys.exit("signal_verified_app_pid closing brace and the line `}` disagree")
+    end = min(brace_end, line_end)
+    decoy = source.find("\nDECOY_DATA=", start)
+    if decoy < 0 or end > decoy:
+        sys.exit("signal_verified_app_pid region extends past DECOY_DATA=")
     return source[:start] + "\n" + source[end:]
 
 
@@ -1018,6 +1101,9 @@ rejected = [
     "KILL=" + verb,
     'k="' + verb + '"',
     "KILL='" + verb + "'",
+    "k=/bin/" + verb,
+    "k=/usr/bin/" + verb,
+    "k=$'" + verb + "'",
     "# do not " + verb + " APP_PID here\n" + verb + " -9 " + quoted,
 ]
 # By design the check does not catch aliasing through another variable,
@@ -1047,6 +1133,9 @@ allowed = [
     xs + " echo ok",
     "k=" + verb + "er",
     "# do not " + verb + " APP_PID here",
+    'log "mode k=' + verb + '"',
+    "k=" + verb + ".sh",
+    verb + "_count=" + verb,
 ]
 inside_ok = (
     "signal_verified_app_pid() {\n"
@@ -1103,6 +1192,48 @@ between_helper = (
 )
 if not signal_violations(between_helper):
     sys.exit("a function added after signal_verified_app_pid was exempt")
+heredoc_apostrophe = (
+    "signal_verified_app_pid() {\n"
+    "cat <<EOF\n"
+    "don't\n"
+    "EOF\n"
+    "}\n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\nDECOY_DATA=\n"
+)
+if not signal_violations(heredoc_apostrophe):
+    sys.exit("heredoc apostrophe hid a " + verb + " after the helper")
+heredoc_brace = (
+    "signal_verified_app_pid() {\n"
+    "cat <<EOF\n"
+    "}\n"
+    "EOF\n"
+    "}\n"
+    "DECOY_DATA=\n"
+)
+brace_failed = False
+try:
+    signal_violations(heredoc_brace)
+except SystemExit as exc:
+    brace_failed = True
+    message = exc.code if isinstance(exc.code, str) else str(exc.code)
+    if "disagree" not in message:
+        sys.exit("heredoc brace failed for the wrong reason: " + message)
+if not brace_failed:
+    sys.exit("a heredoc line `}` ended the helper region silently")
+past_decoy = "signal_verified_app_pid() {\n:\nDECOY_DATA=\n}\n"
+past_failed = False
+try:
+    signal_violations(past_decoy)
+except SystemExit as exc:
+    past_failed = True
+    message = exc.code if isinstance(exc.code, str) else str(exc.code)
+    if "DECOY_DATA" not in message:
+        sys.exit("region past DECOY_DATA failed for the wrong reason: " + message)
+if not past_failed:
+    sys.exit("a helper region past DECOY_DATA was accepted")
 for sample in (inside_pk, inside_all, inside_ev):
     if not signal_violations(sample):
         sys.exit("fixture inside signal_verified_app_pid was not caught: " + sample)
