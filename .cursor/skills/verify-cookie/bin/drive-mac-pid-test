@@ -722,9 +722,11 @@ import re
 
 # Any kill whose arguments mention APP_PID is rejected outside
 # signal_verified_app_pid. The one exception is a lone -0 liveness probe.
-# An eval that contains kill, and every pkill or killall, is rejected
-# everywhere, including inside that helper. The verb is concatenated so the
-# targeting lint, which scans this file, does not see those words.
+# An eval that contains kill, every pkill or killall, an xargs line that
+# contains kill, and an assignment of the bare word kill are rejected
+# everywhere, including inside that helper. Comment-only lines are not
+# scanned. The verb is concatenated so the targeting lint, which scans this
+# file, does not see those words.
 verb = "ki" + "ll"
 pk = "p" + verb
 ev = "ev" + "al"
@@ -735,7 +737,19 @@ unbraced = "${" + "APP_PID" + "}"
 bare = "APP_PID"
 other = '"$' + "pid" + '"'
 decoy = '"$' + "DECOY_PID" + '"'
+xs = "xargs"
 word = re.compile(r"(?<![A-Za-z0-9_])" + verb + r"(?![A-Za-z0-9_])")
+xs_word = re.compile(r"(?<![A-Za-z0-9_])" + xs + r"(?![A-Za-z0-9_])")
+assign_word = re.compile(
+    r"(^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*="
+    + "(?:"
+    + verb
+    + "|'"
+    + verb
+    + "'|\""
+    + verb
+    + "\")(?![A-Za-z0-9_])"
+)
 pk_word = re.compile(r"(?<![A-Za-z0-9_])" + pk + r"(?![A-Za-z0-9_])")
 all_word = re.compile(r"(?<![A-Za-z0-9_])" + verb + r"all(?![A-Za-z0-9_])")
 ev_word = re.compile(r"(?<![A-Za-z0-9_])" + ev + r"(?![A-Za-z0-9_])")
@@ -859,15 +873,62 @@ def is_lone_zero(tokens):
     return signal == "0"
 
 
+def closing_brace(source, open_at):
+    depth = 0
+    quote = ""
+    index = open_at
+    limit = len(source)
+    while index < limit:
+        char = source[index]
+        if quote:
+            if char == "\\" and quote == '"' and index + 1 < limit:
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        if char == "#" and (index == 0 or source[index - 1] in " \t\n"):
+            newline = source.find("\n", index)
+            if newline < 0:
+                return -1
+            index = newline + 1
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return -1
+
+
 def outside_helper(source):
     marker = "signal_verified_app_pid() {"
     start = source.find(marker)
     if start < 0:
         sys.exit("signal_verified_app_pid is missing")
-    end = source.find("\nDECOY_DATA=", start)
+    # Exempt only this function. A later function, even one that sits before
+    # DECOY_DATA=, is scanned.
+    end = closing_brace(source, start + marker.rfind("{"))
     if end < 0:
-        sys.exit("DECOY_DATA marker is missing after signal_verified_app_pid")
+        sys.exit("signal_verified_app_pid has no closing brace")
     return source[:start] + "\n" + source[end:]
+
+
+def without_comment_lines(source):
+    kept = []
+    for line in source.splitlines(keepends=True):
+        if line.lstrip().startswith("#"):
+            kept.append("\n" if line.endswith("\n") else "")
+        else:
+            kept.append(line)
+    return "".join(kept)
 
 
 def line_at(source, index):
@@ -879,7 +940,7 @@ def line_at(source, index):
 
 
 def signal_violations(source):
-    text_now = join_continuations(source)
+    text_now = join_continuations(without_comment_lines(source))
     found = []
     for pattern, label in ((pk_word, pk), (all_word, verb + "all")):
         for match in pattern.finditer(text_now):
@@ -887,6 +948,10 @@ def signal_violations(source):
     for line in text_now.splitlines():
         if ev_word.search(line) and word.search(line):
             found.append(ev + ": " + line.strip())
+        if xs_word.search(line) and word.search(line):
+            found.append(xs + ": " + line.strip())
+        if assign_word.search(line):
+            found.append("assign: " + line.strip())
     outside = outside_helper(text_now)
     for match in word.finditer(outside):
         tail = command_tail(outside, match.end())
@@ -946,7 +1011,20 @@ rejected = [
     verb + " -0 -9 " + quoted,
     verb + " -- -0 " + quoted,
     verb + " -0 " + quoted + " || " + verb + " -9 " + quoted,
+    xs + " " + verb,
+    xs + " " + verb + " -9 " + quoted,
+    "printf '%s\\n' " + quoted + " | " + xs + " -n1 " + verb,
+    "k=" + verb,
+    "KILL=" + verb,
+    'k="' + verb + '"',
+    "KILL='" + verb + "'",
+    "# do not " + verb + " APP_PID here\n" + verb + " -9 " + quoted,
 ]
+# By design the check does not catch aliasing through another variable,
+# ${!ref} or a nameref, the kill command held in a variable, a wrapper
+# function, or xargs. The real protection is the pid re-check in
+# signal_verified_app_pid and stop_pid. A line that contains xargs and
+# kill, and an assignment of the bare word kill, are still flagged.
 allowed = [
     verb + " -0 " + quoted,
     verb + " -0 " + unquoted,
@@ -966,6 +1044,9 @@ allowed = [
     verb + " " + other,
     'p="$APP_PID"; ' + verb + " -9 " + '"$p"',
     ev + ' "echo ok"',
+    xs + " echo ok",
+    "k=" + verb + "er",
+    "# do not " + verb + " APP_PID here",
 ]
 inside_ok = (
     "signal_verified_app_pid() {\n"
@@ -1012,6 +1093,16 @@ for sample in allowed:
         sys.exit("allowed fixture was flagged: " + sample + " | " + " | ".join(hit))
 if signal_violations(inside_ok):
     sys.exit("a signal inside signal_verified_app_pid was flagged")
+between_helper = (
+    "signal_verified_app_pid() {\n:\n}\n"
+    "added_after() {\n"
+    + verb
+    + " -9 "
+    + quoted
+    + "\n}\nDECOY_DATA=\n"
+)
+if not signal_violations(between_helper):
+    sys.exit("a function added after signal_verified_app_pid was exempt")
 for sample in (inside_pk, inside_all, inside_ev):
     if not signal_violations(sample):
         sys.exit("fixture inside signal_verified_app_pid was not caught: " + sample)
