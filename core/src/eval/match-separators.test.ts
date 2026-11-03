@@ -21,6 +21,27 @@ describe("match separators", () => {
     );
   });
 
+  it("keeps a date and a day number separate from the amount", () => {
+    expect(answerMatches({ expectedFact: "10:30" }, "Nov 7 10:30")).toBe(true);
+    expect(
+      answerMatches(
+        { expectedFact: "10:30 am" },
+        "Saturday, November 7 10:30 am",
+      ),
+    ).toBe(true);
+    expect(
+      answerMatches({ expectedFact: "170 g" }, "Day 3 170 g of protein"),
+    ).toBe(true);
+  });
+
+  it("treats a hyphen as a boundary and a thousands space as 1170", () => {
+    expect(answerMatches({ expectedFact: "170 g" }, "-170 g")).toBe(true);
+    expect(answerMatches({ expectedFact: "170 g" }, "150-170 g")).toBe(true);
+    expect(answerMatches({ expectedFact: "170 g" }, "1170 g")).toBe(false);
+    expect(answerMatches({ expectedFact: "1170 g" }, "1 170 g")).toBe(true);
+    expect(answerMatches({ expectedFact: "1 170 g" }, "1170 g")).toBe(true);
+  });
+
   it("still matches a plain amount and a sentence-final period", () => {
     expect(answerMatches({ expectedFact: "170 g" }, "170 g")).toBe(true);
     expect(

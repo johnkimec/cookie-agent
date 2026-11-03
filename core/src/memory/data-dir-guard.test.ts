@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { memoryDataDir } from "./path.ts";
+import { memoryDataDir, parseNfsHomeDirectory } from "./path.ts";
 
 const TAIL = [
   "Library",
@@ -97,6 +97,46 @@ describe("data dir guard", () => {
       }),
     ).not.toThrow();
     expect(existsSync(dataDir(home))).toBe(false);
+  });
+
+  it("refuses a two-level symlink chain and a path inside the data dir", () => {
+    const home = tempDir("cookie-chain-home-");
+    const parent = tempDir("cookie-chain-links-");
+    const target = dataDir(home);
+    const mid = join(parent, "mid");
+    const leaf = join(parent, "leaf");
+    symlinkSync(target, mid);
+    symlinkSync(mid, leaf);
+    expect(existsSync(target)).toBe(false);
+    expect(() =>
+      memoryDataDir({ NODE_ENV: "TEST", HOME: home, COOKIE_DATA_DIR: leaf }),
+    ).toThrow(/default data directory/);
+    expect(() =>
+      memoryDataDir({
+        NODE_ENV: "TEST",
+        HOME: home,
+        COOKIE_DATA_DIR: join(target, "sub"),
+      }),
+    ).toThrow(/default data directory/);
+    const loopA = join(parent, "loop-a");
+    const loopB = join(parent, "loop-b");
+    symlinkSync(loopB, loopA);
+    symlinkSync(loopA, loopB);
+    expect(() =>
+      memoryDataDir({ NODE_ENV: "TEST", HOME: home, COOKIE_DATA_DIR: loopA }),
+    ).toThrow(/default data directory/);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("reads an NFSHomeDirectory value that dscl wraps onto the next line", () => {
+    expect(parseNfsHomeDirectory("NFSHomeDirectory: /Users/ada\n")).toBe(
+      "/Users/ada",
+    );
+    expect(
+      parseNfsHomeDirectory("NFSHomeDirectory:\n /Users/ada lovelace\n"),
+    ).toBe("/Users/ada lovelace");
+    expect(parseNfsHomeDirectory("NFSHomeDirectory:\n")).toBeNull();
+    expect(parseNfsHomeDirectory("NFSHomeDirectory:")).toBeNull();
   });
 
   it("allows a temp data dir under a temp HOME", () => {

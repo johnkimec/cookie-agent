@@ -4,17 +4,18 @@
  * is removed, so "170 g" and "170g" are the same needle. Any other word
  * stays separate, so "10:30 in", "3 Bahen", "170 grams", and "10:30 a.m."
  * keep a letter-or-number boundary.
+ * A space, NBSP (U+00A0), thin space (U+2009), or narrow no-break space
+ * (U+202F) joins a digit to a following group of exactly three digits, so
+ * "1 170" is "1170". "Nov 7 10:30" and "Day 3 170" stay split. A hyphen is
+ * a boundary, so "-170 g" and "150-170 g" contain "170 g".
  */
-/** Space, nbsp, thin space, and narrow no-break space. */
-const THOUSANDS_SPACE = /[ \u00a0\u2009\u202f]/g;
-
 export function normalizeMatchText(value: string): string {
   return value
     .toLowerCase()
-    .replace(THOUSANDS_SPACE, " ")
+    .replace(/[\u00a0\u2009\u202f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/(\d) (?=\d)/g, "$1")
+    .replace(/(?<![\p{L}] )(\d) (?=\d{3}(?!\d))/gu, "$1")
     .replace(/(\d)\s+(kg|lb|ml|am|pm|g|%)(?![\p{L}\p{N}])/gu, "$1$2");
 }
 

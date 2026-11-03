@@ -42,7 +42,9 @@ function homeDirectory(env: NodeJS.ProcessEnv): string {
  * under the account home (`os.userInfo().homedir`, and on macOS the
  * `dscl` `NFSHomeDirectory`). When the folder is missing, the nearest
  * existing parents must share device and inode and the remaining path
- * segments must match, case-insensitively on darwin.
+ * segments must match, case-insensitively on darwin. A path inside that
+ * directory is the same refusal. A symlink chain longer than 40 hops is
+ * refused.
  */
 export function memoryDataDir(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.COOKIE_DATA_DIR;
@@ -74,15 +76,35 @@ function isTestEnv(env: NodeJS.ProcessEnv): boolean {
   return typeof nodeEnv === "string" && nodeEnv.toLowerCase() === "test";
 }
 
+const SYMLINK_HOP_CAP = 40;
+
 function isDefaultDataDir(dir: string, env: NodeJS.ProcessEnv): boolean {
-  for (const home of guardHomes(env)) {
-    const fallback = join(home, "Library", "Application Support", PRODUCT_DIR);
-    if (sameDirectory(dir, fallback) || sameByExistingParent(dir, fallback)) {
+  try {
+    for (const home of guardHomes(env)) {
+      const fallback = join(
+        home,
+        "Library",
+        "Application Support",
+        PRODUCT_DIR,
+      );
+      if (
+        sameDirectory(dir, fallback) ||
+        sameByExistingParent(dir, fallback) ||
+        isInsideDataDir(dir, fallback)
+      ) {
+        return true;
+      }
+    }
+  } catch (error) {
+    if (error instanceof SymlinkLimitError) {
       return true;
     }
+    throw error;
   }
   return false;
 }
+
+class SymlinkLimitError extends Error {}
 
 const PRODUCT_DIR = "com.johnkimec.cookie-agent";
 
@@ -146,12 +168,35 @@ function darwinNfsHome(): string | null {
       [".", "-read", `/Users/${username}`, "NFSHomeDirectory"],
       { encoding: "utf8", timeout: 2000 },
     );
-    const line = output.split("\n")[0] ?? "";
-    const home = line.replace(/^[^ ]+ /, "").trim();
-    return home === "" ? null : home;
+    return parseNfsHomeDirectory(output);
   } catch {
     return null;
   }
+}
+
+/**
+ * `dscl` prints `NFSHomeDirectory: /Users/name`, or the value on the next
+ * line when the path contains a space. Never return the bare key.
+ */
+export function parseNfsHomeDirectory(output: string): string | null {
+  const lines = output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const first = lines[0];
+  if (first === undefined) {
+    return null;
+  }
+  const inline = /^NFSHomeDirectory:\s*(.*)$/.exec(first);
+  if (inline === null) {
+    return null;
+  }
+  const captured = inline[1] ?? "";
+  const value = captured === "" ? (lines[1] ?? "") : captured;
+  if (value === "" || value.startsWith("NFSHomeDirectory:")) {
+    return null;
+  }
+  return value;
 }
 
 /**
@@ -218,16 +263,74 @@ function anchor(path: string): Anchor | null {
   return null;
 }
 
-function resolveLeaf(path: string): string {
-  const resolved = resolve(path);
-  try {
-    if (lstatSync(resolved).isSymbolicLink()) {
-      return resolve(dirname(resolved), readlinkSync(resolved));
+function isInsideDataDir(dir: string, fallback: string): boolean {
+  const parentStat = tryStatDir(fallback);
+  if (parentStat !== null) {
+    const leaf = resolveLeaf(dir);
+    let current = leaf;
+    while (current !== dirname(current)) {
+      try {
+        const stat = statSync(current);
+        if (
+          stat.isDirectory() &&
+          stat.dev === parentStat.dev &&
+          stat.ino === parentStat.ino
+        ) {
+          return current !== leaf;
+        }
+      } catch {
+        // A missing component is not this ancestor.
+      }
+      current = dirname(current);
     }
-  } catch {
-    // The path is missing and is not a symlink.
+    return false;
   }
-  return resolved;
+  const child = anchor(dir);
+  const parent = anchor(fallback);
+  if (child === null || parent === null) {
+    return false;
+  }
+  if (child.dev !== parent.dev || child.ino !== parent.ino) {
+    return false;
+  }
+  if (child.segments.length <= parent.segments.length) {
+    return false;
+  }
+  return parent.segments.every((segment, index) =>
+    segmentEqual(segment, child.segments[index] ?? ""),
+  );
+}
+
+function tryStatDir(path: string): { dev: number; ino: number } | null {
+  try {
+    const stat = statSync(resolveLeaf(path));
+    if (!stat.isDirectory()) {
+      return null;
+    }
+    return { dev: stat.dev, ino: stat.ino };
+  } catch {
+    return null;
+  }
+}
+
+function resolveLeaf(path: string): string {
+  let current = resolve(path);
+  for (let hop = 0; hop <= SYMLINK_HOP_CAP; hop += 1) {
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return current;
+    }
+    if (!stat.isSymbolicLink()) {
+      return current;
+    }
+    if (hop === SYMLINK_HOP_CAP) {
+      throw new SymlinkLimitError("symlink chain exceeds 40 hops");
+    }
+    current = resolve(dirname(current), readlinkSync(current));
+  }
+  throw new SymlinkLimitError("symlink chain exceeds 40 hops");
 }
 
 function segmentEqual(left: string, right: string): boolean {

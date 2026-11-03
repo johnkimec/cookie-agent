@@ -46,9 +46,6 @@ describe("recall probe", () => {
     dirs.push(dir);
     const store = SqliteMemoryStore.open(join(dir, "cookie.db"));
     store.close();
-    const proto = SqliteMemoryStore.prototype as {
-      forgottenTurnIds?: () => unknown;
-    };
     proto.forgottenTurnIds = () => "nope";
     expect(() => forgottenProbeFor(FORGET_TASK_ID, dir)).toThrow(
       /forgotten probe failed: forgottenTurnIds\(\) did not return an array/,
