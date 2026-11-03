@@ -477,13 +477,18 @@ if [[ "$(read_dscl_home)" != "$space_home" ]]; then
   printf 'dscl one-line home with a space was not parsed\n' >&2
   exit 1
 fi
+dscl() { printf 'NFSHomeDirectory: %s  \r\n' "$space_home"; }
+if [[ "$(read_dscl_home)" != "$space_home" ]]; then
+  printf 'dscl one-line home kept trailing space or CR: %s\n' "$(read_dscl_home || true)" >&2
+  exit 1
+fi
 unset -f dscl
 
 # pwd.getpwuid is the third source when dscl and getent return nothing.
-# shellcheck disable=SC2317
 dscl() { return 1; }
-# shellcheck disable=SC2317
 getent() { return 1; }
+dscl >/dev/null 2>&1 || true
+getent passwd "$(id -un)" >/dev/null 2>&1 || true
 passwd_home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
 if [[ "$(directory_service_home)" != "$passwd_home" ]]; then
   printf 'pwd.getpwuid was not the directory-service home: %s\n' "$(directory_service_home || true)" >&2
@@ -493,6 +498,10 @@ if ! account_homes | grep -F -x "$passwd_home" >/dev/null; then
   printf 'pwd.getpwuid missing from account homes\n' >&2
   exit 1
 fi
+# pr30b rows "dscl no output/fails, startup HOME empty" used to expect a
+# refusal. getpwuid is a real home, and a temp data dir is allowed.
+expect_allow "dscl-empty-startup-home-empty" "$SAFE_HOME" "$SAFE_DATA" ""
+expect_allow "dscl-fails-startup-home-empty" "$SAFE_HOME" "$SAFE_DATA" ""
 unset -f dscl getent
 
 # (b) Startup HOME is a different directory. The data dir is a symlink to the
@@ -524,6 +533,12 @@ run_bind_alias_cases() {
   expect_refuse "bind-alias-missing-leaf" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent/new/leaf" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
   expect_allow "bind-alias-missing-sibling" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent-extra" "$REAL"
   mv "$DATA.moved" "$DATA"
+  # N2: ~/Library itself is missing. The alias of that missing directory is
+  # still an ancestor of the real data directory.
+  mv "$REAL/Library" "$REAL/Library.moved"
+  expect_refuse "bind-alias-missing-library" "$SAFE_HOME" "$alias_mount/Library" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  expect_allow "bind-alias-missing-library-sibling" "$SAFE_HOME" "$alias_mount/scratch" "$REAL"
+  mv "$REAL/Library.moved" "$REAL/Library"
   umount "$alias_mount" || {
     printf 'umount of bind alias failed\n' >&2
     exit 1
@@ -701,11 +716,48 @@ if "$(isolate_dir" in text:
 signal = body("signal_verified_app_pid", "\nDECOY_DATA=")
 if "verify_drive_pid_reason" not in signal:
     sys.exit("signal_verified_app_pid does not call verify_drive_pid_reason")
-for raw in ('kill -9 "$APP_PID"', 'kill -TERM "$APP_PID"'):
-    if raw not in signal:
-        sys.exit("signal helper missing " + raw)
-    if raw in text[: text.index("signal_verified_app_pid() {")] or raw in text[text.index("\nDECOY_DATA=") :]:
-        sys.exit("raw APP_PID signal outside signal_verified_app_pid: " + raw)
+if "DRIVE_PROCESS_NAME" not in signal or "DRIVE_BUNDLE_ID" not in signal:
+    sys.exit("signal_verified_app_pid does not require the per-run identity")
+import re
+
+verb = "ki" + "ll"
+app = '"$APP_PID"'
+other = '"$pid"'
+forms = ("-9", "-KILL", "-s 9", "-s KILL", "-TERM", "-15", "")
+app_pid_signals = []
+fixtures = []
+for form in forms:
+    if form:
+        sample = verb + " " + form + " " + app
+        pattern = re.escape(verb) + r"\s+" + r"\s+".join(re.escape(part) for part in form.split()) + r"\s+" + re.escape(app)
+    else:
+        sample = verb + " " + app
+        pattern = re.escape(verb) + r"\s+" + re.escape(app)
+    app_pid_signals.append(pattern)
+    fixtures.append(sample)
+
+
+def outside_app_pid_signals(source):
+    start = source.index("signal_verified_app_pid() {")
+    end = source.index("\nDECOY_DATA=", start)
+    outside = source[:start] + "\n" + source[end:]
+    found = []
+    for pattern in app_pid_signals:
+        if re.search(pattern, outside):
+            found.append(pattern)
+    return found
+
+
+leaked = outside_app_pid_signals(text)
+if leaked:
+    sys.exit("APP_PID signal outside signal_verified_app_pid: " + ", ".join(leaked))
+marker = "signal_verified_app_pid() {\n:\n}\nDECOY_DATA=\n"
+for sample in fixtures:
+    if not outside_app_pid_signals(marker + sample + "\n"):
+        sys.exit("fixture was not caught: " + sample)
+safe = marker + verb + " -9 " + other + "\n" + verb + " -0 " + app + "\n"
+if outside_app_pid_signals(safe):
+    sys.exit("a non-APP_PID signal or a liveness probe was treated as an APP_PID signal")
 stopped = body("stop_verified_drive_pids", "\ntrap cleanup EXIT")
 if '"$cohort"' not in stopped:
     sys.exit("stop_verified_drive_pids does not pass the cohort to verify")
@@ -778,6 +830,101 @@ if grep -x -e 111 -e 444 "$SIGNALED" >/dev/null; then
   printf 'verified signal also hit another pid\n' >&2
   exit 1
 fi
+
+# N4: an empty per-run identity is not signaled, even when the pid is the drive binary.
+write_procs "222|$DRIVE_BIN|$DRIVE_BIN"
+: >"$SIGNALED"
+APP_PID=222
+saved_name="$DRIVE_PROCESS_NAME"
+saved_bundle="$DRIVE_BUNDLE_ID"
+DRIVE_PROCESS_NAME=""
+if signal_verified_app_pid -TERM; then
+  printf 'signal_verified_app_pid accepted an empty process name\n' >&2
+  exit 1
+fi
+DRIVE_PROCESS_NAME="$saved_name"
+DRIVE_BUNDLE_ID=""
+if signal_verified_app_pid -9; then
+  printf 'signal_verified_app_pid accepted an empty bundle id\n' >&2
+  exit 1
+fi
+DRIVE_PROCESS_NAME="$saved_name"
+DRIVE_BUNDLE_ID="$saved_bundle"
+if [[ -s "$SIGNALED" ]]; then
+  printf 'empty identity was signaled: %s\n' "$(cat "$SIGNALED")" >&2
+  exit 1
+fi
+
+# N6: a leading ~/ is the real home, not the temp home CFFIXED_USER_HOME would use.
+eval "$(sed -n '/^launch_model_path() {/,/^}/p' "$BIN_DIR/drive-mac")"
+export REAL_HOME="/Users/john"
+# shellcheck disable=SC2088
+got="$(launch_model_path '~/cookie-runtime/models/Qwen.gguf' 'fallback.gguf')"
+if [[ "$got" != "/Users/john/cookie-runtime/models/Qwen.gguf" ]]; then
+  printf 'tilde model path expanded to %s\n' "$got" >&2
+  exit 1
+fi
+# shellcheck disable=SC2088
+got="$(launch_model_path '~/models/nomic.gguf' 'nomic-embed-text-v1.5.Q8_0.gguf')"
+if [[ "$got" != "/Users/john/models/nomic.gguf" ]]; then
+  printf 'tilde embed path expanded to %s\n' "$got" >&2
+  exit 1
+fi
+got="$(launch_model_path '/opt/models/Qwen.gguf' 'fallback.gguf')"
+if [[ "$got" != "/opt/models/Qwen.gguf" ]]; then
+  printf 'absolute model path changed to %s\n' "$got" >&2
+  exit 1
+fi
+got="$(launch_model_path '' 'Qwen.gguf')"
+if [[ "$got" != "/Users/john/cookie-runtime/models/Qwen.gguf" ]]; then
+  printf 'default model path is %s\n' "$got" >&2
+  exit 1
+fi
+got="$(launch_model_path '~other/models/Qwen.gguf' 'fallback.gguf')"
+if [[ "$got" != "~other/models/Qwen.gguf" ]]; then
+  printf 'other-user tilde was expanded to %s\n' "$got" >&2
+  exit 1
+fi
+
+# N1: SIGTERM lands, the pid stays alive, then it is reused by John's
+# CookieAgent before the SIGKILL. The escalation is not sent.
+sleep() { :; }
+sleep 0
+N1_PHASE=0
+kill() {
+  if [[ "${1:-}" == "-0" ]]; then
+    if [[ "$N1_PHASE" == 1 ]]; then
+      write_procs "222|$JOHN|$JOHN"
+      N1_PHASE=2
+    fi
+    awk -F '|' -v pid="$2" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }' "$FIXTURE/procs"
+    return
+  fi
+  local target="${1:-}"
+  if [[ "$target" == -* ]]; then
+    target="${2:-}"
+  fi
+  if [[ "${1:-}" == "-9" ]]; then
+    printf 'KILL %s\n' "$target" >>"$SIGNALED"
+    return 0
+  fi
+  printf 'TERM %s\n' "$target" >>"$SIGNALED"
+  N1_PHASE=1
+  return 0
+}
+write_procs "222|$DRIVE_BIN|$DRIVE_BIN"
+: >"$SIGNALED"
+N1_PHASE=0
+stop_pid 222 "$DRIVE_BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID"
+if grep -q '^KILL ' "$SIGNALED"; then
+  printf 'SIGKILL was sent after the pid was reused: %s\n' "$(cat "$SIGNALED")" >&2
+  exit 1
+fi
+if ! grep -qx 'TERM 222' "$SIGNALED"; then
+  printf 'SIGTERM did not reach the drive pid before reuse: %s\n' "$(cat "$SIGNALED")" >&2
+  exit 1
+fi
+unset -f sleep
 
 printf '%s\n' "isolation self-test ok"
 printf '%s\n' "drive-mac pid test ok"

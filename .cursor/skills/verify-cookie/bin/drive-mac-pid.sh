@@ -308,6 +308,7 @@ read_dscl_home() {
   home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '
     NR == 1 {
       sub(/^NFSHomeDirectory:[[:space:]]*/, "")
+      sub(/[ \t\r]+$/, "")
       if ($0 != "") {
         print
         exit
@@ -316,7 +317,7 @@ read_dscl_home() {
     }
     {
       sub(/^[[:space:]]+/, "")
-      sub(/[[:space:]]+$/, "")
+      sub(/[ \t\r]+$/, "")
       if ($0 != "") {
         print
         exit
@@ -581,6 +582,11 @@ def anchor_covers(real_anchor, cand_anchor):
     if rid is None or cid is None or rid != cid:
         return False
     if crem == rrem or (rrem != "" and crem.startswith(rrem + "/")):
+        return True
+    # The candidate is a missing ancestor of the data directory, such as an
+    # alias of ~/Library when Library itself does not exist yet. Same existing
+    # parent, and the real remainder continues under the candidate.
+    if crem != "" and rrem.startswith(crem + "/"):
         return True
     # The real data directory exists. Any missing path under that inode is inside it.
     return rrem == ""
