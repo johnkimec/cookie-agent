@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Pid checks for drive-mac. Bash 3.2. Sourced, not executed.
 # A drive may touch a process only when its executable is the bundle it launched.
 
@@ -194,19 +195,28 @@ verify_drive_pid_reason() {
     printf '%s\n' "pid $pid executable is $exe_real, expected $expected_real"
     return 1
   fi
-  local found=0 other="" line
+  # $5 is the space-separated set being stopped together. An extra pid for
+  # this same executable is "also pid" unless it is in that set. An empty set
+  # fails closed: one extra process and this pid is not signaled.
+  local cohort="${5:-}"
+  local found=0 outsider="" line seen_self=0
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     found=$((found + 1))
-    if [[ "$line" != "$pid" ]]; then
-      other="$line"
+    if [[ "$line" == "$pid" ]]; then
+      seen_self=1
+      continue
     fi
+    case " ${cohort} " in
+      *" ${line} "*) ;;
+      *) outsider="$line" ;;
+    esac
   done < <(pids_for_executable "$expected" "${3:-}")
-  if [[ -n "$other" ]]; then
-    printf '%s\n' "$expected_real is also pid $other (drive pid is $pid)"
+  if [[ -n "$outsider" ]]; then
+    printf '%s\n' "$expected_real is also pid $outsider (drive pid is $pid)"
     return 1
   fi
-  if [[ "$found" -ne 1 ]]; then
+  if [[ "$seen_self" -ne 1 ]]; then
     printf '%s\n' "expected exactly one process for $expected_real, found $found"
     return 1
   fi
@@ -232,7 +242,7 @@ status_field() {
 # field here and must not decide this. A 0,0 position is not on screen.
 status_menu_open() {
   local line="$1"
-  local selected pos size width height x y
+  local selected pos size width height y
   selected="$(status_field "$line" 2)"
   if [[ "$selected" == "yes" ]]; then
     return 0
@@ -241,7 +251,6 @@ status_menu_open() {
   size="$(status_field "$line" 4)"
   [[ "$pos" =~ ^[0-9]+,[0-9]+$ ]] || return 1
   [[ "$size" =~ ^[0-9]+,[0-9]+$ ]] || return 1
-  x="${pos%%,*}"
   y="${pos#*,}"
   width="${size%%,*}"
   height="${size#*,}"
@@ -280,15 +289,87 @@ drive_temp_data_dir() {
 # Distinct from 0 (ok) and 3 (open-clean skipped).
 ISOLATION_REFUSAL_CODE=4
 
+# One absolute home, or nothing. A value that does not start with / is not a home.
+absolute_home() {
+  local home="$1"
+  [[ "$home" == /* ]] || return 1
+  printf '%s\n' "$home"
+}
+
+# dscl prints "NFSHomeDirectory: /Users/name" on one line. A home path that
+# contains a space is a continuation line:
+#   NFSHomeDirectory:
+#    /Users/Sam Kim
+read_dscl_home() {
+  local home=""
+  if ! command -v dscl >/dev/null 2>&1; then
+    return 1
+  fi
+  home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '
+    NR == 1 {
+      sub(/^NFSHomeDirectory:[[:space:]]*/, "")
+      sub(/[ \t\r]+$/, "")
+      if ($0 != "") {
+        print
+        exit
+      }
+      next
+    }
+    {
+      sub(/^[[:space:]]+/, "")
+      sub(/[ \t\r]+$/, "")
+      if ($0 != "") {
+        print
+        exit
+      }
+    }
+  ' || true)"
+  absolute_home "$home"
+}
+
+read_getent_home() {
+  local home=""
+  if ! command -v getent >/dev/null 2>&1; then
+    return 1
+  fi
+  home="$(getent passwd "$(id -un)" 2>/dev/null | awk -F: 'NR==1 { print $6; exit }' || true)"
+  absolute_home "$home"
+}
+
+# libc passwd entry. Third source, after dscl and getent.
+read_passwd_home() {
+  local home=""
+  home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null || true)"
+  absolute_home "$home"
+}
+
+# Every account-home source, one path per line. Callers protect all of them.
+account_homes() {
+  local home=""
+  home="$(read_dscl_home || true)"
+  if [[ -n "$home" ]]; then
+    printf '%s\n' "$home"
+  fi
+  home="$(read_getent_home || true)"
+  if [[ -n "$home" ]]; then
+    printf '%s\n' "$home"
+  fi
+  home="$(read_passwd_home || true)"
+  if [[ -n "$home" ]]; then
+    printf '%s\n' "$home"
+  fi
+}
+
 # The account's home from Directory Service. Used when the process had no
-# HOME at startup. dscl is macOS. getent is Linux.
+# HOME at startup. dscl is macOS. getent is Linux. pwd.getpwuid is the third.
 directory_service_home() {
   local home=""
-  if command -v dscl >/dev/null 2>&1; then
-    home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk 'NR==1 { sub(/^[^ ]+ /, ""); print; exit }' || true)"
+  home="$(read_dscl_home || true)"
+  if [[ -z "$home" ]]; then
+    home="$(read_getent_home || true)"
   fi
-  if [[ -z "$home" ]] && command -v getent >/dev/null 2>&1; then
-    home="$(getent passwd "$(id -un)" 2>/dev/null | awk -F: 'NR==1 { print $6; exit }' || true)"
+  if [[ -z "$home" ]]; then
+    home="$(read_passwd_home || true)"
   fi
   [[ -n "$home" ]] || return 1
   printf '%s\n' "$home"
@@ -333,6 +414,7 @@ isolate_dir() {
       isolation_fail "isolated $kind directory escaped the private temp dir"
       ;;
   esac
+  # shellcheck disable=SC2034 # callers read ISOLATE_LAST in this shell
   ISOLATE_LAST="$resolved"
 }
 
@@ -347,60 +429,74 @@ remove_isolate_root() {
 }
 
 # Per-run bundle ids write com.johnkimec.cookie-agent.drive.<hex>.plist.
-# The product plist has no ".drive." segment and stays.
-remove_drive_preference_plists() {
+# <hex> is one or more lowercase hex digits and nothing else. The product
+# plist has no ".drive." segment and stays. A name with an extra dot, a
+# non-hex character, or uppercase hex stays too.
+each_drive_preference_plist() {
   local home="$1"
   local dir="$home/Library/Preferences"
-  local plist base
+  local plist pattern extglob_restore=0
   [[ -d "$dir" ]] || return 0
-  for plist in "$dir"/com.johnkimec.cookie-agent.drive.*.plist; do
-    [[ -f "$plist" ]] || continue
-    base="$(basename "$plist")"
-    case "$base" in
-      com.johnkimec.cookie-agent.drive.[0-9a-f]*.plist)
-        rm -f "$plist"
-        ;;
-    esac
+  if ! shopt -q extglob; then
+    shopt -s extglob
+    extglob_restore=1
+  fi
+  # The pattern is expanded at runtime, after extglob is on. It matches
+  # com.johnkimec.cookie-agent.drive.<hex>.plist and no wider name.
+  pattern='com.johnkimec.cookie-agent.drive.+([0-9a-f]).plist'
+  # shellcheck disable=SC2086
+  for plist in "$dir"/$pattern; do
+    if [[ -f "$plist" ]]; then
+      printf '%s\n' "$plist"
+    fi
   done
+  if [[ "$extglob_restore" -eq 1 ]]; then
+    shopt -u extglob
+  fi
+}
+
+remove_drive_preference_plists() {
+  local home="$1"
+  local plist
+  while IFS= read -r plist; do
+    [[ -n "$plist" ]] || continue
+    rm -f "$plist"
+  done < <(each_drive_preference_plist "$home")
 }
 
 drive_preference_plist_present() {
   local home="$1"
-  local dir="$home/Library/Preferences"
-  local plist base
-  [[ -d "$dir" ]] || return 1
-  for plist in "$dir"/com.johnkimec.cookie-agent.drive.*.plist; do
-    [[ -f "$plist" ]] || continue
-    base="$(basename "$plist")"
-    case "$base" in
-      com.johnkimec.cookie-agent.drive.[0-9a-f]*.plist)
-        return 0
-        ;;
-    esac
-  done
+  local plist
+  while IFS= read -r plist; do
+    [[ -n "$plist" ]] || continue
+    return 0
+  done < <(each_drive_preference_plist "$home")
   return 1
 }
 
-# Real homes are the startup HOME and the dscl/getent home. A wrong startup
-# HOME must not hide the account home. Case-insensitive realpath still
-# applies. st_dev+st_ino catches a firmlink or bind mount whose path strings
-# stay different, including a missing leaf whose existing parent is that
-# directory. Exit 4 before any launch.
+# Real homes are the startup HOME and every account source (dscl, getent,
+# pwd.getpwuid). A wrong startup HOME must not hide the account home.
+# Case-insensitive realpath still applies. st_dev+st_ino catches a firmlink
+# or bind mount whose path strings differ. A missing data directory matches
+# when the deepest existing parent has that inode and the remaining path is
+# the same or longer. An ancestor of the data directory inside the real home
+# (for example ~/Library) is refused. A HOME inside the real home is not the
+# home itself. Exit 4 before any launch.
 assert_isolated_data_dir() {
   local home="${1-${HOME-}}"
   local data="${2-${COOKIE_DATA_DIR-}}"
   local startup_home="${3-${REAL_HOME-}}"
-  local service_home=""
-  service_home="$(directory_service_home || true)"
-  if [[ -z "$startup_home" && -z "$service_home" ]]; then
+  local service_homes=""
+  service_homes="$(account_homes || true)"
+  if [[ -z "$startup_home" && -z "$service_homes" ]]; then
     isolation_fail "cannot resolve the real home"
   fi
   local reason="" code=0
-  reason="$(python3 - "$home" "$data" "$startup_home" "$service_home" <<'PY'
+  reason="$(python3 - "$home" "$data" "$startup_home" "$service_homes" <<'PY'
 import os
 import sys
 
-home, data, startup_home, service_home = sys.argv[1:5]
+home, data, startup_home, service_blob = sys.argv[1:5]
 DATA_TAIL = ("Library", "Application Support", "com.johnkimec.cookie-agent")
 
 def fold(path):
@@ -434,6 +530,100 @@ def chain_ids(path):
         current = parent
     return ids
 
+def hits(ids, forbidden):
+    return any(item in forbidden for item in ids)
+
+def strict_ancestor_ids(path):
+    # Skip the path itself. Existing parents only, so a missing leaf still
+    # reports the directory that contains it.
+    ids = []
+    current = os.path.realpath(path)
+    seen = set()
+    skipped = False
+    while current and current not in seen:
+        seen.add(current)
+        if skipped:
+            ident = stat_id(current)
+            if ident is not None:
+                ids.append(ident)
+        skipped = True
+        parent = os.path.dirname(current.rstrip("/"))
+        if not parent or parent == current:
+            break
+        current = parent
+    return ids
+
+def anchor(path):
+    # Deepest existing parent, plus the missing suffix. Bind mounts keep
+    # different path strings and the same inode, including when the leaf
+    # has not been created yet.
+    current = os.path.realpath(path)
+    missing = []
+    seen = set()
+    while current and current not in seen:
+        seen.add(current)
+        ident = stat_id(current)
+        if ident is not None:
+            remaining = "/".join(reversed(missing)).casefold()
+            return ident, remaining
+        name = os.path.basename(current.rstrip("/"))
+        if name == "":
+            break
+        missing.append(name)
+        parent = os.path.dirname(current.rstrip("/"))
+        if not parent or parent == current:
+            break
+        current = parent
+    return None, ""
+
+def anchor_covers(real_anchor, cand_anchor):
+    rid, rrem = real_anchor
+    cid, crem = cand_anchor
+    if rid is None or cid is None or rid != cid:
+        return False
+    if crem == rrem or (rrem != "" and crem.startswith(rrem + "/")):
+        return True
+    # The candidate is a missing ancestor of the data directory, such as an
+    # alias of ~/Library when Library itself does not exist yet. Same existing
+    # parent, and the real remainder continues under the candidate.
+    if crem != "" and rrem.startswith(crem + "/"):
+        return True
+    # The real data directory exists. Any missing path under that inode is inside it.
+    return rrem == ""
+
+def home_relation(path, home_keys, home_inodes):
+    key = fold(path)
+    for home_key in home_keys:
+        if key == home_key:
+            return "exact"
+        if key.startswith(home_key + "/"):
+            return "inside"
+    ident = stat_id(path)
+    if ident is not None and ident in home_inodes:
+        return "exact"
+    if hits(chain_ids(path), home_inodes):
+        return "inside"
+    return ""
+
+def inside_home(path, home_keys, home_inodes):
+    key = fold(path)
+    for home_key in home_keys:
+        if key == home_key or key.startswith(home_key + "/"):
+            return True
+    return hits(chain_ids(path), home_inodes)
+
+def is_data_ancestor(candidate, real_data_path, home_keys, home_inodes):
+    cand_key = fold(candidate)
+    data_key = fold(real_data_path)
+    string_ancestor = cand_key != "" and data_key.startswith(cand_key + "/")
+    inode_ancestor = False
+    cid = stat_id(candidate)
+    if cid is not None and cid in strict_ancestor_ids(real_data_path):
+        inode_ancestor = True
+    if not string_ancestor and not inode_ancestor:
+        return False
+    return inside_home(candidate, home_keys, home_inodes)
+
 if home == "":
     print("HOME is empty")
     sys.exit(1)
@@ -441,7 +631,11 @@ if data == "":
     print("COOKIE_DATA_DIR is empty")
     sys.exit(1)
 
-real_homes = [raw for raw in (startup_home, service_home) if raw != ""]
+service_homes = [line for line in service_blob.splitlines() if line != ""]
+real_homes = []
+for raw in [startup_home] + service_homes:
+    if raw and raw not in real_homes:
+        real_homes.append(raw)
 if not real_homes:
     print("cannot resolve the real home")
     sys.exit(2)
@@ -454,7 +648,7 @@ except OSError as exc:
     sys.exit(2)
 
 home_keys = []
-data_keys = []
+data_paths = []
 home_inodes = set()
 data_inodes = set()
 for raw in real_homes:
@@ -463,7 +657,8 @@ for raw in real_homes:
         data_path = raw
         for part in DATA_TAIL:
             data_path = os.path.join(data_path, part)
-        data_keys.append(fold(data_path))
+        fold(data_path)
+        data_paths.append(data_path)
     except OSError as exc:
         print("cannot realpath a real home (%s): %s" % (raw, exc))
         sys.exit(2)
@@ -474,39 +669,36 @@ for raw in real_homes:
     if ident is not None:
         data_inodes.add(ident)
 
-for real_home_key in home_keys:
-    if home_key == real_home_key:
-        print("HOME is the real home (%s)" % home)
-        sys.exit(1)
-for real_data_key in data_keys:
-    if within(home_key, real_data_key):
+try:
+    relation = home_relation(home, home_keys, home_inodes)
+except OSError as exc:
+    print("cannot realpath HOME or COOKIE_DATA_DIR: %s" % exc)
+    sys.exit(2)
+
+if relation == "exact":
+    print("HOME is the real home (%s)" % home)
+    sys.exit(1)
+
+for data_path in data_paths:
+    real_data_key = fold(data_path)
+    if within(home_key, real_data_key) or hits(chain_ids(home), data_inodes):
         print("HOME is the real cookie data directory or inside it (%s)" % home)
         sys.exit(1)
-    if within(data_key, real_data_key):
+    if within(data_key, real_data_key) or hits(chain_ids(data), data_inodes):
+        print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+        sys.exit(1)
+    if stat_id(data) is not None and stat_id(data) in home_inodes:
+        print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+        sys.exit(1)
+    if is_data_ancestor(data, data_path, home_keys, home_inodes):
+        print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+        sys.exit(1)
+    if anchor_covers(anchor(data_path), anchor(data)):
         print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
         sys.exit(1)
 
-def hits(ids, forbidden):
-    return any(item in forbidden for item in ids)
-
-home_ids = chain_ids(home)
-if hits(home_ids, home_inodes):
-    print("HOME is the real home (%s)" % home)
-    sys.exit(1)
-if hits(home_ids, data_inodes):
-    print("HOME is the real cookie data directory or inside it (%s)" % home)
-    sys.exit(1)
-
-data_ids = chain_ids(data)
-# A sibling under the home is a different directory. Match the home inode
-# only when this path itself is that home. Match the data-directory inode
-# on this path or any existing parent, so a missing leaf inside a firmlink
-# of the data directory is still refused.
-if stat_id(data) is not None and stat_id(data) in home_inodes:
-    print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
-    sys.exit(1)
-if hits(data_ids, data_inodes):
-    print("COOKIE_DATA_DIR is the real cookie data directory or inside it (%s)" % data)
+if relation == "inside":
+    print("HOME is inside the real home (%s)" % home)
     sys.exit(1)
 sys.exit(0)
 PY

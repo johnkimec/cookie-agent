@@ -63,7 +63,7 @@ DRIVE_BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=drive-mac-pid.sh
 source "$DRIVE_BIN_DIR/drive-mac-pid.sh"
 # Captured before any launch replaces HOME. An empty HOME falls through to
-# dscl or getent so the comparison target stays the account home.
+# dscl, getent, or pwd.getpwuid so the comparison target stays the account home.
 REAL_HOME="${HOME:-}"
 if [[ -z "$REAL_HOME" ]]; then
   REAL_HOME="$(directory_service_home || true)"
@@ -80,7 +80,6 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 SOURCE_APP="$APP"
-SOURCE_BIN="$BIN"
 
 export COOKIE_DATA_DIR="$data"
 export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
@@ -107,6 +106,7 @@ stop_pid() {
   local expected_bin="${2:-}"
   local expected_name="${3:-}"
   local expected_bundle="${4:-}"
+  local cohort="${5:-}"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   [[ "$pid" -ge 2 ]] || return 0
   if [[ "$pid" == "$$" ]]; then
@@ -117,23 +117,63 @@ stop_pid() {
     return 0
   fi
   local reason
-  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" || true)"
+  # Re-check immediately before each signal. The poll below can outlive the
+  # drive process, and the kernel can reuse that pid.
+  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" "$cohort" || true)"
   if [[ -n "$reason" ]]; then
     log "not signaling pid $pid: $reason"
     return 0
   fi
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-    local attempt
-    for attempt in $(seq 1 40); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.5
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    wait "$pid" 2>/dev/null || true
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
   fi
+  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" "$cohort" || true)"
+  if [[ -n "$reason" ]]; then
+    log "not signaling pid $pid: $reason"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" "$cohort" || true)"
+    if [[ -n "$reason" ]]; then
+      log "not signaling pid $pid: $reason"
+      return 0
+    fi
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+# kill -9 and kill -TERM of the launched pid go through the same check.
+# A pid that fails verify_drive_pid_reason is not signaled.
+signal_verified_app_pid() {
+  local signal="$1"
+  local reason
+  if [[ -z "${DRIVE_PROCESS_NAME:-}" || -z "${DRIVE_BUNDLE_ID:-}" ]]; then
+    log "not signaling pid ${APP_PID:-empty}: identity was not recorded"
+    return 1
+  fi
+  reason="$(verify_drive_pid_reason "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" || true)"
+  if [[ -n "$reason" ]]; then
+    log "not signaling pid $APP_PID: $reason"
+    return 1
+  fi
+  case "$signal" in
+    -9)
+      kill -9 "$APP_PID" || return 1
+      ;;
+    -TERM)
+      kill -TERM "$APP_PID" || return 1
+      ;;
+    *)
+      log "not signaling pid $APP_PID: unsupported signal ${signal}"
+      return 1
+      ;;
+  esac
 }
 DECOY_DATA=""
 DRIVE_DATA=""
@@ -195,6 +235,15 @@ launch_model_path() {
   local override="$1"
   local filename="$2"
   if [[ -n "$override" ]]; then
+    # CFFIXED_USER_HOME would expand a leading ~/ to the temp home.
+    # Keep the tilde literal. A pattern of ~ is expanded by ${var#~/}.
+    # shellcheck disable=SC2088 # literal tilde, expanded against REAL_HOME below
+    local tilde_prefix='~/'
+    case "$override" in
+      "$tilde_prefix"*)
+        override="$REAL_HOME/${override#"$tilde_prefix"}"
+        ;;
+    esac
     printf '%s\n' "$override"
     return 0
   fi
@@ -221,37 +270,52 @@ real_corepack_home() {
 }
 
 sweep_drive_preference_plists() {
-  local service
+  local home
   remove_drive_preference_plists "$REAL_HOME"
-  service="$(directory_service_home || true)"
-  if [[ -n "$service" && "$service" != "$REAL_HOME" ]]; then
-    remove_drive_preference_plists "$service"
-  fi
+  while IFS= read -r home; do
+    [[ -n "$home" ]] || continue
+    if [[ "$home" == "$REAL_HOME" ]]; then
+      continue
+    fi
+    remove_drive_preference_plists "$home"
+  done < <(account_homes || true)
 }
 
 real_drive_plist_present() {
-  local service
+  local home
   if drive_preference_plist_present "$REAL_HOME"; then
     return 0
   fi
-  service="$(directory_service_home || true)"
-  if [[ -n "$service" ]] && drive_preference_plist_present "$service"; then
-    return 0
-  fi
+  while IFS= read -r home; do
+    [[ -n "$home" ]] || continue
+    if [[ "$home" == "$REAL_HOME" ]]; then
+      continue
+    fi
+    if drive_preference_plist_present "$home"; then
+      return 0
+    fi
+  done < <(account_homes || true)
   return 1
 }
 
 # Identity-verified pids only. A pid that fails verify_drive_pid_reason is
-# left alone.
+# left alone. Several copies of this run's executable are stopped together.
+# A pid outside that set still fails the check closed, so it is not signaled.
 stop_verified_drive_pids() {
-  local candidate why
+  local candidate why cohort=""
   for candidate in "$@"; do
     [[ "$candidate" =~ ^[0-9]+$ ]] || continue
-    why="$(verify_drive_pid_reason "$candidate" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" || true)"
-    if [[ -z "$why" ]]; then
-      APP_PID="$candidate"
-      stop_pid "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID"
+    cohort="${cohort} ${candidate}"
+  done
+  for candidate in "$@"; do
+    [[ "$candidate" =~ ^[0-9]+$ ]] || continue
+    why="$(verify_drive_pid_reason "$candidate" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" "$cohort" || true)"
+    if [[ -n "$why" ]]; then
+      log "not signaling pid $candidate: $why"
+      continue
     fi
+    APP_PID="$candidate"
+    stop_pid "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" "$cohort"
   done
 }
 trap cleanup EXIT
@@ -322,7 +386,7 @@ current_target_pid() {
 
 launch_verified() {
   # $1 binary, $2 app|decoy, $3 per-run process name, $4 per-run bundle id.
-  local bin="$1" which="$2" name="$3" bundle="$4" existing attempt reason pid
+  local bin="$1" which="$2" name="$3" bundle="$4" existing reason pid
   local launch_home launch_data launch_path model embed
   existing="$(pids_for_executable "$bin" "$name" | tr '\n' ' ')"
   if [[ -n "${existing// /}" ]]; then
@@ -353,7 +417,7 @@ launch_verified() {
     "$bin" &
   pid=$!
   reason=""
-  for attempt in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     reason="$(verify_drive_pid_reason "$pid" "$bin" "$name" "$bundle" || true)"
     if [[ -z "$reason" ]]; then
       remember_launched "$which" "$pid" "$bin" "$name" "$bundle"
@@ -565,8 +629,8 @@ PY
 }
 
 wait_health() {
-  local port="$1" attempt
-  for attempt in $(seq 1 40); do
+  local port="$1"
+  for _ in $(seq 1 40); do
     if health_ok "$port"; then
       return 0
     fi
@@ -1063,8 +1127,7 @@ APPLESCRIPT
 }
 
 wait_for_menu() {
-  local attempt
-  for attempt in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
       return 0
     fi
@@ -1074,8 +1137,7 @@ wait_for_menu() {
 }
 
 wait_for_runtime_up() {
-  local attempt
-  for attempt in $(seq 1 120); do
+  for _ in $(seq 1 120); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
       if python3 - <<'PY'
 import pathlib, sys
@@ -1161,8 +1223,8 @@ APPLESCRIPT
 
 wait_observe() {
   local pid="$1" bin="$2" name="$3" bundle="$4"
-  local attempt line got
-  for attempt in $(seq 1 40); do
+  local line got
+  for _ in $(seq 1 40); do
     line="$(with_target "$pid" "$bin" "$name" "$bundle" observe_status 2>/dev/null || true)"
     got="$(status_field "$line" 1)"
     if [[ "$got" == "$pid" ]]; then
@@ -1183,7 +1245,7 @@ run_self_check() {
     fail "self-check is fake-core only"
   fi
   prepare_drive_bundle "$SOURCE_APP"
-  local decoy_app="$PREPARED_APP" decoy_bin="$PREPARED_BIN"
+  local decoy_bin="$PREPARED_BIN"
   local decoy_name="$PREPARED_PROCESS_NAME" decoy_bundle="$PREPARED_BUNDLE_ID"
   install_prepared_identity "$SOURCE_APP"
   if [[ "$DRIVE_PROCESS_NAME" == "$decoy_name" || "$DRIVE_BUNDLE_ID" == "$decoy_bundle" ]]; then
@@ -1422,8 +1484,8 @@ if [[ "$feature" == "menu-bar-icon" || "$feature" == "hotkey-popup" || "$feature
 fi
 
 relaunch_app() {
-  local attempt gone=0
-  for attempt in $(seq 1 40); do
+  local gone=0
+  for _ in $(seq 1 40); do
     if [[ -z "$(pids_for_executable "$BIN" "$DRIVE_PROCESS_NAME" | tr -d '[:space:]')" ]]; then
       gone=1
       break
@@ -1456,7 +1518,9 @@ orphan_reap_check() {
     old_embed="$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)"
   fi
   log "orphan-reap signal 9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
-  kill -9 "$APP_PID" 2>/dev/null || true
+  # kill -9 skips applicationShouldTerminate. Verify first, and do not signal
+  # a pid that fails that check.
+  signal_verified_app_pid -9 || fail "refusing to signal pid ${APP_PID}"
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
   sleep 0.5
@@ -1598,8 +1662,8 @@ dump_shell_log_since() {
 # env -i is that shape, plus the per-run HOME and COOKIE_DATA_DIR this launch
 # creates so the app cannot open the real cookie.db.
 open_clean_check() {
-  local attempt gone=0
-  for attempt in $(seq 1 40); do
+  local gone=0
+  for _ in $(seq 1 40); do
     if [[ -z "$(pids_for_executable "$BIN" "$DRIVE_PROCESS_NAME" | tr -d '[:space:]')" ]]; then
       gone=1
       break
@@ -1655,7 +1719,9 @@ open_clean_check() {
   sweep_drive_preference_plists
   log "open -n clean env home=$isolate_home data=$isolate_data existing=none"
   # env -i is the Finder-shaped environment. --env is what LaunchServices
-  # applies to the new process. This launch passes COOKIE_DATA_DIR, so the
+  # applies to the new process. CFFIXED_USER_HOME hides the real home, so
+  # the model paths and PATH have to be --env too or the weights are looked
+  # up under that temp home. This launch passes COOKIE_DATA_DIR, so the
   # log must say dataDirSource=environment. It does not cover the default
   # data directory or the stable ~/cookie-runtime pid.
   env -i \
@@ -1674,38 +1740,43 @@ open_clean_check() {
       --env "HOME=$isolate_home" \
       --env "CFFIXED_USER_HOME=$isolate_home" \
       --env "COOKIE_DATA_DIR=$isolate_data" \
+      --env "COOKIE_MODEL_PATH=$model" \
+      --env "COOKIE_EMBED_MODEL_PATH=$embed" \
+      --env "PATH=$launch_path" \
       --env "PNPM_HOME=$pnpm_home" \
       --env "COREPACK_HOME=$corepack_home" \
       "$APP"
-  local pid current fresh="" count=0
-  for attempt in $(seq 1 40); do
-    current="$(comm_pids_named "$DRIVE_PROCESS_NAME" | tr '\n' ' ')"
-    fresh=""
+  local pid count=0
+  local fresh_pids=()
+  for _ in $(seq 1 40); do
+    fresh_pids=()
     count=0
-    for pid in $current; do
-      [[ -n "$pid" ]] || continue
-      fresh="$fresh $pid"
+    while IFS= read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      fresh_pids+=("$pid")
       count=$((count + 1))
-    done
+    done < <(comm_pids_named "$DRIVE_PROCESS_NAME")
     if [[ "$count" -eq 1 ]]; then
       break
     fi
     if [[ "$count" -gt 1 ]]; then
       log_cookie_processes
-      stop_verified_drive_pids $fresh
-      fail "open started more than one process:$fresh"
+      stop_verified_drive_pids "${fresh_pids[@]}"
+      fail "open started more than one process:${fresh_pids[*]}"
     fi
-    fresh=""
+    fresh_pids=()
     count=0
     sleep 0.25
   done
   if [[ "$count" -ne 1 ]]; then
     log_cookie_processes
-    stop_verified_drive_pids $fresh
+    if [[ "${#fresh_pids[@]}" -gt 0 ]]; then
+      stop_verified_drive_pids "${fresh_pids[@]}"
+    fi
     fail "open did not start a new instance of $BIN"
   fi
   local new_pid reason
-  new_pid="${fresh# }"
+  new_pid="${fresh_pids[0]}"
   reason="$(verify_drive_pid_reason "$new_pid" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" || true)"
   if [[ -n "$reason" ]]; then
     log_cookie_processes
@@ -1715,7 +1786,7 @@ open_clean_check() {
   APP_PID="$new_pid"
   log "open pid=$APP_PID process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID"
   local ready=0
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if [[ -f "$shell_log" ]] && tail -c +$((log_mark + 1)) "$shell_log" 2>/dev/null | grep -E "signals installed pid=${APP_PID}([^0-9]|$)" >/dev/null; then
       ready=1
       break
@@ -1750,7 +1821,7 @@ open_clean_check() {
   fi
   log "signals installed pid=$APP_PID"
   local cwd="" menu_text=""
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
       menu_text="$(cat /tmp/cookie-drive-mac-menu.txt || true)"
       case "$menu_text" in
@@ -1828,9 +1899,9 @@ open_clean_check() {
   signal_mark="$(shell_log_bytes "$shell_log")"
   log_cookie_processes
   log "SIGTERM target pid=$APP_PID pidfile=${owned:-none} embed=${embed_owned:-none} port=$term_port embedPort=$embed_term_port"
-  kill -TERM "$APP_PID" || true
+  signal_verified_app_pid -TERM || fail "refusing to signal pid ${APP_PID}"
   local exited=0
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
       exited=1
       break
