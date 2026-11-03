@@ -239,6 +239,13 @@ describe("stdio core", () => {
     expect(existsSync(join(dataDir, "cookie.db"))).toBe(false);
   });
 
+  it("exits on a bad COOKIE_REFLECT_IDLE_MS without speaking protocol", async () => {
+    const client = new StdioClient({ COOKIE_REFLECT_IDLE_MS: "soon" });
+    expect(await client.exitCode()).toBe(1);
+    const stderr = await client.stderrText();
+    expect(stderr).toContain("COOKIE_REFLECT_IDLE_MS");
+  });
+
   it("exits on a bad query or index embed timeout without speaking protocol", async () => {
     const query = isolated({ COOKIE_EMBED_QUERY_TIMEOUT_MS: "nope" });
     const queryClient = new StdioClient(query.env);
