@@ -57,6 +57,8 @@ describe("recall probe", () => {
     dirs.push(dir);
     const store = SqliteMemoryStore.open(join(dir, "cookie.db"));
     store.close();
+    delete (SqliteMemoryStore.prototype as { forgottenTurnIds?: () => unknown })
+      .forgottenTurnIds;
     expect(forgottenProbeFor(FORGET_TASK_ID, dir)).toBeNull();
   });
 });

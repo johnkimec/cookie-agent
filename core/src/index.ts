@@ -26,5 +26,9 @@ function isDirectRun(): boolean {
 }
 
 if (isDirectRun()) {
-  startStdioCore();
+  void startStdioCore().catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : "startup failed";
+    process.stderr.write(`cookie-core: ${detail}\n`);
+    process.exit(1);
+  });
 }

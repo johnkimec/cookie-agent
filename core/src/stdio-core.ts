@@ -9,25 +9,17 @@ import { AgentCore, RUNTIME_WATCH_MS } from "./agent-core.ts";
 import { installLoopbackGuard } from "./loopback-guard.ts";
 import { ChatLog } from "./memory/chat-log.ts";
 import { clockFromEnv } from "./memory/clock.ts";
-import { cachedProbe } from "./memory/embed-config.ts";
+import { cachedProbe, resolveEmbedder } from "./memory/embed-config.ts";
 import {
   HttpEmbedder,
   readEmbedPort,
   readIndexEmbedTimeoutMs,
   readQueryEmbedTimeoutMs,
 } from "./memory/http-embedder.ts";
-import {
-  HybridRetriever,
-  readForgottenTurnIds,
-  readRrfWeights,
-} from "./memory/hybrid-retrieve.ts";
+import { HybridRetriever, readRrfWeights } from "./memory/hybrid-retrieve.ts";
 import { ContentIndexer } from "./memory/index-content.ts";
 import { memoryDatabasePath } from "./memory/path.ts";
-import {
-  JournalReflector,
-  readReflectIdleMs,
-  reflectHookRequested,
-} from "./memory/reflect.ts";
+import { reflectHookRequested } from "./memory/reflect.ts";
 import {
   completeText,
   ModelReranker,
@@ -35,6 +27,8 @@ import {
   RERANK_RESPONSE_FORMAT,
   readRerankConfig,
 } from "./memory/rerank.ts";
+import { createMemoryRuntime } from "./memory/runtime.ts";
+import { readReflectIdleMs, readTimeZone } from "./memory/schedule.ts";
 import { SqliteMemoryStore } from "./memory/sqlite-store.ts";
 import { SqliteVecIndex } from "./memory/sqlite-vec-index.ts";
 import {
@@ -44,31 +38,41 @@ import {
 } from "./model/llama.ts";
 import type { ModelProvider } from "./model/provider.ts";
 
-export function startStdioCore(
+export async function startStdioCore(
   env: NodeJS.ProcessEnv = process.env,
-): AgentCore {
+): Promise<AgentCore> {
   installLoopbackGuard(env);
   let port: number;
   let thinking: boolean;
-  let history: ChatLog;
+  let idleMs: number;
+  let timeZone: string;
+  let reflect: boolean;
+  let store: SqliteMemoryStore;
   let provider: ModelProvider;
+  let vectors: SqliteVecIndex;
+  let indexer: ContentIndexer;
+  let retriever: HybridRetriever;
   try {
     port = readLlamaPort(env);
     thinking = readThinking(env);
     const embedPort = readEmbedPort(env);
+    idleMs = readReflectIdleMs(env);
+    timeZone = readTimeZone(env);
+    // The hook is installed only when the variable is a non-empty string,
+    // so the default 600000 does not reflect on every new conversation.
+    reflect = reflectHookRequested(env);
     const weights = readRrfWeights(env);
     const rerankConfig = readRerankConfig(env);
-    // Always a number. The hook is installed only when the variable is
-    // a non-empty string, so the default 600000 does not reflect.
-    readReflectIdleMs(env);
-    const reflect = reflectHookRequested(env);
     // Every env read stays above the open. A bad timeout must not create
     // cookie.db, and a test must not fall through to the product directory.
     const queryTimeoutMs = readQueryEmbedTimeoutMs(env);
     const indexTimeoutMs = readIndexEmbedTimeoutMs(env);
-    const store = SqliteMemoryStore.open(memoryDatabasePath(env), {
+    store = SqliteMemoryStore.open(memoryDatabasePath(env), {
       now: clockFromEnv(env),
     });
+    // One index for the indexer, retrieval, and forget. A down embed
+    // server must not leave forget deleting a different in-memory index.
+    vectors = new SqliteVecIndex(store.database());
     const queryEmbedder = new HttpEmbedder({
       port: embedPort,
       timeoutMs: queryTimeoutMs,
@@ -77,16 +81,14 @@ export function startStdioCore(
       port: embedPort,
       timeoutMs: indexTimeoutMs,
     });
-    const vectors = new SqliteVecIndex(store.database());
     const embedUp = cachedProbe(
       async () => (await queryEmbedder.health()) === "up",
     );
-    const indexer = new ContentIndexer({
+    indexer = new ContentIndexer({
       db: store.database(),
       embedder: indexEmbedder,
       vectors,
       available: embedUp,
-      forgottenTurnIds: () => readForgottenTurnIds(store),
     });
     provider = createLlamaServerProvider({ port, thinking });
     const reranker = new ModelReranker({
@@ -98,7 +100,7 @@ export function startStdioCore(
       timeoutMs: rerankConfig.timeoutMs,
       enabled: rerankConfig.enabled,
     });
-    const retriever = new HybridRetriever({
+    retriever = new HybridRetriever({
       db: store.database(),
       vectors,
       embedder: queryEmbedder,
@@ -108,23 +110,34 @@ export function startStdioCore(
       rerank: (query, candidates, signal) =>
         reranker.rerank(query, candidates, signal),
     });
-    const trace = env.COOKIE_RETRIEVAL_TRACE;
-    history = new ChatLog(store, indexer, retriever, {
-      reflector: reflect
-        ? new JournalReflector(store.database(), () => store.currentTime())
-        : null,
-      tracePath: trace === undefined || trace === "" ? null : trace,
-    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "bad config";
     process.stderr.write(`cookie-core: ${detail}\n`);
     process.exit(1);
   }
+  const embedder = await resolveEmbedder(env);
+  const memory = createMemoryRuntime({
+    provider,
+    idleMs,
+    timeZone,
+    store,
+    derived: store,
+    recordTurns: false,
+    embedder,
+    vectors,
+  });
+  const trace = env.COOKIE_RETRIEVAL_TRACE;
+  const history = new ChatLog(store, indexer, retriever, {
+    reflector: reflect ? memory.reflector : null,
+    tracePath: trace === undefined || trace === "" ? null : trace,
+  });
   const core = new AgentCore({
     provider,
     watchIntervalMs: RUNTIME_WATCH_MS,
+    memoryHost: memory.host,
     history,
   });
+  memory.start();
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   process.stdout.on("error", () => {
     process.exit(0);

@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_REFLECT_IDLE_MS,
-  readReflectIdleMs,
-  reflectHookRequested,
-} from "./reflect.ts";
+import { reflectHookRequested } from "./reflect.ts";
+import { DEFAULT_REFLECT_IDLE_MS, readReflectIdleMs } from "./schedule.ts";
 
 describe("reflect idle env", () => {
   it("returns 600000 when unset and 0 when the value is 0", () => {
