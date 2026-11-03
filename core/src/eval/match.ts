@@ -5,11 +5,16 @@
  * stays separate, so "10:30 in", "3 Bahen", "170 grams", and "10:30 a.m."
  * keep a letter-or-number boundary.
  */
+/** Space, nbsp, thin space, and narrow no-break space. */
+const THOUSANDS_SPACE = /[ \u00a0\u2009\u202f]/g;
+
 export function normalizeMatchText(value: string): string {
   return value
     .toLowerCase()
+    .replace(THOUSANDS_SPACE, " ")
     .replace(/\s+/g, " ")
     .trim()
+    .replace(/(\d) (?=\d)/g, "$1")
     .replace(/(\d)\s+(kg|lb|ml|am|pm|g|%)(?![\p{L}\p{N}])/gu, "$1$2");
 }
 
@@ -73,10 +78,11 @@ function contains(haystack: string, needle: string): boolean {
     return false;
   }
   const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // A comma or dot between digits is not a boundary: "170 g" is inside
-  // "1,170 g" and "2 kg" is inside "4.2 kg". A trailing "." still is.
+  // A comma or dot next to a digit is not a boundary: "170 g" is inside
+  // "1,170 g", and "5 kg" is inside ".5 kg" and "0.5 kg". A trailing "." is.
+  const beforeDigit = /^\d/.test(normalized) ? "(?<![.,])" : "";
   const pattern = new RegExp(
-    `(?<![\\p{L}\\p{N}])(?<!\\d[.,])${escaped}(?![\\p{L}\\p{N}])(?![.,]\\d)`,
+    `(?<![\\p{L}\\p{N}])(?<!\\d[.,])${beforeDigit}${escaped}(?![\\p{L}\\p{N}])(?![.,]\\d)`,
     "u",
   );
   return pattern.test(haystack);

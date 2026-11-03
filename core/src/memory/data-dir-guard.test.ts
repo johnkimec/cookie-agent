@@ -34,7 +34,7 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-describe("r0633b account home", () => {
+describe("data dir guard", () => {
   it("refuses the account-home data dir when HOME is a temp directory", () => {
     const account = userInfo().homedir;
     const realData = dataDir(account);
