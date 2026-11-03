@@ -8,17 +8,30 @@ import { FORGET_TASK_ID } from "./tasks.ts";
 
 const dirs: string[] = [];
 
+const proto = SqliteMemoryStore.prototype as {
+  forgottenTurnIds?: () => unknown;
+};
+const originalForgottenTurnIds = Object.getOwnPropertyDescriptor(
+  proto,
+  "forgottenTurnIds",
+);
+
+function restoreForgottenTurnIds(): void {
+  if (originalForgottenTurnIds === undefined) {
+    delete proto.forgottenTurnIds;
+    return;
+  }
+  Object.defineProperty(proto, "forgottenTurnIds", originalForgottenTurnIds);
+}
+
 afterEach(() => {
-  const proto = SqliteMemoryStore.prototype as {
-    forgottenTurnIds?: () => unknown;
-  };
-  delete proto.forgottenTurnIds;
+  restoreForgottenTurnIds();
   for (const dir of dirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-describe("r0633b forgotten probe", () => {
+describe("recall probe", () => {
   it("treats a corrupt cookie.db as an error, not known-blocked", () => {
     const dir = mkdtempSync(join(tmpdir(), "cookie-probe-corrupt-"));
     dirs.push(dir);
@@ -33,9 +46,6 @@ describe("r0633b forgotten probe", () => {
     dirs.push(dir);
     const store = SqliteMemoryStore.open(join(dir, "cookie.db"));
     store.close();
-    const proto = SqliteMemoryStore.prototype as {
-      forgottenTurnIds?: () => unknown;
-    };
     proto.forgottenTurnIds = () => "nope";
     expect(() => forgottenProbeFor(FORGET_TASK_ID, dir)).toThrow(
       /forgotten probe failed: forgottenTurnIds\(\) did not return an array/,
