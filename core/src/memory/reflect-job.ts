@@ -1,8 +1,9 @@
-import type {
-  DerivedMemoryStore,
-  FactKind,
-  FactRecord,
-  ProfileRecord,
+import {
+  type DerivedMemoryStore,
+  type FactKind,
+  type FactRecord,
+  type ProfileRecord,
+  profileSourceIds,
 } from "./derived.ts";
 import type { Embedder } from "./embedder.ts";
 import { DUPLICATE_DISTANCE, isSecret, isVerbatimScreen } from "./policy.ts";
@@ -217,21 +218,27 @@ export class LocalReflector implements Reflector {
       const clean = (text: string): boolean =>
         !carriesForgottenMaterial(text, forgottenTurnText, forgottenFactText);
       const liveInserts = inserts.filter((fact) => clean(fact.text));
-      const liveProfile = profile.filter(
-        (row) =>
-          clean(row.value) &&
-          clean(row.key) &&
-          !profileRowDropped(
-            row,
-            // Fact text must not drop a pinned row unless it is the
-            // pinned copy of that fact. Secrets still come from
-            // `secretTexts`.
-            row.pinned ? [] : droppedFacts,
-            "",
-            sourceTurns,
-            secretTexts,
-          ),
-      );
+      const liveProfile = profile.filter((row) => {
+        if (!clean(row.value) || !clean(row.key)) {
+          return false;
+        }
+        // Sources can name turns from another session, via a cited
+        // fact id or the missing-citation fallback. Those ids are not
+        // in this session's prompt, so check the whole forgotten set.
+        if (profileSourceIds(row).some((id) => forgottenNow.has(id))) {
+          return false;
+        }
+        return !profileRowDropped(
+          row,
+          // Fact text must not drop a pinned row unless it is the
+          // pinned copy of that fact. Secrets still come from
+          // `secretTexts`.
+          row.pinned ? [] : droppedFacts,
+          "",
+          sourceTurns,
+          secretTexts,
+        );
+      });
       const raced = blocked.size > 0;
       if (!raced && journal !== null && clean(journal.entry)) {
         this.options.derived.insertJournal(journal);
@@ -442,9 +449,8 @@ function cleanSummary(summary: string): string | null {
  * Turns list. A fact id must be in Active facts, and it is stored as
  * that fact's source turn. A missing, empty, or entirely invalid
  * citation records every prompt turn plus every shown fact's source
- * turn. A valid citation still records a fact source that is not in
- * the Turns list, so a cross-session reword stays tied to that fact.
- * Over-deleting is acceptable: the next reflect rebuilds the profile.
+ * turn. A valid citation stores exactly the cited turn ids and the
+ * source turns of the fact ids it names.
  */
 export function resolveProfileSources(
   cited: readonly string[],
@@ -475,11 +481,6 @@ export function resolveProfileSources(
       pushId(fallback, id);
     }
     return fallback;
-  }
-  for (const id of factSourceTurns(promptFacts)) {
-    if (!allowed.has(id)) {
-      pushId(valid, id);
-    }
   }
   return valid;
 }

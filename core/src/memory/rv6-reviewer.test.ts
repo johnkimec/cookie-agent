@@ -206,7 +206,7 @@ describe("rv6: cross-session provenance", () => {
     );
     close(h);
   });
-  it("RV6-1b same with a valid citation of a session-b turn (the only ids the model can cite)", async () => {
+  it("RV6-1b a valid citation of a session-b turn does not also attach the other fact", async () => {
     const h = setup();
     await h.turn(
       "a",
@@ -220,8 +220,9 @@ describe("rv6: cross-session provenance", () => {
       profile: [{ ...PR("bike", "my blue roadie"), sourceTurns: ["b-1-user"] }],
     });
     await h.reflector.reflect("b");
+    expect(rowOf(h, "bike")?.sourceTurns).toEqual(["b-1-user"]);
     await h.turn("c", "forget my bike", "Done.", forget(h, "bluefox"));
-    expect(bike(h)).toEqual([]);
+    expect(bike(h)).toEqual(["bike=my blue roadie"]);
     close(h);
   });
 });
