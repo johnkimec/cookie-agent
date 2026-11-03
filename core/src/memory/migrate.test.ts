@@ -57,11 +57,11 @@ describe("migration 001", () => {
       expect(names).toContain(name);
     }
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(db.pragma("user_version", { simple: true })).toBe(3);
+    expect(db.pragma("user_version", { simple: true })).toBe(4);
     db.close();
 
     const again = openMemoryDatabase(path);
-    expect(again.pragma("user_version", { simple: true })).toBe(3);
+    expect(again.pragma("user_version", { simple: true })).toBe(4);
     expect(again.prepare("SELECT count(*) AS n FROM facts").get()).toEqual({
       n: 0,
     });
@@ -74,6 +74,7 @@ describe("migration 001", () => {
     opened.exec("DROP TABLE memory_meta");
     opened.exec("DROP TABLE forgotten_turns");
     opened.exec("DROP TABLE embed_index");
+    opened.exec("ALTER TABLE profile DROP COLUMN source_turns");
     opened.pragma("user_version = 1");
     opened.close();
 
@@ -94,7 +95,7 @@ describe("migration 001", () => {
         .all("forgotten_turns") as Array<{ name: string }>
     ).map((row) => row.name);
     expect(forgotten).toEqual(["forgotten_turns"]);
-    expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
+    expect(upgraded.pragma("user_version", { simple: true })).toBe(4);
     upgraded.close();
   });
 
@@ -186,11 +187,29 @@ describe("migration 001", () => {
     created.pragma("journal_mode = WAL");
     created.loadExtension(sqliteVec.getLoadablePath());
     created.exec(initial);
+    created
+      .prepare(
+        "INSERT INTO sessions (id, surface, started_at) VALUES ('s', 'popup', 1)",
+      )
+      .run();
+    created
+      .prepare(
+        "INSERT INTO turns (id, session_id, role, content, created_at) VALUES ('t1', 's', 'user', 'hello', 1)",
+      )
+      .run();
+    created
+      .prepare(
+        "INSERT INTO profile (key, value, pinned, shareable, source_turn, updated_at) VALUES ('name', 'John', 1, 1, 't1', 1)",
+      )
+      .run();
     created.pragma("user_version = 1");
     created.close();
 
     const db = openMemoryDatabase(path);
-    expect(db.pragma("user_version", { simple: true })).toBe(3);
+    expect(db.pragma("user_version", { simple: true })).toBe(4);
+    expect(
+      db.prepare("SELECT source_turns FROM profile WHERE key = 'name'").get(),
+    ).toEqual({ source_turns: '["t1"]' });
     expect(db.prepare("SELECT count(*) AS n FROM embed_index").get()).toEqual({
       n: 0,
     });
@@ -219,7 +238,7 @@ describe("migration 001", () => {
     created.close();
 
     const db = openMemoryDatabase(path);
-    expect(db.pragma("user_version", { simple: true })).toBe(3);
+    expect(db.pragma("user_version", { simple: true })).toBe(4);
     expect(db.prepare("SELECT count(*) AS n FROM embed_index").get()).toEqual({
       n: 0,
     });

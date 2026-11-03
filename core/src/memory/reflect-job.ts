@@ -32,6 +32,8 @@ export const REFLECT_SYSTEM_PROMPT = [
   "Set contradicts to an existing fact id when the new fact replaces it, otherwise null.",
   "Do not copy secrets, credentials, or verbatim screen text.",
   "profile entries are only stable facts John stated, or facts seen in 3 or more sessions.",
+  "Each profile entry includes sourceTurns, an array of turn ids from this prompt that support the value.",
+  "Cite only ids that appear in the Turns list. Use an empty array when you cannot cite one.",
 ].join(" ");
 
 export interface ReflectExtraction {
@@ -61,6 +63,8 @@ export interface ReflectProfile {
   shareable: boolean;
   sensitive: boolean;
   pinned: boolean;
+  /** Turn ids the model cited. Missing or empty is not a citation. */
+  sourceTurns?: string[];
 }
 
 export type TextComplete = (args: {
@@ -135,12 +139,7 @@ export class LocalReflector implements Reflector {
     const planned = await this.planFacts(extracted.facts, turnById, forgotten);
     const now = this.options.now();
     const journal = this.planJournal(sessionId, extracted.journal, now);
-    const profile = this.planProfile(
-      extracted.profile,
-      now,
-      planned.inserts,
-      turns,
-    );
+    const profile = this.planProfile(extracted.profile, now, turns);
     const summary = cleanSummary(extracted.summary);
     const promptTurnIds = turns.map((turn) => turn.id);
     let toEmbed: FactRecord[] = [];
@@ -335,7 +334,6 @@ export class LocalReflector implements Reflector {
   private planProfile(
     rows: ReflectProfile[],
     now: number,
-    facts: readonly FactRecord[],
     turns: readonly TurnRecord[],
   ): ProfileRecord[] {
     const planned: ProfileRecord[] = [];
@@ -348,12 +346,14 @@ export class LocalReflector implements Reflector {
       if (key.length === 0 || value.length === 0) {
         continue;
       }
+      const sourceTurns = resolveProfileSources(row.sourceTurns ?? [], turns);
       planned.push({
         key,
         value,
         pinned: row.pinned && row.statedByJohn,
         shareable: row.shareable && !row.sensitive,
-        sourceTurn: sourceForProfile(value, facts, turns),
+        sourceTurn: sourceTurns[0] ?? null,
+        sourceTurns,
         updatedAt: now,
       });
     }
@@ -415,39 +415,22 @@ function cleanSummary(summary: string): string | null {
 }
 
 /**
- * Exact value match first. Otherwise a turn that contains a token of
- * 5 or more characters from the value, so a reworded row still has a
- * source turn forget can use. A one-word name such as "John" does not
- * attach to a longer turn.
+ * Cited ids that are in this run's prompt. A missing, empty, or
+ * entirely invalid citation records every prompt turn. Over-deleting
+ * is acceptable: the next reflect rebuilds the profile.
  */
-export function sourceForProfile(
-  value: string,
-  facts: readonly FactRecord[],
-  turns: readonly TurnRecord[],
-): string | null {
-  const needle = value.trim().toLowerCase();
-  if (needle.length === 0) {
-    return null;
+export function resolveProfileSources(
+  cited: readonly string[],
+  promptTurns: readonly TurnRecord[],
+): string[] {
+  const allowed = new Set(promptTurns.map((turn) => turn.id));
+  const valid = [
+    ...new Set(cited.filter((id) => id.length > 0 && allowed.has(id))),
+  ];
+  if (valid.length > 0) {
+    return valid;
   }
-  for (const fact of facts) {
-    if (fact.sourceTurn !== null && fact.text.trim().toLowerCase() === needle) {
-      return fact.sourceTurn;
-    }
-  }
-  for (const turn of turns) {
-    if (turn.content.trim().toLowerCase() === needle) {
-      return turn.id;
-    }
-  }
-  const tokens = needle
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((token) => token.length >= 5);
-  const hits = turns.filter((turn) => {
-    const hay = turn.content.toLowerCase();
-    return tokens.some((token) => hay.includes(token));
-  });
-  const user = hits.find((turn) => turn.role === "user");
-  return user?.id ?? hits[0]?.id ?? null;
+  return promptTurns.map((turn) => turn.id);
 }
 
 export function promoteProfile(row: ReflectProfile): boolean {
@@ -597,6 +580,7 @@ function readProfile(value: unknown): ReflectProfile[] {
       shareable: entry.shareable !== false,
       sensitive: entry.sensitive === true,
       pinned: entry.pinned === true,
+      sourceTurns: readTurnIds(entry.sourceTurns),
     });
   }
   return rows;
@@ -606,6 +590,23 @@ function stripFence(raw: string): string {
   const trimmed = raw.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   return fenced?.[1]?.trim() ?? trimmed;
+}
+
+function readTurnIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const id = item.trim();
+    if (id.length > 0 && !ids.includes(id)) {
+      ids.push(id);
+    }
+  }
+  return ids;
 }
 
 function readString(value: unknown): string {

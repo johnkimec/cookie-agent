@@ -365,16 +365,18 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
 
   upsertProfile(row: ProfileRecord): void {
     this.requireOpen();
+    const source = storedSource(row);
     this.db
       .prepare(
         `INSERT INTO profile (
-          key, value, pinned, shareable, source_turn, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+          key, value, pinned, shareable, source_turn, source_turns, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
           value = excluded.value,
           pinned = excluded.pinned,
           shareable = excluded.shareable,
           source_turn = excluded.source_turn,
+          source_turns = excluded.source_turns,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -382,7 +384,8 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
         row.value,
         bit(row.pinned),
         bit(row.shareable),
-        row.sourceTurn,
+        source.sourceTurn,
+        source.json,
         row.updatedAt,
       );
   }
@@ -399,18 +402,20 @@ export class SqliteMemoryStore implements MemoryStore, DerivedMemoryStore {
     this.requireOpen();
     const insert = this.db.prepare(
       `INSERT INTO profile (
-        key, value, pinned, shareable, source_turn, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
+        key, value, pinned, shareable, source_turn, source_turns, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const write = this.db.transaction(() => {
       this.db.prepare("DELETE FROM profile").run();
       for (const row of rows) {
+        const source = storedSource(row);
         insert.run(
           row.key,
           row.value,
           bit(row.pinned),
           bit(row.shareable),
-          row.sourceTurn,
+          source.sourceTurn,
+          source.json,
           row.updatedAt,
         );
       }
@@ -725,6 +730,7 @@ interface ProfileRow {
   pinned: number;
   shareable: number;
   source_turn: string | null;
+  source_turns: string | null;
   updated_at: number;
 }
 
@@ -787,14 +793,54 @@ function factFromRow(row: FactRow): FactRecord {
 }
 
 function profileFromRow(row: ProfileRow): ProfileRecord {
+  const sourceTurns = parseSourceTurns(row.source_turns, row.source_turn);
   return {
     key: row.key,
     value: row.value,
     pinned: row.pinned !== 0,
     shareable: row.shareable !== 0,
-    sourceTurn: row.source_turn,
+    sourceTurn: sourceTurns[0] ?? null,
+    sourceTurns,
     updatedAt: row.updated_at,
   };
+}
+
+function storedSource(row: ProfileRecord): {
+  sourceTurn: string | null;
+  json: string;
+} {
+  const ids =
+    row.sourceTurns !== undefined
+      ? [...new Set(row.sourceTurns.filter((id) => id.length > 0))]
+      : row.sourceTurn === null || row.sourceTurn.length === 0
+        ? []
+        : [row.sourceTurn];
+  return { sourceTurn: ids[0] ?? null, json: JSON.stringify(ids) };
+}
+
+function parseSourceTurns(
+  raw: string | null,
+  sourceTurn: string | null,
+): string[] {
+  if (typeof raw === "string" && raw.length > 0 && raw !== "[]") {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        const ids = parsed.filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        );
+        if (ids.length > 0) {
+          return [...new Set(ids)];
+        }
+      }
+    } catch {
+      // A bad array falls through to the single source_turn column.
+    }
+  }
+  if (sourceTurn === null || sourceTurn.length === 0) {
+    return [];
+  }
+  return [sourceTurn];
 }
 
 function journalFromRow(row: JournalRow): JournalRecord {

@@ -273,7 +273,14 @@ describe("round2 adversarial (reviewer)", () => {
     );
     const after = h.store.listProfile();
     expect(t.msgs).toBeDefined();
-    expect(before.map((row) => row.sourceTurn)).toEqual([null, null]);
+    expect(before.map((row) => row.sourceTurns)).toEqual([
+      ["a-1-user", "a-2-assistant"],
+      ["a-1-user", "a-2-assistant"],
+    ]);
+    expect(before.map((row) => row.sourceTurn)).toEqual([
+      "a-1-user",
+      "a-1-user",
+    ]);
     expect(before.map((row) => `${row.key}=${row.value}`).sort()).toEqual([
       "name=John",
       "pronouns=he/him",
