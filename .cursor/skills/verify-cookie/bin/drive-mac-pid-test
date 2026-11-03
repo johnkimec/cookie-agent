@@ -551,7 +551,9 @@ mkdir -p "$pref_dir"
 printf 'drive\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist"
 printf 'drive8\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12cd34.plist"
 printf 'dotted\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12.extra.plist"
-printf 'upper\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.AB12CD34.plist"
+# Uppercase hex is a different name from ab12cd34. On a case-insensitive
+# volume those two spellings are one file, so this fixture uses other letters.
+printf 'upper\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ABCDEF12.plist"
 printf 'nothex\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12cd3g.plist"
 printf 'product\n' >"$pref_dir/com.johnkimec.cookie-agent.plist"
 printf 'other\n' >"$pref_dir/unrelated.plist"
@@ -566,7 +568,7 @@ if [[ -f "$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist" || -f "$pref_di
 fi
 for kept in \
   "com.johnkimec.cookie-agent.drive.ab12.extra.plist" \
-  "com.johnkimec.cookie-agent.drive.AB12CD34.plist" \
+  "com.johnkimec.cookie-agent.drive.ABCDEF12.plist" \
   "com.johnkimec.cookie-agent.drive.ab12cd3g.plist" \
   "com.johnkimec.cookie-agent.plist" \
   "unrelated.plist"
