@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { answerMatches } from "./match.ts";
 
-describe("r0633b number punctuation", () => {
+describe("match boundaries", () => {
   it("does not match across a comma or dot between digits", () => {
     expect(answerMatches({ expectedFact: "170 g" }, "1,170 g")).toBe(false);
     expect(answerMatches({ expectedFact: "170 g" }, "1.170 g")).toBe(false);
