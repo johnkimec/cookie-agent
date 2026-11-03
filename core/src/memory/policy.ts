@@ -60,7 +60,13 @@ export function activeFacts(
   derived: DerivedMemoryStore,
   now: number,
 ): FactRecord[] {
-  return derived.listFacts().filter((fact) => isActiveFact(fact, now));
+  const forgotten = new Set(derived.forgottenTurnIds());
+  return derived.listFacts().filter((fact) => {
+    if (!isActiveFact(fact, now)) {
+      return false;
+    }
+    return fact.sourceTurn === null || !forgotten.has(fact.sourceTurn);
+  });
 }
 
 /**

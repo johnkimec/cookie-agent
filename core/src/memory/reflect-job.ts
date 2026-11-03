@@ -19,6 +19,7 @@ import {
   isFactKind,
   nearestActive,
   profileRowDropped,
+  secretTokens,
 } from "./tools.ts";
 import type { TurnRecord } from "./types.ts";
 import type { VectorIndex } from "./vectors.ts";
@@ -114,6 +115,7 @@ export class LocalReflector implements Reflector {
       sessionId,
       turns,
       this.options.derived.listFacts(),
+      forgotten,
     );
     let raw: string;
     try {
@@ -173,18 +175,40 @@ export class LocalReflector implements Reflector {
           sourceTurns.add(fact.sourceTurn);
         }
       }
-      const secretTexts = [
+      for (const id of blocked) {
+        sourceTurns.add(id);
+      }
+      const forgottenTurnText: string[] = [];
+      for (const session of this.options.store.listSessions()) {
+        for (const turn of this.options.store.recentTurns(session.id, 10_000)) {
+          if (forgottenNow.has(turn.id)) {
+            forgottenTurnText.push(turn.content);
+          }
+        }
+      }
+      const forgottenFactText = [
         ...droppedFacts.map((fact) => fact.text),
-        ...turns
-          .filter((turn) => sourceTurns.has(turn.id))
-          .map((turn) => turn.content),
+        ...this.options.derived
+          .listFacts()
+          .filter(
+            (fact) =>
+              fact.sourceTurn !== null && forgottenNow.has(fact.sourceTurn),
+          )
+          .map((fact) => fact.text),
       ];
+      const secretTexts = [...forgottenFactText, ...forgottenTurnText];
+      const clean = (text: string): boolean =>
+        !carriesForgottenMaterial(text, forgottenTurnText, forgottenFactText);
+      const liveInserts = inserts.filter((fact) => clean(fact.text));
       const liveProfile = profile.filter(
         (row) =>
+          clean(row.value) &&
+          clean(row.key) &&
           !profileRowDropped(
             row,
-            // Fact text must not drop a pinned row. Secrets still come
-            // from `secretTexts`, which already includes those facts.
+            // Fact text must not drop a pinned row unless it is the
+            // pinned copy of that fact. Secrets still come from
+            // `secretTexts`.
             row.pinned ? [] : droppedFacts,
             "",
             sourceTurns,
@@ -192,10 +216,10 @@ export class LocalReflector implements Reflector {
           ),
       );
       const raced = blocked.size > 0;
-      if (!raced && journal !== null) {
+      if (!raced && journal !== null && clean(journal.entry)) {
         this.options.derived.insertJournal(journal);
       }
-      for (const fact of inserts) {
+      for (const fact of liveInserts) {
         this.options.derived.insertFact(fact);
       }
       for (const fact of updates) {
@@ -216,10 +240,12 @@ export class LocalReflector implements Reflector {
         if (!stillThere) {
           this.options.derived.setSummary(sessionId, "");
         }
-      } else if (summary !== null) {
+      } else if (summary !== null && clean(summary)) {
         this.options.derived.setSummary(sessionId, summary);
+      } else if (summary !== null) {
+        this.options.derived.setSummary(sessionId, "");
       }
-      toEmbed = inserts;
+      toEmbed = liveInserts;
     });
     for (const fact of toEmbed) {
       const forgottenNow = new Set(this.options.derived.forgottenTurnIds());
@@ -356,6 +382,30 @@ export class LocalReflector implements Reflector {
   }
 }
 
+/**
+ * A pending reflect write that repeats a secret number from a forgotten
+ * turn, or the text of a fact sourced from one, is not stored.
+ */
+function carriesForgottenMaterial(
+  text: string,
+  turnContents: readonly string[],
+  factTexts: readonly string[],
+): boolean {
+  const secrets = [...turnContents, ...factTexts].flatMap((item) =>
+    secretTokens(item),
+  );
+  if (
+    secrets.some((token) => new RegExp(`(^|\\D)${token}(\\D|$)`).test(text))
+  ) {
+    return true;
+  }
+  const hay = text.toLowerCase();
+  return factTexts.some((fact) => {
+    const needle = fact.trim().toLowerCase();
+    return needle.length >= 4 && hay.includes(needle);
+  });
+}
+
 function cleanSummary(summary: string): string | null {
   const text = summary.trim().slice(0, 500);
   if (text.length === 0 || isSecret(text)) {
@@ -365,9 +415,10 @@ function cleanSummary(summary: string): string | null {
 }
 
 /**
- * Source turn only when a fact or turn text equals the profile value.
- * A shared token, or a longer turn that merely mentions the value, does
- * not assign the secret turn to a name or pronouns row.
+ * Exact value match first. Otherwise a turn that contains a token of
+ * 5 or more characters from the value, so a reworded row still has a
+ * source turn forget can use. A one-word name such as "John" does not
+ * attach to a longer turn.
  */
 export function sourceForProfile(
   value: string,
@@ -388,7 +439,15 @@ export function sourceForProfile(
       return turn.id;
     }
   }
-  return null;
+  const tokens = needle
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((token) => token.length >= 5);
+  const hits = turns.filter((turn) => {
+    const hay = turn.content.toLowerCase();
+    return tokens.some((token) => hay.includes(token));
+  });
+  const user = hits.find((turn) => turn.role === "user");
+  return user?.id ?? hits[0]?.id ?? null;
 }
 
 export function promoteProfile(row: ReflectProfile): boolean {
@@ -402,6 +461,7 @@ export function selectReflectContext(
   turns: readonly TurnRecord[],
   facts: readonly FactRecord[],
   cap: number = REFLECT_PROMPT_TOKEN_CAP,
+  forgotten: ReadonlySet<string> = new Set(),
 ): { turns: TurnRecord[]; facts: FactRecord[] } {
   const selectedTurns: TurnRecord[] = [];
   let used = 0;
@@ -417,7 +477,9 @@ export function selectReflectContext(
   const ranked = facts
     .filter(
       (fact) =>
-        fact.supersededBy === null && fact.subject !== "memory:tombstone",
+        fact.supersededBy === null &&
+        fact.subject !== "memory:tombstone" &&
+        (fact.sourceTurn === null || !forgotten.has(fact.sourceTurn)),
     )
     .sort(
       (left, right) =>
@@ -443,8 +505,14 @@ export function renderReflectPrompt(
   sessionId: string,
   turns: readonly TurnRecord[],
   facts: readonly FactRecord[],
+  forgotten: ReadonlySet<string> = new Set(),
 ): string {
-  const selected = selectReflectContext(turns, facts);
+  const selected = selectReflectContext(
+    turns,
+    facts,
+    REFLECT_PROMPT_TOKEN_CAP,
+    forgotten,
+  );
   const turnLines = selected.turns.map(reflectTurnLine);
   const factLines = selected.facts.map(
     (fact) => `- id=${fact.id} text=${fact.text}`,

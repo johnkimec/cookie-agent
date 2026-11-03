@@ -114,7 +114,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolSet {
     }),
     [MEMORY_FORGET_TOOL]: tool({
       description:
-        "Forget a fact John asked to drop. Deletes that fact and derived rows built from its source turn. An unpinned profile row is dropped when the fact text equals its key or value. A pinned row is dropped only when its value contains a secret number, when the request names that value, or when the request is the key with a possessive such as my name. Forgotten fact text does not drop a pinned row. An unpinned row whose source turn was forgotten is dropped. A fact-path forget marks that source turn, its reply, and the request, not every turn that contains the needle. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way. A user turn and its reply count as one candidate, and facts sourced from those turns are deleted. A chunk marks every turn it covers. A secret number that appears only in the request is ignored. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
+        "Forget a fact John asked to drop. Deletes that fact and derived rows built from its source turn. An unpinned profile row is dropped when the fact text equals its key or value. A pinned row is dropped only when its value contains a secret number, when the request names that value, when the request is the key with a possessive such as my name, or when it is the pinned copy of the forgotten fact from that same turn. A pinned name with no source turn stays. An unpinned row whose source turn was forgotten is dropped. A fact-path forget marks that source turn, its reply, and the request, not every turn that contains the needle. When no fact matches, an exact or unique earlier turn or chunk is forgotten the same way. A user turn and its reply count as one candidate, and facts sourced from those turns are deleted. A chunk marks every turn it covers. A secret number that appears only in the request is ignored. The request turn and its reply never count as a match. If only the request matches, nothing is deleted. More than five distinct turns returns candidates and deletes nothing. Raw turns stay.",
       inputSchema: forgetInput,
       execute: (input) => forgetFact(deps, input),
     }),
@@ -278,17 +278,13 @@ async function commitForget(
     ...facts.map((fact) => fact.text),
     ...(facts.length === 0 ? keys : []),
   ];
-  // Fact path keeps an active sibling that shares the source turn.
-  // Turn and chunk fallback pass no matched facts, and then every fact
-  // sourced from a forgotten turn goes, with its vector and embed row.
-  const onFallback = facts.length === 0;
+  // Every fact sourced from a forgotten turn goes, matched or not,
+  // with its vector and embed row. A sibling on that turn is not kept.
   const doomed = deps.derived.listFacts().filter((fact) => {
     if (copyOfForgotten(fact, facts, keys, now)) {
       return true;
     }
-    return (
-      onFallback && fact.sourceTurn !== null && turnIds.has(fact.sourceTurn)
-    );
+    return fact.sourceTurn !== null && turnIds.has(fact.sourceTurn);
   });
   const vectorIds = doomed.map((fact) => fact.id);
   const chunks = deps.derived
@@ -1004,6 +1000,12 @@ export async function nearestActive(
     if (fact === null || !isActiveFact(fact, now)) {
       continue;
     }
+    if (
+      fact.sourceTurn !== null &&
+      deps.derived.forgottenTurnIds().includes(fact.sourceTurn)
+    ) {
+      continue;
+    }
     return { fact, distance: hit.distance };
   }
   return null;
@@ -1060,11 +1062,13 @@ function dropProfileFor(
 }
 
 /**
- * A pinned row drops only for a secret number, when the forget needle
- * equals the value, or when the needle is the key with a possessive
- * (`my name`). Forgotten fact text never drops a pinned row. An
- * unpinned row drops when the needle or a forgotten fact equals the
- * key or the value, or when its source turn was forgotten.
+ * A pinned row drops for a secret number, when the forget needle
+ * equals the value, when the needle is the key with a possessive
+ * (`my name`), or when it is the pinned copy of a forgotten fact:
+ * same source turn and the same text. A pinned name with no source
+ * turn stays. An unpinned row drops when the needle or a forgotten
+ * fact equals the key or the value, or when its source turn was
+ * forgotten.
  */
 export function profileRowDropped(
   row: ProfileRecord,
@@ -1077,7 +1081,7 @@ export function profileRowDropped(
     return true;
   }
   if (row.pinned) {
-    return namesPinned(row, needle);
+    return namesPinned(row, needle) || pinnedFactCopy(row, facts);
   }
   if (namesRow(row, needle)) {
     return true;
@@ -1086,6 +1090,25 @@ export function profileRowDropped(
     return true;
   }
   return row.sourceTurn !== null && sourceTurns.has(row.sourceTurn);
+}
+
+/**
+ * The aboutJohn pin: same source turn as the forgotten fact, and the
+ * value is that fact's text. A null source turn does not match.
+ */
+function pinnedFactCopy(
+  row: ProfileRecord,
+  facts: readonly FactRecord[],
+): boolean {
+  if (row.sourceTurn === null || row.sourceTurn.length === 0) {
+    return false;
+  }
+  const value = row.value.trim().toLowerCase();
+  return facts.some(
+    (fact) =>
+      fact.sourceTurn === row.sourceTurn &&
+      fact.text.trim().toLowerCase() === value,
+  );
 }
 
 /** Value equality, or `my <key>`. A bare key such as `name` does not match. */
