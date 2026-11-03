@@ -73,8 +73,10 @@ function contains(haystack: string, needle: string): boolean {
     return false;
   }
   const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // A comma or dot between digits is not a boundary: "170 g" is inside
+  // "1,170 g" and "2 kg" is inside "4.2 kg". A trailing "." still is.
   const pattern = new RegExp(
-    `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`,
+    `(?<![\\p{L}\\p{N}])(?<!\\d[.,])${escaped}(?![\\p{L}\\p{N}])(?![.,]\\d)`,
     "u",
   );
   return pattern.test(haystack);
