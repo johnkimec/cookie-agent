@@ -16,8 +16,11 @@ export const DEFAULT_EMBED_PORT = 8081;
 export const DEFAULT_EMBED_TIMEOUT_MS = 10_000;
 
 /**
- * Query embed on the chat path. `COOKIE_EMBED_TIMEOUT_MS` overrides it.
- * A hung embedder must fall back to BM25 inside this, not the 10 s index budget.
+ * Query embed on the chat path.
+ * `COOKIE_EMBED_QUERY_TIMEOUT_MS` overrides it.
+ * `COOKIE_EMBED_TIMEOUT_MS` is a deprecated alias for that query budget
+ * only. It does not change indexing. A hung embedder must fall back to
+ * BM25 inside this, not the 10 s index budget.
  */
 export const DEFAULT_QUERY_EMBED_TIMEOUT_MS = 400;
 
@@ -72,20 +75,46 @@ export function readEmbedPort(env: NodeJS.ProcessEnv = process.env): number {
   return readPort(raw, "COOKIE_EMBED_PORT");
 }
 
-export function readEmbedTimeoutMs(
+/**
+ * Index-embed budget. `COOKIE_EMBED_INDEX_TIMEOUT_MS` overrides it.
+ * The deprecated `COOKIE_EMBED_TIMEOUT_MS` alias does not.
+ */
+export function readIndexEmbedTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   return readPositiveInt(
-    env.COOKIE_EMBED_TIMEOUT_MS,
+    env.COOKIE_EMBED_INDEX_TIMEOUT_MS,
     DEFAULT_EMBED_TIMEOUT_MS,
-    "COOKIE_EMBED_TIMEOUT_MS",
+    "COOKIE_EMBED_INDEX_TIMEOUT_MS",
   );
 }
 
-/** Chat-turn embed budget. Unset is 400 ms, not the indexing default. */
+/**
+ * Index-embed budget. Kept so `resolveEmbedder` still has one reader.
+ * Same value as {@link readIndexEmbedTimeoutMs}.
+ */
+export function readEmbedTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return readIndexEmbedTimeoutMs(env);
+}
+
+/**
+ * Chat-turn embed budget. Unset is 400 ms, not the indexing default.
+ * `COOKIE_EMBED_QUERY_TIMEOUT_MS` wins. Otherwise the deprecated
+ * `COOKIE_EMBED_TIMEOUT_MS` alias applies.
+ */
 export function readQueryEmbedTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
+  const query = env.COOKIE_EMBED_QUERY_TIMEOUT_MS;
+  if (query !== undefined && query !== "") {
+    return readPositiveInt(
+      query,
+      DEFAULT_QUERY_EMBED_TIMEOUT_MS,
+      "COOKIE_EMBED_QUERY_TIMEOUT_MS",
+    );
+  }
   return readPositiveInt(
     env.COOKIE_EMBED_TIMEOUT_MS,
     DEFAULT_QUERY_EMBED_TIMEOUT_MS,

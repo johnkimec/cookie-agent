@@ -30,20 +30,14 @@ const HISTORY_FETCH_LIMIT = 10_000;
 export class ChatLog implements ConversationHistory {
   private readonly store: SqliteMemoryStore;
   private readonly indexer: ContentIndexer | null;
-  private readonly retriever: {
-    retrieve: Retrieve;
-    setOmitTurnIds?: (ids: ReadonlySet<string>) => void;
-  } | null;
+  private readonly retriever: { retrieve: Retrieve } | null;
   private indexTail: Promise<void> = Promise.resolve();
   private lastUserTurnId: string | null = null;
 
   constructor(
     store: SqliteMemoryStore,
     indexer: ContentIndexer | null = null,
-    retriever: {
-      retrieve: Retrieve;
-      setOmitTurnIds?: (ids: ReadonlySet<string>) => void;
-    } | null = null,
+    retriever: { retrieve: Retrieve } | null = null,
   ) {
     this.store = store;
     this.indexer = indexer;
@@ -100,9 +94,10 @@ export class ChatLog implements ConversationHistory {
     this.lastUserTurnId = userTurnId;
     const omitTurnIds = new Set(prior.map((turn) => turn.id));
     omitTurnIds.add(userTurnId);
-    this.retriever?.setOmitTurnIds?.(omitTurnIds);
     const memories =
-      signal?.aborted === true ? [] : await this.safeRetrieve(userText, signal);
+      signal?.aborted === true
+        ? []
+        : await this.safeRetrieve(userText, signal, omitTurnIds);
     const block = renderRetrieved(memories, LOCAL_RETRIEVED_TOKEN_BUDGET, {
       omitTurnIds,
     });
@@ -117,13 +112,17 @@ export class ChatLog implements ConversationHistory {
     return this.lastUserTurnId;
   }
 
-  private async safeRetrieve(query: string, signal?: AbortSignal) {
+  private async safeRetrieve(
+    query: string,
+    signal?: AbortSignal,
+    omitTurnIds?: ReadonlySet<string>,
+  ) {
     const retriever = this.retriever;
     if (retriever === null || query.trim() === "" || signal?.aborted === true) {
       return [];
     }
     try {
-      return await retriever.retrieve(query, signal);
+      return await retriever.retrieve(query, signal, omitTurnIds);
     } catch {
       return [];
     }
