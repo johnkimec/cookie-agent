@@ -1,6 +1,12 @@
-import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 /** File name under the data directory. D5, `<COOKIE_DATA_DIR>/cookie.db`. */
 export const MEMORY_DB_FILENAME = "cookie.db";
@@ -12,13 +18,23 @@ const REFUSE_DEFAULT_DATA_DIR =
  * Product data directory from D-2026-10-25-01.
  * The same Application Support path is the default on every OS.
  */
-export function defaultMemoryDataDir(): string {
+export function defaultMemoryDataDir(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   return join(
-    homedir(),
+    homeDirectory(env),
     "Library",
     "Application Support",
     "com.johnkimec.cookie-agent",
   );
+}
+
+function homeDirectory(env: NodeJS.ProcessEnv): string {
+  const home = env.HOME;
+  if (typeof home === "string" && home !== "") {
+    return home;
+  }
+  return homedir();
 }
 
 /**
@@ -27,12 +43,15 @@ export function defaultMemoryDataDir(): string {
  * `VITEST` (non-empty) or `NODE_ENV=test` (any case) refuses that default,
  * including a `COOKIE_DATA_DIR` that points at it, so a test cannot open
  * John's real database. A path with the same device and inode counts.
+ * `HOME` on that env is the home directory. When the default folder is
+ * missing, the nearest existing parent is canonicalized, and darwin
+ * compares that path case-insensitively.
  */
 export function memoryDataDir(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.COOKIE_DATA_DIR;
   const set = raw !== undefined && raw !== "";
   if (isTestEnv(env)) {
-    if (!set || isDefaultDataDir(raw)) {
+    if (!set || isDefaultDataDir(raw, env)) {
       throw new Error(REFUSE_DEFAULT_DATA_DIR);
     }
     return raw;
@@ -40,7 +59,7 @@ export function memoryDataDir(env: NodeJS.ProcessEnv = process.env): string {
   if (set) {
     return raw;
   }
-  return defaultMemoryDataDir();
+  return defaultMemoryDataDir(env);
 }
 
 export function memoryDatabasePath(
@@ -58,12 +77,19 @@ function isTestEnv(env: NodeJS.ProcessEnv): boolean {
   return typeof nodeEnv === "string" && nodeEnv.toLowerCase() === "test";
 }
 
-function isDefaultDataDir(dir: string): boolean {
-  const fallback = defaultMemoryDataDir();
+function isDefaultDataDir(dir: string, env: NodeJS.ProcessEnv): boolean {
+  const fallback = defaultMemoryDataDir(env);
   if (sameDirectory(dir, fallback)) {
     return true;
   }
-  return canonicalDir(dir) === canonicalDir(fallback);
+  return sameCanonical(canonicalDir(dir), canonicalDir(fallback));
+}
+
+function sameCanonical(left: string, right: string): boolean {
+  if (process.platform === "darwin") {
+    return left.toLowerCase() === right.toLowerCase();
+  }
+  return left === right;
 }
 
 /**
@@ -100,12 +126,34 @@ function canonicalDir(dir: string): string {
         try {
           return realpathSync(linked);
         } catch {
-          return linked;
+          return canonicalFromParent(linked);
         }
       }
     } catch {
       // The path is missing and is not a symlink.
     }
-    return resolved;
+    return canonicalFromParent(resolved);
   }
+}
+
+/**
+ * Realpath the nearest existing parent and keep the missing tail.
+ * A missing Application Support folder still compares as that folder.
+ * On darwin the caller compares the result case-insensitively.
+ */
+function canonicalFromParent(resolved: string): string {
+  const missing: string[] = [];
+  let current = resolved;
+  while (current !== dirname(current)) {
+    if (existsSync(current)) {
+      try {
+        return join(realpathSync(current), ...missing);
+      } catch {
+        return join(current, ...missing);
+      }
+    }
+    missing.unshift(basename(current));
+    current = dirname(current);
+  }
+  return resolved;
 }
