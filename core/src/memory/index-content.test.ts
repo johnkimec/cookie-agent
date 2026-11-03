@@ -9,7 +9,11 @@ import {
   prefixDocument,
   QUERY_PREFIX,
 } from "./http-embedder.ts";
-import { ContentIndexer, INDEX_PASS_CHUNK_CAP } from "./index-content.ts";
+import {
+  ContentIndexer,
+  INDEX_PASS_CHUNK_CAP,
+  INDEX_TURN_ATTEMPT_LIMIT,
+} from "./index-content.ts";
 import { openMemoryDatabase } from "./migrate.ts";
 import { SqliteVecIndex } from "./sqlite-vec-index.ts";
 import { EMBEDDING_DIMENSIONS } from "./types.ts";
@@ -323,7 +327,437 @@ describe("content indexer", () => {
     expect(calls.some((text) => text.includes("expires later"))).toBe(false);
     db.close();
   });
+
+  it("redoes a multi-chunk turn that fails midway through a later batch", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let calls = 0;
+    let failAt = 17;
+    const indexer = new ContentIndexer({
+      db,
+      vectors: new SqliteVecIndex(db),
+      now: () => 5,
+      model: "m",
+      embedder: {
+        async embed(_text: string): Promise<Float32Array> {
+          calls += 1;
+          if (calls === failAt) {
+            throw new Error("x");
+          }
+          return vectorFor(String(calls));
+        },
+      },
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('s', 'popup', 1)",
+    ).run();
+    const insert = db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES (?, 's', 'user', ?, ?)`,
+    );
+    for (let index = 0; index < 10; index += 1) {
+      insert.run(`a${index}`, `short ${index}`, index + 1);
+    }
+    const long = Array.from({ length: 3000 }, (_, index) => `w${index}`).join(
+      " ",
+    );
+    const expected = chunkText(long).length;
+    expect(expected).toBeGreaterThan(8);
+    insert.run("big", long, 100);
+    const first = await indexer.indexPending();
+    expect(first.skipped).toBe(true);
+    expect(first.chunks).toBe(16);
+    expect(countRows(db, "embed_index", "source_id = 'big'")).toBe(6);
+    failAt = -1;
+    const second = await indexer.indexPending();
+    expect(second.skipped).toBe(false);
+    expect(countRows(db, "embed_index", "source_id = 'big'")).toBe(expected);
+    expect(countRows(db, "chunks", "first_turn = 'big'")).toBe(expected);
+    expect(countRows(db, "vec_chunks")).toBe(10 + expected);
+    expect(countRows(db, "embed_index")).toBe(10 + expected);
+    const third = await indexer.indexPending();
+    expect(third).toEqual({ turns: 0, facts: 0, chunks: 0, skipped: false });
+    db.close();
+  });
+
+  it("indexes a live fact when dead-fact cleanup throws", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    const inner = new SqliteVecIndex(db);
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          return vectorFor(text);
+        },
+      },
+      vectors: {
+        upsert: (table, id, embedding) => inner.upsert(table, id, embedding),
+        knn: (table, query, k) => inner.knn(table, query, k),
+        delete: async (ids: string[]) => {
+          if (ids.includes("dead")) {
+            throw new Error("sweep throws");
+          }
+          await inner.delete(ids);
+        },
+      },
+      now: () => 1_000,
+      model: "test-embed",
+    });
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, valid_until, created_at)
+       VALUES ('dead', 'already expired', 'event', 1, 100, 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO embed_index (
+         id, vec_table, source, source_id, model, tokens, created_at
+       ) VALUES ('dead', 'vec_facts', 'fact', 'dead', 'test-embed', 1, 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, created_at)
+       VALUES ('live', 'ECE midterm is Friday', 'event', 1, 2)`,
+    ).run();
+    const stderr = captureStderr();
+    try {
+      const indexed = await indexer.indexPending();
+      expect(indexed.facts).toBe(1);
+      expect(indexed.skipped).toBe(false);
+      expect(stderr.text()).toContain(
+        "cookie-core: dead-fact cleanup failed: sweep throws",
+      );
+    } finally {
+      stderr.restore();
+    }
+    expect(countRows(db, "embed_index", "source_id = 'live'")).toBe(1);
+    const query = vectorFor(prefixDocument("ECE midterm is Friday"));
+    expect((await inner.knn("vec_facts", query, 1))[0]?.id).toBe("live");
+    db.close();
+  });
+
+  it("skips a turn after repeated failures and still indexes later work", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    const bad = Array.from({ length: 20 }, () => "b".repeat(2000)).join(" ");
+    expect(chunkText(bad).length).toBeGreaterThanOrEqual(
+      DEFAULT_EMBED_BATCH_SIZE,
+    );
+    let badEmbeds = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          if (text.includes("bbbb")) {
+            badEmbeds += 1;
+            throw new Error("bad turn");
+          }
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', ?, 1)`,
+    ).run(bad);
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('new', 'ses', 'user', 'fresh note', 2)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, created_at)
+       VALUES ('early', 'keep this fact', 'event', 1, 3)`,
+    ).run();
+    for (let attempt = 0; attempt < INDEX_TURN_ATTEMPT_LIMIT; attempt += 1) {
+      const failed = await indexer.indexPending();
+      expect(failed.skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'new'")).toBe(0);
+    }
+    expect(badEmbeds).toBe(INDEX_TURN_ATTEMPT_LIMIT);
+    expect(countRows(db, "embed_index", "source_id = 'early'")).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, confidence, created_at)
+       VALUES ('later', 'index after the limit', 'event', 1, 4)`,
+    ).run();
+    const recovered = await indexer.indexPending();
+    expect(recovered.skipped).toBe(false);
+    expect(recovered.turns).toBe(1);
+    expect(recovered.facts).toBe(1);
+    expect(badEmbeds).toBe(INDEX_TURN_ATTEMPT_LIMIT);
+    expect(countRows(db, "embed_index", "source_id = 'new'")).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'later'")).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    db.close();
+  });
+
+  it("skips a turn listed in forgotten_turns and indexes its sibling", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    const calls: string[] = [];
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          calls.push(text);
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    const insert = db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES (?, 'ses', 'user', ?, ?)`,
+    );
+    insert.run("old", "forget this turn", 1);
+    insert.run("sib", "keep this turn", 2);
+    db.exec("CREATE TABLE forgotten_turns (turn_id TEXT PRIMARY KEY)");
+    db.prepare("INSERT INTO forgotten_turns (turn_id) VALUES ('old')").run();
+    const indexed = await indexer.indexPending();
+    expect(indexed.turns).toBe(1);
+    expect(indexed.skipped).toBe(false);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
+    expect(calls.some((text) => text.includes("forget this turn"))).toBe(false);
+    db.close();
+  });
+
+  it("skips a forgotten_turns row keyed by id", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', 'forget this turn', 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('sib', 'ses', 'user', 'keep this turn', 2)`,
+    ).run();
+    db.exec("CREATE TABLE forgotten_turns (id TEXT PRIMARY KEY)");
+    db.prepare("INSERT INTO forgotten_turns (id) VALUES ('old')").run();
+    const indexed = await indexer.indexPending();
+    expect(indexed.turns).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
+    db.close();
+  });
+
+  it("skips turns named by forgottenTurnIds when the table is absent", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+      forgottenTurnIds: () => ["old"],
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', 'forget this turn', 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('sib', 'ses', 'user', 'keep this turn', 2)`,
+    ).run();
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE name = 'forgotten_turns'")
+      .all();
+    expect(tables).toEqual([]);
+    const indexed = await indexer.indexPending();
+    expect(indexed.turns).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
+    db.close();
+  });
+
+  it("does not spend attempt limit on timeouts or connection errors", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let calls = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(): Promise<Float32Array> {
+          calls += 1;
+          if (calls <= INDEX_TURN_ATTEMPT_LIMIT) {
+            const error = new Error("embedder unreachable: timeout");
+            error.name = "TimeoutError";
+            throw error;
+          }
+          const refused = new Error("connect failed");
+          (refused as { code?: string }).code = "ECONNREFUSED";
+          throw refused;
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', 'still try this turn', 1)`,
+    ).run();
+    for (
+      let attempt = 0;
+      attempt < INDEX_TURN_ATTEMPT_LIMIT + 1;
+      attempt += 1
+    ) {
+      const failed = await indexer.indexPending();
+      expect(failed.skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    }
+    expect(calls).toBe(INDEX_TURN_ATTEMPT_LIMIT + 1);
+    db.close();
+  });
+
+  it("does not spend attempt limit on embedder HTTP 429 or 503", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let calls = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(): Promise<Float32Array> {
+          calls += 1;
+          const status = calls % 2 === 0 ? 503 : 429;
+          throw new Error(`embedder status ${status}`);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', 'still try this turn', 1)`,
+    ).run();
+    for (
+      let attempt = 0;
+      attempt < INDEX_TURN_ATTEMPT_LIMIT + 1;
+      attempt += 1
+    ) {
+      const failed = await indexer.indexPending();
+      expect(failed.skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
+    }
+    expect(calls).toBe(INDEX_TURN_ATTEMPT_LIMIT + 1);
+    db.close();
+  });
+
+  it("resets attempt counts after a successful batch", async () => {
+    const db = openMemoryDatabase(tempDbPath());
+    let mode: "bad" | "ok" = "bad";
+    let badEmbeds = 0;
+    const indexer = new ContentIndexer({
+      db,
+      embedder: {
+        async embed(text: string): Promise<Float32Array> {
+          if (text.includes("bbbb")) {
+            badEmbeds += 1;
+            if (mode === "bad") {
+              throw new Error("bad turn");
+            }
+          }
+          return vectorFor(text);
+        },
+      },
+      vectors: new SqliteVecIndex(db),
+      now: () => 50,
+      model: "test-embed",
+    });
+    db.prepare(
+      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
+    ).run();
+    const bad = Array.from({ length: 20 }, () => "b".repeat(2000)).join(" ");
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('old', 'ses', 'user', ?, 1)`,
+    ).run(bad);
+    expect((await indexer.indexPending()).skipped).toBe(true);
+    expect((await indexer.indexPending()).skipped).toBe(true);
+    mode = "ok";
+    expect((await indexer.indexPending()).skipped).toBe(false);
+    expect(countRows(db, "embed_index", "source_id = 'old'")).toBeGreaterThan(
+      0,
+    );
+    db.prepare("DELETE FROM embed_index WHERE source_id = 'old'").run();
+    db.prepare("DELETE FROM chunks WHERE first_turn = 'old'").run();
+    db.prepare(
+      `INSERT INTO turns (id, session_id, role, content, created_at)
+       VALUES ('new', 'ses', 'user', 'fresh note', 2)`,
+    ).run();
+    mode = "bad";
+    const before = badEmbeds;
+    for (let attempt = 0; attempt < INDEX_TURN_ATTEMPT_LIMIT; attempt += 1) {
+      expect((await indexer.indexPending()).skipped).toBe(true);
+      expect(countRows(db, "embed_index", "source_id = 'new'")).toBe(0);
+    }
+    expect(badEmbeds).toBe(before + INDEX_TURN_ATTEMPT_LIMIT);
+    expect((await indexer.indexPending()).turns).toBe(1);
+    expect(countRows(db, "embed_index", "source_id = 'new'")).toBe(1);
+    db.close();
+  });
 });
+
+function countRows(
+  db: { prepare(sql: string): { get(): unknown } },
+  table: string,
+  where?: string,
+): number {
+  const sql =
+    where === undefined
+      ? `SELECT count(*) AS n FROM ${table}`
+      : `SELECT count(*) AS n FROM ${table} WHERE ${where}`;
+  const row = db.prepare(sql).get() as { n: number };
+  return row.n;
+}
+
+function captureStderr(): { text: () => string; restore: () => void } {
+  const chunks: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    chunks.push(
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(),
+    );
+    return true;
+  }) as typeof process.stderr.write;
+  return {
+    text: () => chunks.join(""),
+    restore: () => {
+      process.stderr.write = original;
+    },
+  };
+}
 
 function vectorFor(text: string): Float32Array {
   const out = new Float32Array(EMBEDDING_DIMENSIONS);
