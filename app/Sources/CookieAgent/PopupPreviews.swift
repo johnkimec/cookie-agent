@@ -29,7 +29,8 @@ enum PopupPreviewRenderer {
             draft: model.conversation.draft,
             showsNotice: false
         )
-        let host = NSHostingView(rootView: PreviewPanel(model: model, height: height))
+        let box = PreviewBox(height)
+        let host = NSHostingView(rootView: PreviewPanel(model: model, box: box))
         host.sizingOptions = []
         host.frame = NSRect(x: 0, y: 0, width: PopupLayout.width, height: height)
         let window = NSWindow(
@@ -52,21 +53,35 @@ enum PopupPreviewRenderer {
             showsNotice: false,
             measuredTranscript: measured > 1 ? measured : nil
         )
+        // The SwiftUI frame is what cacheDisplay records. Leaving it at the
+        // line estimate made popup-three.png 303 pt after the panel had
+        // already settled near 248.
+        box.height = fitted
         host.frame = NSRect(x: 0, y: 0, width: PopupLayout.width, height: fitted)
         window.setContentSize(NSSize(width: PopupLayout.width, height: fitted))
-        host.layoutSubtreeIfNeeded()
-        ReplyTextLayout.constrain(host)
+        let settleBy = Date().addingTimeInterval(1)
+        while Date() < settleBy {
+            host.layoutSubtreeIfNeeded()
+            ReplyTextLayout.constrain(host)
+            if abs(host.bounds.height - fitted) < 2 { break }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
         host.display()
         window.displayIfNeeded()
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
             throw PreviewError("no bitmap for \(kind)")
         }
         host.cacheDisplay(in: host.bounds, to: rep)
+        let scale = max(1, CGFloat(rep.pixelsWide) / max(host.bounds.width, 1))
+        let bitmapHeight = CGFloat(rep.pixelsHigh) / scale
+        guard abs(bitmapHeight - fitted) < 2 else {
+            throw PreviewError("\(kind) bitmap \(bitmapHeight)pt wanted \(fitted)pt")
+        }
         guard let png = rep.representation(using: .png, properties: [:]) else {
             throw PreviewError("could not encode \(kind)")
         }
         try png.write(to: url)
-        print("popup preview \(kind) \(Int(fitted.rounded()))pt \(url.path)")
+        print("popup preview \(kind) \(Int(bitmapHeight.rounded()))pt \(url.path)")
     }
 
     /// Markdown parses in `.task`. A single layout pass snapshots an empty
@@ -78,22 +93,41 @@ enum PopupPreviewRenderer {
         case "three": "pass that along"
         default: "The transcript grows"
         }
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             host.layoutSubtreeIfNeeded()
             ReplyTextLayout.constrain(host)
             let field = view(identified: CookieAX.popupInput, in: host) != nil
             let button = view(identified: CookieAX.popupSend, in: host) != nil
-            let measured = kind == "empty" || model.measuredTranscriptHeight > 1
             let textReady = needle == nil || containsText(needle ?? "", in: host)
-            if field, button, measured, textReady {
+            let copies = occurrenceCount("The transcript grows", in: host)
+            if field, button, textReady, heightReady(kind: kind, model: model, copies: copies) {
                 return
             }
             // `.common` is kCFRunLoopCommonModes, which CFRunLoopRunSpecific
             // rejects, so MarkdownView's parse task never runs.
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
-        throw PreviewError("\(kind) preview did not draw its controls")
+        throw PreviewError(
+            "\(kind) preview did not draw (measured \(model.measuredTranscriptHeight))"
+        )
+    }
+
+    /// The long reply's first line is enough to leave the wait, and that
+    /// measurement is still one short block. Wait until every repeated line
+    /// is in a text view and the panel is at the cap.
+    private static func heightReady(kind: String, model: AppModel, copies: Int) -> Bool {
+        if kind == "empty" { return true }
+        guard model.measuredTranscriptHeight > 1 else { return false }
+        guard kind == "long" else { return true }
+        guard copies >= 16 else { return false }
+        let fitted = PopupMetrics.panelHeight(
+            turnTexts: model.conversation.turns.map(\.text),
+            draft: model.conversation.draft,
+            showsNotice: false,
+            measuredTranscript: model.measuredTranscriptHeight
+        )
+        return abs(fitted - PopupLayout.maxHeight) <= 1
     }
 
     private static func view(identified identifier: String, in root: NSView) -> NSView? {
@@ -107,6 +141,21 @@ enum PopupPreviewRenderer {
     private static func containsText(_ needle: String, in view: NSView) -> Bool {
         if let text = view as? NSTextView, text.string.contains(needle) { return true }
         return view.subviews.contains { containsText(needle, in: $0) }
+    }
+
+    private static func occurrenceCount(_ needle: String, in view: NSView) -> Int {
+        var count = 0
+        if let text = view as? NSTextView {
+            var search = text.string.startIndex
+            while let found = text.string[search...].range(of: needle) {
+                count += 1
+                search = found.upperBound
+            }
+        }
+        for subview in view.subviews {
+            count += occurrenceCount(needle, in: subview)
+        }
+        return count
     }
 
     private static func emptyModel() -> AppModel {
@@ -166,13 +215,19 @@ enum PopupPreviewRenderer {
     }
 }
 
+@MainActor
+private final class PreviewBox: ObservableObject {
+    @Published var height: CGFloat
+    init(_ height: CGFloat) { self.height = height }
+}
+
 private struct PreviewPanel: View {
     var model: AppModel
-    var height: CGFloat
+    @ObservedObject var box: PreviewBox
 
     var body: some View {
         PopupRoot(model: model)
-            .frame(width: PopupLayout.width, height: height, alignment: .bottom)
+            .frame(width: PopupLayout.width, height: box.height, alignment: .bottom)
             .background(Color(nsColor: .windowBackgroundColor))
     }
 }
