@@ -249,9 +249,13 @@ describe("forget keeps unrelated pinned rows", () => {
       ],
     });
     await h.reflector.reflect("a");
+    expect(h.store.listProfile().map((row) => row.sourceTurns)).toEqual([
+      ["a-1-user", "a-2-assistant"],
+      ["a-1-user", "a-2-assistant"],
+    ]);
     expect(h.store.listProfile().map((row) => row.sourceTurn)).toEqual([
-      null,
-      null,
+      "a-1-user",
+      "a-1-user",
     ]);
     await h.turn(
       "b",

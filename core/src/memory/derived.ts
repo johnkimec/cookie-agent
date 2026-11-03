@@ -45,9 +45,26 @@ export type ProfileRecord = {
   value: string;
   pinned: boolean;
   shareable: boolean;
+  /** First source, kept for single-source callers. */
   sourceTurn: string | null;
+  /**
+   * Every turn this row was drawn from. Missing means "use sourceTurn".
+   * An empty array means the row has no sources.
+   */
+  sourceTurns?: string[];
   updatedAt: number;
 };
+
+/** Turn ids a profile row cites. `sourceTurns` wins when it is set. */
+export function profileSourceIds(row: ProfileRecord): string[] {
+  if (row.sourceTurns !== undefined) {
+    return [...new Set(row.sourceTurns.filter((id) => id.length > 0))];
+  }
+  if (row.sourceTurn === null || row.sourceTurn.length === 0) {
+    return [];
+  }
+  return [row.sourceTurn];
+}
 
 export type JournalRecord = {
   id: string;
@@ -305,7 +322,11 @@ function cloneFact(fact: FactRecord): FactRecord {
 }
 
 function cloneProfile(row: ProfileRecord): ProfileRecord {
-  return { ...row };
+  return {
+    ...row,
+    sourceTurns:
+      row.sourceTurns === undefined ? undefined : [...row.sourceTurns],
+  };
 }
 
 function cloneJournal(row: JournalRecord): JournalRecord {

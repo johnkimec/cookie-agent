@@ -374,7 +374,7 @@ describe("round5 reviewer: sibling facts from the forgotten source turn", () => 
     expect.soft(s, "after reflect echoes the sibling").toEqual(CLEAN);
     close(h);
   });
-  it("R5-3 a benign sibling (no secret) is either purged or still retrievable, and reflect sees the same set retrieval does", async () => {
+  it("R5-3 a benign sibling from the forgotten source turn is purged", async () => {
     const h = setup();
     await h.turn(
       "a",
@@ -398,18 +398,9 @@ describe("round5 reviewer: sibling facts from the forgotten source turn", () => 
     ).includes("oolong");
     const prompt = await reflectAll(h);
     const inPrompt = prompt.includes("oolong");
-    expect
-      .soft(
-        inTable && !retrievable,
-        "zombie: kept in facts but hidden from retrieval",
-      )
-      .toBe(false);
-    expect
-      .soft(
-        inPrompt && !retrievable,
-        "reflect prompt shows a fact that retrieval hides",
-      )
-      .toBe(false);
+    expect(inTable, "benign sibling stays in facts").toBe(false);
+    expect(retrievable, "benign sibling stays retrievable").toBe(false);
+    expect(inPrompt, "benign sibling stays in the reflect prompt").toBe(false);
     close(h);
   });
 });
@@ -506,6 +497,69 @@ describe("round5 reviewer: reworded profile values", () => {
         "reworded profile row survives",
       )
       .toEqual([]);
+    close(h);
+  });
+  it("drops a reword with no shared token when the citation is missing", async () => {
+    const h = setup();
+    await h.turn(
+      "a",
+      "remember my bike is a Bluefox",
+      "Saved.",
+      remember(h, "John's bike is a Bluefox"),
+    );
+    await reflectAll(h, {
+      journal: "",
+      summary: "",
+      facts: [],
+      profile: [PR("bike", "my blue roadie")],
+    });
+    const row = h.store.listProfile().find((item) => item.key === "bike");
+    expect(row?.sourceTurns).toEqual(["a-1-user", "a-2-assistant"]);
+    await h.turn("c", "forget my bike", "Done.", forget(h, "bluefox"));
+    expect(values(h).filter((v) => /roadie|bluefox/i.test(v))).toEqual([]);
+    close(h);
+  });
+  it("a hallucinated profile source falls back to every prompt turn", async () => {
+    const h = setup();
+    await h.turn(
+      "a",
+      "remember my bike is a Bluefox",
+      "Saved.",
+      remember(h, "John's bike is a Bluefox"),
+    );
+    await reflectAll(h, {
+      journal: "",
+      summary: "",
+      facts: [],
+      profile: [
+        { ...PR("bike", "my blue roadie"), sourceTurns: ["no-such-turn"] },
+      ],
+    });
+    const row = h.store.listProfile().find((item) => item.key === "bike");
+    expect(row?.sourceTurns).toEqual(["a-1-user", "a-2-assistant"]);
+    await h.turn("c", "forget my bike", "Done.", forget(h, "bluefox"));
+    expect(h.store.listProfile().some((item) => item.key === "bike")).toBe(
+      false,
+    );
+    close(h);
+  });
+  it("a missing profile citation falls back to every prompt turn", async () => {
+    const h = setup();
+    await h.turn(
+      "a",
+      "remember my bike is a Bluefox",
+      "Saved.",
+      remember(h, "John's bike is a Bluefox"),
+    );
+    await reflectAll(h, {
+      journal: "",
+      summary: "",
+      facts: [],
+      profile: [PR("bike", "my blue roadie")],
+    });
+    expect(
+      h.store.listProfile().find((item) => item.key === "bike")?.sourceTurns,
+    ).toEqual(["a-1-user", "a-2-assistant"]);
     close(h);
   });
   it("R5-5b control: reworded value with the secret number is dropped", async () => {

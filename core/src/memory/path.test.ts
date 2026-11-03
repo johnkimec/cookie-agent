@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -46,6 +52,9 @@ describe("memory data directory", () => {
     expect(() => memoryDataDir({ NODE_ENV: "test" })).toThrow(
       /default data directory/,
     );
+    expect(() => memoryDataDir({ NODE_ENV: "TEST" })).toThrow(
+      /default data directory/,
+    );
     expect(() =>
       memoryDataDir({ NODE_ENV: "test", COOKIE_DATA_DIR: "" }),
     ).toThrow(/temporary directory/);
@@ -69,6 +78,70 @@ describe("memory data directory", () => {
     expect(() =>
       memoryDataDir({ VITEST: "true", COOKIE_DATA_DIR: link }),
     ).toThrow(/default data directory/);
+  });
+
+  it("refuses a symlink alias when the default directory exists", () => {
+    const realHome = process.env.HOME;
+    const realDefault = defaultMemoryDataDir(
+      realHome === undefined ? {} : { HOME: realHome },
+    );
+    const existed = existsSync(realDefault);
+    const home = mkdtempSync(join(tmpdir(), "cookie-home-"));
+    dirs.push(home);
+    const dir = join(
+      home,
+      "Library",
+      "Application Support",
+      "com.johnkimec.cookie-agent",
+    );
+    mkdirSync(dir, { recursive: true });
+    const parent = mkdtempSync(join(tmpdir(), "cookie-data-alias-"));
+    dirs.push(parent);
+    const link = join(parent, "alias");
+    symlinkSync(dir, link);
+    process.env.HOME = home;
+    try {
+      expect(() =>
+        memoryDataDir({ NODE_ENV: "TEST", COOKIE_DATA_DIR: link, HOME: home }),
+      ).toThrow(/default data directory/);
+    } finally {
+      if (realHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = realHome;
+      }
+    }
+    expect(existsSync(realDefault)).toBe(existed);
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("refuses a symlink to a missing default under HOME", () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), "cookie-home-missing-"));
+    dirs.push(home);
+    const dir = join(
+      home,
+      "Library",
+      "Application Support",
+      "com.johnkimec.cookie-agent",
+    );
+    const parent = mkdtempSync(join(tmpdir(), "cookie-data-missing-"));
+    dirs.push(parent);
+    const link = join(parent, "alias");
+    symlinkSync(dir, link);
+    process.env.HOME = home;
+    try {
+      expect(() =>
+        memoryDataDir({ NODE_ENV: "TEST", COOKIE_DATA_DIR: link, HOME: home }),
+      ).toThrow(/default data directory/);
+    } finally {
+      if (realHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = realHome;
+      }
+    }
+    expect(existsSync(dir)).toBe(false);
   });
 
   it("allows a temporary COOKIE_DATA_DIR under test", () => {

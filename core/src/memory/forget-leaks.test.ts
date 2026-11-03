@@ -229,7 +229,8 @@ describe("forget leaks", () => {
     await reflector.reflect("ses-1");
     const row = store.listProfile().find((item) => item.key === "locker");
     expect(row?.value).toBe("4417");
-    expect(row?.sourceTurn).toBeNull();
+    expect(row?.sourceTurns).toEqual(["t1"]);
+    expect(row?.sourceTurn).toBe("t1");
     const runtime = createMemoryRuntime({
       store,
       derived: store,

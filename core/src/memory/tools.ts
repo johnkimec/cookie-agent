@@ -7,6 +7,7 @@ import {
   type FactKind,
   type FactRecord,
   type ProfileRecord,
+  profileSourceIds,
   TOMBSTONE_SUBJECT,
 } from "./derived.ts";
 import type { Embedder } from "./embedder.ts";
@@ -302,7 +303,14 @@ async function commitForget(
   // and is never recalled. Retrieval filters the forgotten ids.
   let vectorDelete: Promise<void> = Promise.resolve();
   deps.derived.transaction(() => {
-    dropProfileFor(deps.derived, facts, needle, sourceTurns, secretTexts);
+    const forgottenForProfile = new Set<string>([...sourceTurns, ...turnIds]);
+    dropProfileFor(
+      deps.derived,
+      facts,
+      needle,
+      forgottenForProfile,
+      secretTexts,
+    );
     for (const fact of doomed) {
       deps.derived.deleteFact(fact.id);
     }
@@ -1067,8 +1075,8 @@ function dropProfileFor(
  * (`my name`), or when it is the pinned copy of a forgotten fact:
  * same source turn and the same text. A pinned name with no source
  * turn stays. An unpinned row drops when the needle or a forgotten
- * fact equals the key or the value, or when its source turn was
- * forgotten.
+ * fact equals the key or the value, or when any of its source
+ * turns was forgotten.
  */
 export function profileRowDropped(
   row: ProfileRecord,
@@ -1089,7 +1097,7 @@ export function profileRowDropped(
   if (facts.some((fact) => namesRow(row, fact.text))) {
     return true;
   }
-  return row.sourceTurn !== null && sourceTurns.has(row.sourceTurn);
+  return profileSourceIds(row).some((id) => sourceTurns.has(id));
 }
 
 /**
@@ -1100,13 +1108,15 @@ function pinnedFactCopy(
   row: ProfileRecord,
   facts: readonly FactRecord[],
 ): boolean {
-  if (row.sourceTurn === null || row.sourceTurn.length === 0) {
+  const sources = profileSourceIds(row);
+  if (sources.length === 0) {
     return false;
   }
   const value = row.value.trim().toLowerCase();
   return facts.some(
     (fact) =>
-      fact.sourceTurn === row.sourceTurn &&
+      fact.sourceTurn !== null &&
+      sources.includes(fact.sourceTurn) &&
       fact.text.trim().toLowerCase() === value,
   );
 }
