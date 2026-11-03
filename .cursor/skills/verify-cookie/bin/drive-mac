@@ -829,7 +829,10 @@ PY
 # Set the field through AX. System Events keystrokes go to the frontmost
 # app, not this non-activating panel. AXConfirm is the field's Return.
 send_chat() {
-  osascript_run <<'APPLESCRIPT'
+  local text="${1:-hello from drive-mac}"
+  [[ "$text" != *\"* && "$text" != *$'\n'* ]] || fail "chat text cannot contain quotes or newlines"
+  local script
+  script="$(cat <<'APPLESCRIPT'
 on axid(elem)
   tell application "System Events"
     try
@@ -876,7 +879,7 @@ tell application "System Events"
       if theId is "cookie.popup.send" then set sendElem to elem
     end repeat
     if inputElem is missing value then error "missing cookie.popup.input"
-    set value of inputElem to "hello from drive-mac"
+    set value of inputElem to "__CHAT_TEXT__"
     delay 0.2
     set confirmed to false
     try
@@ -890,6 +893,9 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
+)"
+  script="${script//__CHAT_TEXT__/$text}"
+  printf '%s\n' "$script" | osascript_run
 }
 
 cookie_turn_value() {
@@ -1062,7 +1068,7 @@ APPLESCRIPT
 
 cookie_identified_value() {
   local turn_id="$1"
-  [[ "$turn_id" =~ ^cookie\.turn\.cookie\.[0-9]+$ ]] || return 2
+  [[ "$turn_id" =~ ^cookie\.turn\.(cookie|you)\.[0-9]+$ ]] || return 2
   local script
   script="$(cat <<'APPLESCRIPT'
 on axid(elem)
@@ -1149,8 +1155,10 @@ APPLESCRIPT
 popup_reply_metrics() {
   local pad="$1"
   local turn_id="$2"
+  local you_id="${turn_id/cookie.turn.cookie./cookie.turn.you.}"
   [[ "$pad" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 2
   [[ "$turn_id" =~ ^cookie\.turn\.cookie\.[0-9]+$ ]] || return 2
+  [[ "$you_id" =~ ^cookie\.turn\.you\.[0-9]+$ ]] || return 2
   local script
   script="$(cat <<'APPLESCRIPT'
 on axid(elem)
@@ -1184,6 +1192,7 @@ tell application "System Events"
     if popupWindow is missing value then error "no Ask Cookie window"
     set nodes to entire contents of popupWindow
     set replyElem to missing value
+    set youElem to missing value
     set dotElem to missing value
     set badgeElem to missing value
     set inputElem to missing value
@@ -1193,12 +1202,14 @@ tell application "System Events"
       set theId to my axid(elem)
       if theId is "cookie.badge.on-device.0" and badgeElem is missing value then set badgeElem to elem
       if theId is "__TURN_ID__" and replyElem is missing value then set replyElem to elem
+      if theId is "__YOU_ID__" and youElem is missing value then set youElem to elem
       if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
       if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
       if theId is "cookie.popup.transcript-bottom" and bottomElem is missing value then set bottomElem to elem
       if theId is "cookie.popup.mascot" and mascotElem is missing value then set mascotElem to elem
     end repeat
     if replyElem is missing value then error "missing __TURN_ID__"
+    if youElem is missing value then error "missing __YOU_ID__"
     if dotElem is missing value then error "missing cookie.badge.on-device"
     if badgeElem is missing value then error "missing cookie.badge.on-device.0"
     if inputElem is missing value then error "missing cookie.popup.input"
@@ -1207,6 +1218,9 @@ tell application "System Events"
     set replyLeft to item 1 of (get position of replyElem)
     set replyHeight to item 2 of (get size of replyElem)
     set replyWidth to item 1 of (get size of replyElem)
+    set youLeft to item 1 of (get position of youElem)
+    set youHeight to item 2 of (get size of youElem)
+    set youWidth to item 1 of (get size of youElem)
     set dotWidth to item 1 of (get size of dotElem)
     set badgeWidth to item 1 of (get size of badgeElem)
     set inputHeight to item 2 of (get size of inputElem)
@@ -1232,11 +1246,12 @@ tell application "System Events"
     end if
   end tell
 end tell
-return "replyHeight " & replyHeight & linefeed & "dotWidth " & dotWidth & linefeed & "badgeWidth " & badgeWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
+return "replyHeight " & replyHeight & linefeed & "youHeight " & youHeight & linefeed & "youLeft " & youLeft & linefeed & "youWidth " & youWidth & linefeed & "dotWidth " & dotWidth & linefeed & "badgeWidth " & badgeWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
 APPLESCRIPT
 )"
   script="${script//__ROW_PAD__/$pad}"
   script="${script//__TURN_ID__/$turn_id}"
+  script="${script//__YOU_ID__/$you_id}"
   printf '%s\n' "$script" | osascript_run
 }
 
@@ -1310,7 +1325,8 @@ for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     if len(parts) == 2:
         vals[parts[0]] = parts[1].strip()
 need = [
-    "replyHeight", "dotWidth", "badgeWidth", "inputHeight", "windowHeight", "bottom", "gap",
+    "replyHeight", "youHeight", "youLeft", "youWidth", "dotWidth", "badgeWidth",
+    "inputHeight", "windowHeight", "bottom", "gap",
     "rowHeight", "replyLeft", "replyWidth", "windowLeft", "windowWidth",
 ]
 missing = [key for key in need if key not in vals]
@@ -1318,6 +1334,9 @@ if missing:
     print("missing " + ", ".join(missing))
     sys.exit(1)
 reply_height = float(vals["replyHeight"])
+you_height = float(vals["youHeight"])
+you_left = float(vals["youLeft"])
+you_width = float(vals["youWidth"])
 dot_width = float(vals["dotWidth"])
 badge_width = float(vals["badgeWidth"])
 input_height = float(vals["inputHeight"])
@@ -1334,6 +1353,13 @@ frame_inside = (
     reply_left + 1 >= window_left
     and reply_left + reply_width <= window_left + window_width + 4
 )
+you_inside = (
+    you_left + 1 >= window_left
+    and you_left + you_width <= window_left + window_width + 4
+)
+# A clipped single line measured about 20pt. Taller than that is more than one line.
+def more_than_one_line(height):
+    return height > 30
 ok = (
     56 <= row_height <= 72
     and vals["bottom"] == "inside"
@@ -1343,12 +1369,14 @@ ok = (
     and input_height < 48
     and 0 <= gap <= 16
     and frame_inside
+    and you_inside
+    and more_than_one_line(reply_height)
 )
 if mode == "long":
-    ok = ok and reply_height > 40 and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
+    ok = ok and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
 elif mode == "short":
-    # A one-line exchange stays near its content. 319 would still be under the cap.
-    ok = ok and reply_height > 30 and 80 < window_height < 260
+    # The long you line is on screen with the short cookie reply.
+    ok = ok and more_than_one_line(you_height) and 80 < window_height < 260
 else:
     print("unknown mode " + mode)
     sys.exit(1)
@@ -1405,15 +1433,21 @@ PY
   log "empty height $empty_height row $empty_row"
   capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-empty.png
   log "send short reply"
-  send_chat
+  local you_long="hello from drive-mac. END-OF-REPLY-m1-popup. This you line is wider than the popup column and has to wrap so the tail stays visible."
+  send_chat "$you_long"
   local ready=0
   for attempt in $(seq 1 80); do
     cookie_identified_value cookie.turn.cookie.0 > /tmp/cookie-drive-mac-short-chat.txt || true
-    if ! python3 - /tmp/cookie-drive-mac-short-chat.txt <<'PY'
-import pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+    cookie_identified_value cookie.turn.you.0 > /tmp/cookie-drive-mac-short-you.txt || true
+    if ! YOU_LONG="$you_long" python3 - /tmp/cookie-drive-mac-short-chat.txt /tmp/cookie-drive-mac-short-you.txt <<'PY'
+import os, pathlib, sys
+cookie = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+you = pathlib.Path(sys.argv[2]).read_text(errors="replace")
 full = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
-sys.exit(0 if full in text and "Line 01" not in text else 1)
+you_full = os.environ["YOU_LONG"]
+cookie_ok = full in cookie and "Line 01" not in cookie
+you_ok = you_full in you and "END-OF-REPLY-m1-popup" in you
+sys.exit(0 if cookie_ok and you_ok else 1)
 PY
     then
       sleep 0.25
