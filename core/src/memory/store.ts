@@ -17,6 +17,8 @@ export interface MemoryStore {
   appendSession(session: SessionRecord): void;
   appendTurn(turn: TurnRecord): void;
   recentTurns(sessionId: string, limit: number): TurnRecord[];
+  /** Turns whose ids are in `ids`. Missing ids are omitted. */
+  turnsByIds(ids: readonly string[]): TurnRecord[];
   listSessions(query?: ListSessionsQuery): SessionRecord[];
 }
 
@@ -54,6 +56,13 @@ export class InMemoryMemoryStore implements MemoryStore {
     return rows.slice(Math.max(0, rows.length - limit)).map((row) => ({
       ...row,
     }));
+  }
+
+  turnsByIds(ids: readonly string[]): TurnRecord[] {
+    const wanted = new Set(ids);
+    return this.turns
+      .filter((row) => wanted.has(row.id))
+      .map((row) => ({ ...row }));
   }
 
   listSessions(query?: ListSessionsQuery): SessionRecord[] {

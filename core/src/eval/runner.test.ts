@@ -215,9 +215,7 @@ describe("memory recall runner", () => {
     expect(task?.pass).toBe(true);
     expect(task?.ids.length).toBeGreaterThan(0);
     expect(task?.answer.toLowerCase()).toContain("plum-token");
-    // The stub's journal is empty, so the shared reflector commits no row.
-    // A throw would still end the session. The checkpoint test covers the write.
-    expect(task?.journalRows).toBe(0);
+    expect(task?.journalRows).toBeGreaterThanOrEqual(1);
     expect(task?.error).toBeNull();
     const dataDir = task?.dataDir;
     expect(dataDir).toBeTruthy();
@@ -232,10 +230,10 @@ describe("memory recall runner", () => {
         )
         .get("Store plum-token in the drawer.") as { at: number };
       expect(row.at).toBe(Date.parse(createdAt));
-      const ended = db
-        .prepare("SELECT ended_at AS at FROM sessions WHERE id = ?")
-        .get("ses-a") as { at: number | null };
-      expect(ended.at).not.toBeNull();
+      const journal = db.prepare("SELECT entry FROM journal").all() as Array<{
+        entry: string;
+      }>;
+      expect(journal.some((item) => item.entry.includes("ses-a"))).toBe(true);
     } finally {
       db.close();
     }

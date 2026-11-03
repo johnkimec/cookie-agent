@@ -5,5 +5,5 @@
 ALTER TABLE profile ADD COLUMN source_turns TEXT NOT NULL DEFAULT '[]';
 
 UPDATE profile
-SET source_turns = '["' || replace(source_turn, '"', '\"') || '"]'
+SET source_turns = json_array(source_turn)
 WHERE source_turn IS NOT NULL AND length(source_turn) > 0;

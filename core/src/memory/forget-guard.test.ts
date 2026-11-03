@@ -200,7 +200,7 @@ describe("forget keeps unrelated pinned rows", () => {
     h.store.close();
   });
 
-  it("keeps a pinned name stated on the same turn as the secret", async () => {
+  it("purges a pinned name stated only on the forgotten turn", async () => {
     const h = setup();
     await h.turn(
       "a",
@@ -268,7 +268,7 @@ describe("forget keeps unrelated pinned rows", () => {
         .listProfile()
         .map((row) => `${row.key}=${row.value}`)
         .sort(),
-    ).toEqual(["name=John", "pronouns=he/him"]);
+    ).toEqual([]);
     h.runtime.scheduler.stop();
     h.store.close();
   });
