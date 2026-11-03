@@ -7,7 +7,14 @@ BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$BIN_DIR/drive-mac-pid.sh"
 
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-pid.XXXXXX")"
-trap 'rm -rf "$FIXTURE"' EXIT
+BIND_MOUNT=""
+cleanup_pid_fixture() {
+  if [[ -n "${BIND_MOUNT:-}" ]]; then
+    umount "$BIND_MOUNT" 2>/dev/null || true
+  fi
+  rm -rf "$FIXTURE"
+}
+trap cleanup_pid_fixture EXIT
 mkdir -p "$FIXTURE/bin"
 export FIXTURE
 
@@ -42,11 +49,20 @@ chmod +x "$FIXTURE/bin/ps" "$FIXTURE/bin/lsof"
 
 export PATH="$FIXTURE/bin:$PATH"
 
+SIGNALED="$FIXTURE/signaled"
+: >"$SIGNALED"
 kill() {
   if [[ "${1:-}" == "-0" ]]; then
     awk -F '|' -v pid="$2" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }' "$FIXTURE/procs"
     return
   fi
+  local target="${1:-}"
+  if [[ "$target" == -* ]]; then
+    target="${2:-}"
+  fi
+  printf '%s\n' "$target" >>"$SIGNALED"
+  awk -F '|' -v pid="$target" '$1 != pid { print $0 }' "$FIXTURE/procs" >"$FIXTURE/procs.next"
+  mv "$FIXTURE/procs.next" "$FIXTURE/procs"
   return 0
 }
 
@@ -341,6 +357,7 @@ expect_refuse() {
   local label="$1" home="$2" data="$3" real="$4" needle="$5"
   local err code
   code=0
+  # shellcheck disable=SC2119
   err="$(HOME="$home" COOKIE_DATA_DIR="$data" REAL_HOME="$real" assert_isolated_data_dir 2>&1)" || code=$?
   if [[ "$code" -eq 0 || "$code" -eq 3 ]]; then
     printf 'isolation %s exited %s\n' "$label" "$code" >&2
@@ -374,6 +391,7 @@ expect_allow() {
   local label="$1" home="$2" data="$3" real="$4"
   local err code
   code=0
+  # shellcheck disable=SC2119
   err="$(HOME="$home" COOKIE_DATA_DIR="$data" REAL_HOME="$real" assert_isolated_data_dir 2>&1)" || code=$?
   if [[ "$code" -ne 0 ]]; then
     printf 'isolation %s exited %s: %s\n' "$label" "$code" "$err" >&2
@@ -425,6 +443,58 @@ account_home="$(directory_service_home)"
 expect_refuse "account-home" "$account_home" "$SAFE_DATA" "" "HOME is the real home"
 expect_allow "overridden-home" "$SAFE_HOME" "$SAFE_DATA" ""
 
+# Item 2: an ancestor of the real data directory inside the real home.
+expect_refuse "ancestor-library" "$SAFE_HOME" "$REAL/Library" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "ancestor-app-support" "$SAFE_HOME" "$REAL/Library/Application Support" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_allow "parent-of-home" "$SAFE_HOME" "$(dirname "$REAL")" "$REAL"
+
+# Item 6: a HOME inside the real home is not worded as the home itself.
+mkdir -p "$REAL/scratch/iso-home"
+expect_refuse "home-inside" "$REAL/scratch/iso-home" "$SAFE_DATA" "$REAL" "HOME is inside the real home"
+
+# Item 1: the real data directory does not exist yet. The same path string
+# is still refused, and a sibling under Application Support is not.
+mv "$DATA" "$DATA.moved"
+expect_refuse "missing-data-string" "$SAFE_HOME" "$DATA" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "missing-data-leaf" "$SAFE_HOME" "$DATA/new/leaf" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_refuse "missing-ancestor-library" "$SAFE_HOME" "$REAL/Library" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+expect_allow "missing-sibling" "$SAFE_HOME" "$REAL/Library/Application Support/com.johnkimec.cookie-agent-extra" "$REAL"
+mv "$DATA.moved" "$DATA"
+
+# Item 3: dscl continuation line, including a home path that contains a space.
+space_home="$FIXTURE/Sam Kim"
+mkdir -p "$space_home/Library/Application Support/com.johnkimec.cookie-agent"
+dscl() { printf 'NFSHomeDirectory:\n %s\n' "$space_home"; }
+if [[ "$(read_dscl_home)" != "$space_home" ]]; then
+  printf 'dscl continuation line was not the home path: %s\n' "$(read_dscl_home || true)" >&2
+  exit 1
+fi
+ln -s "$space_home/Library/Application Support/com.johnkimec.cookie-agent" "$FIXTURE/space-link"
+space_spoof="$(mktemp -d "$FIXTURE/spoof-space.XXXXXX")"
+expect_refuse "dscl-space-spoof" "$SAFE_HOME" "$FIXTURE/space-link" "$space_spoof" "COOKIE_DATA_DIR is the real cookie data directory"
+dscl() { printf 'NFSHomeDirectory: %s\n' "$space_home"; }
+if [[ "$(read_dscl_home)" != "$space_home" ]]; then
+  printf 'dscl one-line home with a space was not parsed\n' >&2
+  exit 1
+fi
+unset -f dscl
+
+# pwd.getpwuid is the third source when dscl and getent return nothing.
+# shellcheck disable=SC2317
+dscl() { return 1; }
+# shellcheck disable=SC2317
+getent() { return 1; }
+passwd_home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+if [[ "$(directory_service_home)" != "$passwd_home" ]]; then
+  printf 'pwd.getpwuid was not the directory-service home: %s\n' "$(directory_service_home || true)" >&2
+  exit 1
+fi
+if ! account_homes | grep -F -x "$passwd_home" >/dev/null; then
+  printf 'pwd.getpwuid missing from account homes\n' >&2
+  exit 1
+fi
+unset -f dscl getent
+
 # (b) Startup HOME is a different directory. The data dir is a symlink to the
 # account home from dscl/getent. The string check against startup HOME misses
 # it. The directory-service home must still refuse it. Do not create that
@@ -434,17 +504,43 @@ ln -s "$account_home/Library/Application Support/com.johnkimec.cookie-agent" "$F
 expect_refuse "startup-home-spoof" "$SAFE_HOME" "$FIXTURE/spoof-link" "$spoof_home" "COOKIE_DATA_DIR is the real cookie data directory"
 
 # (a) Bind-mount alias of the home, the stand-in for /System/Volumes/Data.
-# realpath strings differ. st_dev+st_ino match. Skip when unprivileged.
-alias_mount="$ISO/System/Volumes/Data/Users/samkim"
-mkdir -p "$alias_mount"
-if mount --bind "$REAL" "$alias_mount" 2>/dev/null; then
+# realpath strings differ. st_dev+st_ino match. A user namespace runs the
+# same cases when the host is not allowed to mount.
+run_bind_alias_cases() {
+  local alias_mount="$1"
+  mkdir -p "$alias_mount"
+  BIND_MOUNT="$alias_mount"
+  mount --bind "$REAL" "$alias_mount"
   expect_refuse "bind-alias" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
   ln -s "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent" "$FIXTURE/aliaslink"
   expect_refuse "bind-alias-symlink" "$SAFE_HOME" "$FIXTURE/aliaslink" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  expect_refuse "bind-alias-library" "$SAFE_HOME" "$alias_mount/Library" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  expect_refuse "bind-alias-home" "$alias_mount" "$SAFE_DATA" "$REAL" "HOME is the real home"
+  expect_refuse "bind-alias-home-inside" "$alias_mount/scratch/iso-home" "$SAFE_DATA" "$REAL" "HOME is inside the real home"
+  # Item 1: the leaf is gone, so the alias path and the real path are both
+  # missing. The parent inode plus the remaining path still matches.
+  mv "$DATA" "$DATA.moved"
+  expect_refuse "bind-alias-missing" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  expect_refuse "bind-alias-missing-leaf" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent/new/leaf" "$REAL" "COOKIE_DATA_DIR is the real cookie data directory"
+  expect_allow "bind-alias-missing-sibling" "$SAFE_HOME" "$alias_mount/Library/Application Support/com.johnkimec.cookie-agent-extra" "$REAL"
+  mv "$DATA.moved" "$DATA"
   umount "$alias_mount" || {
     printf 'umount of bind alias failed\n' >&2
     exit 1
   }
+  BIND_MOUNT=""
+}
+alias_mount="$ISO/System/Volumes/Data/Users/samkim"
+mkdir -p "$alias_mount"
+if mount --bind "$REAL" "$alias_mount" 2>/dev/null; then
+  umount "$alias_mount"
+  run_bind_alias_cases "$alias_mount"
+elif unshare --user --mount --map-root-user true 2>/dev/null; then
+  export REAL SAFE_HOME SAFE_DATA DATA FIXTURE
+  export -f expect_refuse expect_allow run_bind_alias_cases
+  # $1 and $2 belong to the inner bash, which sources the library and mounts.
+  # shellcheck disable=SC2016
+  unshare --user --mount --map-root-user bash -c 'source "$1"; run_bind_alias_cases "$2"' _ "$BIN_DIR/drive-mac-pid.sh" "$alias_mount"
 else
   printf '%s\n' "SKIP bind mount (not root)"
 fi
@@ -453,15 +549,35 @@ pref_home="$FIXTURE/prefs-home"
 pref_dir="$pref_home/Library/Preferences"
 mkdir -p "$pref_dir"
 printf 'drive\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist"
+printf 'drive8\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12cd34.plist"
+printf 'dotted\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12.extra.plist"
+printf 'upper\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.AB12CD34.plist"
+printf 'nothex\n' >"$pref_dir/com.johnkimec.cookie-agent.drive.ab12cd3g.plist"
 printf 'product\n' >"$pref_dir/com.johnkimec.cookie-agent.plist"
 printf 'other\n' >"$pref_dir/unrelated.plist"
+if ! drive_preference_plist_present "$pref_home"; then
+  printf 'drive preference plist was not detected\n' >&2
+  exit 1
+fi
 remove_drive_preference_plists "$pref_home"
-if [[ -f "$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist" ]]; then
+if [[ -f "$pref_dir/com.johnkimec.cookie-agent.drive.ab12.plist" || -f "$pref_dir/com.johnkimec.cookie-agent.drive.ab12cd34.plist" ]]; then
   printf 'drive preference plist was left in place\n' >&2
   exit 1
 fi
-if [[ ! -f "$pref_dir/com.johnkimec.cookie-agent.plist" || ! -f "$pref_dir/unrelated.plist" ]]; then
-  printf 'preference cleanup removed a plist that is not a drive bundle\n' >&2
+for kept in \
+  "com.johnkimec.cookie-agent.drive.ab12.extra.plist" \
+  "com.johnkimec.cookie-agent.drive.AB12CD34.plist" \
+  "com.johnkimec.cookie-agent.drive.ab12cd3g.plist" \
+  "com.johnkimec.cookie-agent.plist" \
+  "unrelated.plist"
+do
+  if [[ ! -f "$pref_dir/$kept" ]]; then
+    printf 'preference cleanup removed %s\n' "$kept" >&2
+    exit 1
+  fi
+done
+if drive_preference_plist_present "$pref_home"; then
+  printf 'a non-hex plist was treated as a drive bundle\n' >&2
   exit 1
 fi
 
@@ -553,6 +669,9 @@ for needle in (
     '--env "HOME=$isolate_home"',
     '--env "COOKIE_DATA_DIR=$isolate_data"',
     '--env "CFFIXED_USER_HOME=$isolate_home"',
+    '--env "COOKIE_MODEL_PATH=$model"',
+    '--env "COOKIE_EMBED_MODEL_PATH=$embed"',
+    '--env "PATH=$launch_path"',
 ):
     if needle not in open_cmd:
         sys.exit("open-clean did not pass " + needle)
@@ -561,7 +680,7 @@ if "dataDir=${isolate_data} dataDirSource=environment" not in opened:
 if opened.index("dataDir=${isolate_data} dataDirSource=environment") < opened.index("/usr/bin/open -n"):
     sys.exit("dataDir check is before the open launch")
 for fail_line in (
-    'fail "open started more than one process:$fresh"',
+    'fail "open started more than one process:${fresh_pids[*]}"',
     'fail "open did not start a new instance of $BIN"',
     'fail "refusing to drive open pid: $reason"',
 ):
@@ -577,7 +696,86 @@ if "assert_isolated_data_dir" not in launch or "assert_isolated_data_dir" not in
     sys.exit("a launch path skipped assert_isolated_data_dir")
 if "$(isolate_dir" in text:
     sys.exit("isolate_dir is inside a command substitution, so cleanup would miss the temp dir")
+signal = body("signal_verified_app_pid", "\nDECOY_DATA=")
+if "verify_drive_pid_reason" not in signal:
+    sys.exit("signal_verified_app_pid does not call verify_drive_pid_reason")
+for raw in ('kill -9 "$APP_PID"', 'kill -TERM "$APP_PID"'):
+    if raw not in signal:
+        sys.exit("signal helper missing " + raw)
+    if raw in text[: text.index("signal_verified_app_pid() {")] or raw in text[text.index("\nDECOY_DATA=") :]:
+        sys.exit("raw APP_PID signal outside signal_verified_app_pid: " + raw)
+stopped = body("stop_verified_drive_pids", "\ntrap cleanup EXIT")
+if '"$cohort"' not in stopped:
+    sys.exit("stop_verified_drive_pids does not pass the cohort to verify")
+if 'stop_verified_drive_pids "${fresh_pids[@]}"' not in opened:
+    sys.exit("open-clean does not stop every fresh pid")
 PY
+
+# Items 4 and 5. kill is the stub above: it records the pid and drops that row.
+# John's CookieAgent and an impostor with the per-run name stay unsignaled.
+log() { :; }
+# shellcheck disable=SC1091
+eval "$(sed -n '/^stop_pid() {/,/^}/p' "$BIN_DIR/drive-mac")"
+eval "$(sed -n '/^signal_verified_app_pid() {/,/^}/p' "$BIN_DIR/drive-mac")"
+eval "$(sed -n '/^stop_verified_drive_pids() {/,/^}/p' "$BIN_DIR/drive-mac")"
+IMP_BIN="$(write_bundle "$FIXTURE/impostor.app" "$DRIVE_NAME" "$DRIVE_BUNDLE")"
+# Read by the functions eval'd from drive-mac.
+export BIN="$DRIVE_BIN"
+export DRIVE_PROCESS_NAME="$DRIVE_NAME"
+export DRIVE_BUNDLE_ID="$DRIVE_BUNDLE"
+export APP_PID=""
+: >"$SIGNALED"
+write_procs \
+  "111|$JOHN|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN" \
+  "333|$DRIVE_BIN|$DRIVE_BIN" \
+  "444|$IMP_BIN|$IMP_BIN"
+stop_verified_drive_pids 222
+if [[ -s "$SIGNALED" ]]; then
+  printf 'a single drive pid was signaled while another copy was running: %s\n' "$(cat "$SIGNALED")" >&2
+  exit 1
+fi
+stop_verified_drive_pids 111 222 333 444
+signaled="$(cat "$SIGNALED")"
+case "$signaled" in
+  *111*|*444*)
+    printf 'stop_verified_drive_pids signaled a pid that is not this drive copy: %s\n' "$signaled" >&2
+    exit 1
+    ;;
+esac
+if [[ "$signaled" != *222* || "$signaled" != *333* ]]; then
+  printf 'verified drive copies were not both stopped: %s\n' "$signaled" >&2
+  exit 1
+fi
+write_procs \
+  "111|$JOHN|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN" \
+  "444|$IMP_BIN|$IMP_BIN"
+: >"$SIGNALED"
+APP_PID=111
+if signal_verified_app_pid -9; then
+  printf 'signal_verified_app_pid accepted the product pid\n' >&2
+  exit 1
+fi
+APP_PID=444
+if signal_verified_app_pid -TERM; then
+  printf 'signal_verified_app_pid accepted an impostor with the drive name\n' >&2
+  exit 1
+fi
+if [[ -s "$SIGNALED" ]]; then
+  printf 'unverified APP_PID was signaled: %s\n' "$(cat "$SIGNALED")" >&2
+  exit 1
+fi
+APP_PID=222
+signal_verified_app_pid -TERM
+if ! grep -x 222 "$SIGNALED" >/dev/null; then
+  printf 'verified APP_PID was not signaled\n' >&2
+  exit 1
+fi
+if grep -x -e 111 -e 444 "$SIGNALED" >/dev/null; then
+  printf 'verified signal also hit another pid\n' >&2
+  exit 1
+fi
 
 printf '%s\n' "isolation self-test ok"
 printf '%s\n' "drive-mac pid test ok"
