@@ -10,10 +10,10 @@ import {
   isRecord,
   messageErrors,
 } from "../protocol/validate.ts";
-import { ChatLog } from "./chat-log.ts";
-import { JournalReflector, type Reflector } from "./reflect.ts";
+import { ChatLog, HISTORY_TURN_CAP } from "./chat-log.ts";
+import type { Reflector } from "./reflect.ts";
 import { SqliteMemoryStore } from "./sqlite-store.ts";
-import type { Memory } from "./types.ts";
+import type { Memory, TurnRecord } from "./types.ts";
 
 const dirs: string[] = [];
 
@@ -202,18 +202,71 @@ describe("chat log wired into the core", () => {
     store.close();
   });
 
+  it("applies the 20-turn cap after forgotten turns are removed", async () => {
+    const store = SqliteMemoryStore.open(tempDbPath(), { now: () => 5_000 });
+    store.appendSession({
+      id: "conv",
+      surface: "popup",
+      startedAt: 1,
+      endedAt: null,
+      summary: null,
+    });
+    const stored = (index: number): TurnRecord => ({
+      id: `t-${index}`,
+      sessionId: "conv",
+      role: "user",
+      content: `live-${index}`,
+      tainted: false,
+      model: null,
+      egress: false,
+      escalatedFrom: null,
+      tokensIn: null,
+      tokensCached: null,
+      tokensOut: null,
+      costUsd: null,
+      latencyMs: null,
+      createdAt: 100 + index,
+    });
+    for (let index = 0; index < 30; index += 1) {
+      store.appendTurn(stored(index));
+    }
+    for (let index = HISTORY_TURN_CAP; index < 30; index += 1) {
+      store.forgetTurn(`t-${index}`, "2026-10-25T00:00:00.000Z", []);
+    }
+    const log = new ChatLog(store);
+    const text = (await log.messagesFor("conv", "next"))
+      .map((message) => message.content)
+      .join("\n");
+    expect(text).toContain("live-0");
+    expect(text).toContain(`live-${HISTORY_TURN_CAP - 1}`);
+    expect(text).not.toContain(`live-${HISTORY_TURN_CAP}`);
+    store.close();
+  });
+
   it("reflects the session a new conversation ends, before that turn", async () => {
     const path = tempDbPath();
     const seen: ModelMessage[][] = [];
     const store = SqliteMemoryStore.open(path, { now: () => 2_000 });
-    const journal = new JournalReflector(store.database(), () =>
-      store.currentTime(),
-    );
     const reflected: Array<{ id: string; opts: unknown }> = [];
     const reflector: Reflector = {
       async reflect(sessionId, opts) {
         reflected.push({ id: sessionId, opts });
-        await journal.reflect(sessionId);
+        const createdAt = store.currentTime();
+        const day = new Date(createdAt).toISOString().slice(0, 10);
+        store
+          .database()
+          .prepare(
+            `INSERT OR IGNORE INTO journal
+              (id, day, entry, session_id, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(
+            `reflect-${sessionId}`,
+            day,
+            `reflected ${sessionId}`,
+            sessionId,
+            createdAt,
+          );
       },
     };
     const harness = coreFor(

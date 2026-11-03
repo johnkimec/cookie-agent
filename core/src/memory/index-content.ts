@@ -29,12 +29,6 @@ export interface ContentIndexerOptions {
    * does not fill vec tables with fake vectors.
    */
   available?: () => Promise<boolean>;
-  /**
-   * Turn ids to leave unindexed. The stdio core passes
-   * `readForgottenTurnIds`. A missing callback skips nothing.
-   * Rows in `forgotten_turns` are included when that table exists.
-   */
-  forgottenTurnIds?: () => Iterable<string>;
 }
 
 interface PendingTurn {
@@ -91,8 +85,8 @@ export const INDEX_TURN_ATTEMPT_LIMIT = 3;
  * A failed turn batch stops the rest of the turn pass and counts one
  * attempt for each turn in that batch. Facts still run afterward.
  * After `INDEX_TURN_ATTEMPT_LIMIT` attempts the turn is skipped so a
- * later turn can index. Turns named by `forgottenTurnIds`, or stored in
- * `forgotten_turns` when that table exists, are not embedded.
+ * later turn can index. `pendingTurns` skips a forgotten turn with one
+ * `NOT EXISTS` on `forgotten_turns.turn_id`.
  */
 export class ContentIndexer {
   private readonly db: Database.Database;
@@ -101,7 +95,6 @@ export class ContentIndexer {
   private readonly now: () => number;
   private readonly model: string;
   private readonly available: () => Promise<boolean>;
-  private readonly forgottenTurnIds: (() => Iterable<string>) | null;
   private readonly turnAttempts = new Map<string, number>();
 
   constructor(options: ContentIndexerOptions) {
@@ -111,7 +104,6 @@ export class ContentIndexer {
     this.now = options.now ?? (() => Date.now());
     this.model = options.model ?? EMBED_MODEL_ID;
     this.available = options.available ?? (async () => true);
-    this.forgottenTurnIds = options.forgottenTurnIds ?? null;
   }
 
   async indexPending(): Promise<IndexStats> {
@@ -208,17 +200,16 @@ export class ContentIndexer {
             WHERE e.source = 'turn' AND e.source_id = t.id AND e.model = ?
           ) AS indexed
          FROM turns t
+         WHERE NOT EXISTS (
+           SELECT 1 FROM forgotten_turns f WHERE f.turn_id = t.id
+         )
          ORDER BY t.created_at, t.id`,
       )
       .all(this.model) as Array<PendingTurn & { indexed: number }>;
-    const forgotten = this.forgottenIds();
     const pending: PendingTurn[] = [];
     for (const row of rows) {
       const expected = chunkText(row.content).length;
       if (expected === 0 || row.indexed === expected) {
-        continue;
-      }
-      if (forgotten.has(row.id)) {
         continue;
       }
       const attempts = this.turnAttempts.get(row.id) ?? 0;
@@ -241,6 +232,7 @@ export class ContentIndexer {
         `SELECT id, text FROM facts f
          WHERE f.superseded_by IS NULL
            AND (f.valid_until IS NULL OR f.valid_until > ?)
+           AND (f.subject IS NULL OR f.subject != 'memory:tombstone')
            AND NOT EXISTS (
              SELECT 1 FROM embed_index e
              WHERE e.source = 'fact' AND e.source_id = f.id AND e.model = ?
@@ -400,25 +392,6 @@ export class ContentIndexer {
     }
   }
 
-  private forgottenIds(): Set<string> {
-    const ids = new Set<string>();
-    if (this.forgottenTurnIds !== null) {
-      try {
-        for (const id of this.forgottenTurnIds()) {
-          if (typeof id === "string" && id.length > 0) {
-            ids.add(id);
-          }
-        }
-      } catch {
-        // A bad callback must not skip the pass.
-      }
-    }
-    for (const id of forgottenTurnIdsFromTable(this.db)) {
-      ids.add(id);
-    }
-    return ids;
-  }
-
   private chunkIds(turnId: string): string[] {
     const rows = this.db
       .prepare(
@@ -555,43 +528,6 @@ function isTransientIndexError(error: unknown): boolean {
     current = record.cause;
   }
   return false;
-}
-
-/**
- * Ids from `forgotten_turns` when that table exists.
- * #18 owns the table. `turn_id` wins; otherwise `id`.
- * A missing table, or a query error, yields nothing.
- */
-function forgottenTurnIdsFromTable(db: Database.Database): string[] {
-  let columns: Array<{ name: string }>;
-  try {
-    columns = db
-      .prepare("SELECT name FROM pragma_table_info('forgotten_turns')")
-      .all() as Array<{ name: string }>;
-  } catch {
-    return [];
-  }
-  if (columns.length === 0) {
-    return [];
-  }
-  const names = new Set(columns.map((column) => column.name));
-  let sql: string | null = null;
-  if (names.has("turn_id")) {
-    sql = "SELECT turn_id AS id FROM forgotten_turns";
-  } else if (names.has("id")) {
-    sql = "SELECT id FROM forgotten_turns";
-  }
-  if (sql === null) {
-    return [];
-  }
-  try {
-    const rows = db.prepare(sql).all() as Array<{ id: unknown }>;
-    return rows
-      .map((row) => row.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-  } catch {
-    return [];
-  }
 }
 
 function hasEmbedMany(embedder: Embedder): embedder is Embedder & {

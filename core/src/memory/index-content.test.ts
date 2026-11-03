@@ -392,6 +392,7 @@ describe("content indexer", () => {
       vectors: {
         upsert: (table, id, embedding) => inner.upsert(table, id, embedding),
         knn: (table, query, k) => inner.knn(table, query, k),
+        has: (table, id) => inner.has(table, id),
         delete: async (ids: string[]) => {
           if (ids.includes("dead")) {
             throw new Error("sweep throws");
@@ -516,83 +517,15 @@ describe("content indexer", () => {
     );
     insert.run("old", "forget this turn", 1);
     insert.run("sib", "keep this turn", 2);
-    db.exec("CREATE TABLE forgotten_turns (turn_id TEXT PRIMARY KEY)");
-    db.prepare("INSERT INTO forgotten_turns (turn_id) VALUES ('old')").run();
+    db.prepare(
+      "INSERT INTO forgotten_turns (turn_id, forgotten_at, fact_ids) VALUES ('old', '2026-10-25T00:00:00.000Z', '[]')",
+    ).run();
     const indexed = await indexer.indexPending();
     expect(indexed.turns).toBe(1);
     expect(indexed.skipped).toBe(false);
     expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
     expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
     expect(calls.some((text) => text.includes("forget this turn"))).toBe(false);
-    db.close();
-  });
-
-  it("skips a forgotten_turns row keyed by id", async () => {
-    const db = openMemoryDatabase(tempDbPath());
-    const indexer = new ContentIndexer({
-      db,
-      embedder: {
-        async embed(text: string): Promise<Float32Array> {
-          return vectorFor(text);
-        },
-      },
-      vectors: new SqliteVecIndex(db),
-      now: () => 50,
-      model: "test-embed",
-    });
-    db.prepare(
-      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
-    ).run();
-    db.prepare(
-      `INSERT INTO turns (id, session_id, role, content, created_at)
-       VALUES ('old', 'ses', 'user', 'forget this turn', 1)`,
-    ).run();
-    db.prepare(
-      `INSERT INTO turns (id, session_id, role, content, created_at)
-       VALUES ('sib', 'ses', 'user', 'keep this turn', 2)`,
-    ).run();
-    db.exec("CREATE TABLE forgotten_turns (id TEXT PRIMARY KEY)");
-    db.prepare("INSERT INTO forgotten_turns (id) VALUES ('old')").run();
-    const indexed = await indexer.indexPending();
-    expect(indexed.turns).toBe(1);
-    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
-    expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
-    db.close();
-  });
-
-  it("skips turns named by forgottenTurnIds when the table is absent", async () => {
-    const db = openMemoryDatabase(tempDbPath());
-    const indexer = new ContentIndexer({
-      db,
-      embedder: {
-        async embed(text: string): Promise<Float32Array> {
-          return vectorFor(text);
-        },
-      },
-      vectors: new SqliteVecIndex(db),
-      now: () => 50,
-      model: "test-embed",
-      forgottenTurnIds: () => ["old"],
-    });
-    db.prepare(
-      "INSERT INTO sessions (id, surface, started_at) VALUES ('ses', 'popup', 1)",
-    ).run();
-    db.prepare(
-      `INSERT INTO turns (id, session_id, role, content, created_at)
-       VALUES ('old', 'ses', 'user', 'forget this turn', 1)`,
-    ).run();
-    db.prepare(
-      `INSERT INTO turns (id, session_id, role, content, created_at)
-       VALUES ('sib', 'ses', 'user', 'keep this turn', 2)`,
-    ).run();
-    const tables = db
-      .prepare("SELECT name FROM sqlite_master WHERE name = 'forgotten_turns'")
-      .all();
-    expect(tables).toEqual([]);
-    const indexed = await indexer.indexPending();
-    expect(indexed.turns).toBe(1);
-    expect(countRows(db, "embed_index", "source_id = 'old'")).toBe(0);
-    expect(countRows(db, "embed_index", "source_id = 'sib'")).toBe(1);
     db.close();
   });
 
