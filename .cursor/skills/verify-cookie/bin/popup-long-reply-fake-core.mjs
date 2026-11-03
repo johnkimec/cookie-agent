@@ -85,7 +85,7 @@ input.on("line", (line) => {
   if (method === "chat.send") {
     sendCount += 1;
     const messageId = `msg-${sendCount}`;
-    const pieces = sendCount === 1 ? [shortReply] : chunks;
+    const pieces = sendCount <= 3 ? [shortReply] : chunks;
     const conversationId = message.params?.conversationId ?? "conv-1";
     emit({
       jsonrpc: "2.0",

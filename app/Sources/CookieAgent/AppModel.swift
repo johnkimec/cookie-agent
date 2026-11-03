@@ -297,6 +297,16 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         await runtimeServers?.stop()
     }
 
+    /// A new turn used to zero the measured transcript, so the panel jumped
+    /// to the line estimate (about 303 pt for three short exchanges) until
+    /// the next layout pass. Keep the last measurement. Reset only when the
+    /// transcript is empty.
+    func prepareLayoutForTurnCount(_ count: Int) {
+        if count == 0 {
+            measuredTranscriptHeight = 0
+        }
+    }
+
     private func publishTurns() {
         publishTurnsNow()
     }
@@ -305,9 +315,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let apply = { [weak self] in
             guard let self else { return }
             let snap = self.turns.snapshot
-            if snap.conversation.turns.count != self.conversation.turns.count {
-                self.measuredTranscriptHeight = 0
-            }
+            self.prepareLayoutForTurnCount(snap.conversation.turns.count)
             self.conversation = snap.conversation
             if self.popupOpen != snap.popupOpen {
                 self.popupOpen = snap.popupOpen

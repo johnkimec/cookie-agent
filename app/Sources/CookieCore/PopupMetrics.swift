@@ -12,6 +12,17 @@ public enum PopupMetrics {
         return min(inputMaxLines, lines)
     }
 
+    /// The field's column inside the 560 pt row: padding, mascot, gaps, dot, button.
+    public static var draftFieldWidth: CGFloat {
+        max(120, PopupLayout.width - 32 - PopupLayout.mascot - 90)
+    }
+
+    /// Newlines and soft wraps. A long paste with no newline still grows the field.
+    public static func draftLineCount(_ text: String) -> Int {
+        let wrapped = estimatedLines(text, width: draftFieldWidth)
+        return min(inputMaxLines, max(inputLineCount(text), wrapped))
+    }
+
     /// Wrapped line count for a column `width` points wide. About 7 pt per character.
     public static func estimatedLines(_ text: String, width: CGFloat) -> Int {
         let charsPerLine = max(8, Int((width / 7).rounded(.down)))
@@ -36,7 +47,9 @@ public enum PopupMetrics {
         let notice: CGFloat = showsNotice ? 20 : 0
         return max(
             PopupLayout.collapsedHeight,
-            16 + clampedInputHeight(lineCount: inputLineCount(draft)) + notice
+            PopupLayout.inputRowVerticalPadding * 2
+                + clampedInputHeight(lineCount: draftLineCount(draft))
+                + notice
         )
     }
 

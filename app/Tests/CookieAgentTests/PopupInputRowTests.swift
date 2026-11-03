@@ -131,53 +131,137 @@ final class PopupInputRowTests: XCTestCase {
         host.frame = window.contentView?.bounds ?? .zero
         defer { window.close() }
         window.orderBack(nil)
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             host.layoutSubtreeIfNeeded()
-            if probe.row > 1, probe.transcript > 40 { break }
+            ReplyTextLayout.constrain(host)
+            if probe.row > 1, probe.transcript > 40, textContains("pass that along", in: host) {
+                break
+            }
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
+        XCTAssertTrue(textContains("pass that along", in: host), "markdown did not render the cookie rows")
         XCTAssertLessThanOrEqual(probe.row, 72)
-        XCTAssertGreaterThan(probe.transcript, 40)
-        XCTAssertLessThan(probe.transcript, 260, "three short exchanges do not stretch the transcript to the cap")
         let panel = probe.transcript + probe.row + 1
-        XCTAssertLessThan(panel, PopupLayout.maxHeight - 20)
+        let estimate = PopupMetrics.panelHeight(turnTexts: lines, draft: "", showsNotice: false)
+        XCTAssertGreaterThan(estimate, 300, "the line estimate is the near-full flash")
+        XCTAssertGreaterThan(panel, 180)
+        XCTAssertLessThan(panel, 290, "settled three exchanges stay under the 303 pt estimate")
+        XCTAssertLessThan(panel, estimate - 10)
     }
 
-    func testCookieMarkdownAndInlineMathWrap() {
-        // swift test never finishes MarkdownView's parse task, so no
-        // NSTextView appears. This is the string and the width modifiers
-        // the cookie column uses, measured the same way as the you reply.
-        let plain = "Einstein is best known for relativity. END-OF-REPLY-m1-popup. "
-            + "This second sentence is wider than the popup column and has to wrap."
-        let math = "Einstein is best known for relativity, and \\(a^2 + b^2\\) still holds. "
-            + "END-OF-REPLY-m1-popup. This second sentence is wider than the popup column and has to wrap."
-        let one = cookieColumnHeight("Hi")
-        let wrapped = cookieColumnHeight(plain)
-        let withMath = cookieColumnHeight(math)
-        XCTAssertGreaterThan(wrapped, one + 8, "markdown paragraph wraps a long line")
-        XCTAssertGreaterThan(withMath, one + 8, "inline LaTeX stays in the wrapping paragraph")
-        XCTAssertLessThan(wrapped, 220)
-        XCTAssertLessThan(withMath, 260)
-    }
-
-    private func cookieColumnHeight(_ text: String) -> CGFloat {
-        let shown = prepareReplyMarkdown(text)
-        XCTAssertEqual(shown.replacingOccurrences(of: "\u{200B}", with: ""), shown)
-        XCTAssertFalse(shown.contains("\u{200B}"))
-        let row = HStack(alignment: .top, spacing: 12) {
-            Text("cookie")
-                .font(.body.monospaced())
-                .frame(width: 64, alignment: .leading)
-            Text(shown)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 16)
-        .frame(width: PopupLayout.width, alignment: .topLeading)
+    func testRealCookieRowWraps() throws {
+        let token = String(repeating: "Transaction", count: 4)
+        let text = "Einstein is best known for relativity. END-OF-REPLY-m1-popup. "
+            + "The concept of TPS (Transactions per second) is how many commits a database finishes. "
+            + token + " `code` and \\(a^2 + b^2\\)."
+        let row = TurnRow(turn: ChatTurn(index: 0, role: .cookie, text: text, streaming: false, badge: CookieCopy.onDevice))
+            .padding(.horizontal, 16)
+            .frame(width: PopupLayout.width, alignment: .topLeading)
         let host = NSHostingView(rootView: row)
-        host.sizingOptions = [.intrinsicContentSize]
-        return host.fittingSize.height
+        host.frame = NSRect(x: 0, y: 0, width: PopupLayout.width, height: 400)
+        let window = NSWindow(
+            contentRect: host.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        let deadline = Date().addingTimeInterval(5)
+        var rendered: NSTextView?
+        while Date() < deadline {
+            host.layoutSubtreeIfNeeded()
+            ReplyTextLayout.constrain(host)
+            rendered = textView(containing: "END-OF-REPLY-m1-popup", in: host)
+            if rendered != nil { break }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        let textView = try XCTUnwrap(rendered, "MarkdownView did not render")
+        let box = try XCTUnwrap(find(CookieAX.turnCookie(0), in: host))
+        XCTAssertGreaterThan(box.bounds.height, 30, "a two-line cookie reply is taller than a clipped line")
+        XCTAssertEqual(box.accessibilityValue() as? String, text)
+        XCTAssertFalse(textView.string.contains("\u{200B}"))
+        XCTAssertTrue(textView.string.contains("END-OF-REPLY-m1-popup"))
+        XCTAssertTrue(textView.string.contains(token))
+        XCTAssertTrue(textView.string.contains("a^2 + b^2"))
+        let width = textView.textContainer?.containerSize.width ?? 10_000
+        XCTAssertLessThanOrEqual(width, PopupLayout.width - 32 - 64)
+        XCTAssertEqual(textView.textContainer?.lineBreakMode, .byWordWrapping)
+    }
+
+    func testNewTurnsKeepTheSettledHeight() {
+        let lines = [
+            "hey cookie!",
+            "Hi! How can I help you?",
+            "say something long",
+            "The concept of TPS (Transactions per second) is how many commits a database finishes.",
+            "this ui is kinda chopped",
+            "I'm sorry to hear that. I'll pass that along.",
+        ]
+        let model = AppModel()
+        // Three short exchanges settle near 260. The line estimate is 303.
+        let settledTranscript: CGFloat = 195
+        model.measuredTranscriptHeight = settledTranscript
+        let settled = panelFrame(lines: lines, measured: model.measuredTranscriptHeight)
+        let epsilon: CGFloat = 1
+        // A send publishes the you turn, then the cookie turn. Each publish
+        // used to zero the measurement and draw the estimate before the new
+        // one arrived.
+        for count in [5, 6] {
+            model.prepareLayoutForTurnCount(count)
+            let during = panelFrame(
+                lines: Array(lines.prefix(count)),
+                measured: model.measuredTranscriptHeight > 1 ? model.measuredTranscriptHeight : nil
+            )
+            XCTAssertLessThanOrEqual(
+                during,
+                settled + epsilon,
+                "panel during turn count \(count) flashed past the settled height"
+            )
+        }
+        XCTAssertEqual(model.measuredTranscriptHeight, settledTranscript)
+        let estimate = panelFrame(lines: lines, measured: nil)
+        XCTAssertGreaterThan(estimate, settled + 20, "the line estimate is the near-full flash")
+        model.prepareLayoutForTurnCount(0)
+        XCTAssertEqual(model.measuredTranscriptHeight, 0)
+        let cleared = panelFrame(lines: [], measured: model.measuredTranscriptHeight > 1 ? model.measuredTranscriptHeight : nil)
+        XCTAssertEqual(cleared, PopupLayout.collapsedHeight)
+    }
+
+    func testLongTokenWrapsInAWordWrappingTextContainer() {
+        let word = String(repeating: "Transaction", count: 8)
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 180, height: 400))
+        text.string = word
+        text.textContainer?.widthTracksTextView = true
+        text.textContainer?.containerSize = NSSize(width: 10_000, height: 20)
+        ReplyTextLayout.constrain(text)
+        let widthAfter = text.textContainer?.containerSize.width ?? 0
+        ReplyTextLayout.constrain(text)
+        guard let container = text.textContainer, let manager = text.layoutManager else {
+            XCTFail("missing text container")
+            return
+        }
+        manager.ensureLayout(for: container)
+        let used = manager.usedRect(for: container)
+        XCTAssertEqual(text.string, word)
+        XCTAssertFalse(text.string.contains("\u{200B}"))
+        XCTAssertEqual(container.lineBreakMode, .byWordWrapping)
+        XCTAssertFalse(container.widthTracksTextView)
+        XCTAssertEqual(container.containerSize.width, widthAfter, "a second pass does not reset the container")
+        XCTAssertLessThan(widthAfter, 180)
+        XCTAssertGreaterThan(used.height, 40, "an over-long token wraps by character inside the column")
+    }
+
+    private func panelFrame(lines: [String], measured: CGFloat?) -> CGFloat {
+        PopupMetrics.panelHeight(
+            turnTexts: lines,
+            draft: "",
+            showsNotice: false,
+            measuredTranscript: measured
+        )
     }
 
     private func previewModel(turns: [ChatTurn]) -> AppModel {
@@ -301,6 +385,18 @@ final class PopupInputRowTests: XCTestCase {
         }
         XCTAssertGreaterThan(height, 1)
         return height
+    }
+
+    private func textContains(_ needle: String, in view: NSView) -> Bool {
+        textView(containing: needle, in: view) != nil
+    }
+
+    private func textView(containing needle: String, in view: NSView) -> NSTextView? {
+        if let text = view as? NSTextView, text.string.contains(needle) { return text }
+        for subview in view.subviews {
+            if let found = textView(containing: needle, in: subview) { return found }
+        }
+        return nil
     }
 
     private func find(_ identifier: String, in view: NSView) -> NSView? {

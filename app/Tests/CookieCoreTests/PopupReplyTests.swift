@@ -718,6 +718,32 @@ final class PopupSizingTests: XCTestCase {
             PopupMetrics.inputRowHeight(draft: eight, showsNotice: false),
             PopupLayout.collapsedHeight
         )
+        let two = "one\ntwo"
+        XCTAssertGreaterThanOrEqual(
+            PopupMetrics.inputRowHeight(draft: two, showsNotice: false),
+            PopupLayout.inputRowVerticalPadding * 2 + PopupMetrics.inputLineHeight * 2
+        )
+        // One line plus the loading line used to be framed 4 pt short of the
+        // 24 pt vertical padding.
+        XCTAssertGreaterThanOrEqual(
+            PopupMetrics.inputRowHeight(draft: "hello", showsNotice: true),
+            PopupLayout.inputRowVerticalPadding * 2 + PopupMetrics.inputLineHeight + 20
+        )
+        let paste = String(repeating: "word ", count: 80)
+        XCTAssertFalse(paste.contains("\n"))
+        XCTAssertGreaterThan(
+            PopupMetrics.inputRowHeight(draft: paste, showsNotice: false),
+            PopupLayout.collapsedHeight
+        )
+    }
+
+    func testQuotedCoreCommandKeepsASpacedPath() {
+        let parts = CoreLaunch.splitCommand("node \"/tmp/my repo/popup-long-reply-fake-core.mjs\"")
+        XCTAssertEqual(parts, ["node", "/tmp/my repo/popup-long-reply-fake-core.mjs"])
+        XCTAssertEqual(
+            CoreLaunch.splitCommand("pnpm --filter @cookie-agent/core fake-core"),
+            ["pnpm", "--filter", "@cookie-agent/core", "fake-core"]
+        )
     }
 
     @MainActor
@@ -752,26 +778,6 @@ final class PopupSizingTests: XCTestCase {
     }
 
     @MainActor
-    func testLongTokenWrapsInAWordWrappingTextContainer() {
-        let word = String(repeating: "Transaction", count: 8)
-        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 180, height: 400))
-        text.string = word
-        text.isHorizontallyResizable = false
-        text.textContainer?.widthTracksTextView = false
-        text.textContainer?.lineBreakMode = .byWordWrapping
-        text.textContainer?.containerSize = NSSize(width: 180, height: CGFloat.greatestFiniteMagnitude)
-        guard let container = text.textContainer, let manager = text.layoutManager else {
-            XCTFail("missing text container")
-            return
-        }
-        manager.ensureLayout(for: container)
-        let used = manager.usedRect(for: container)
-        XCTAssertEqual(text.string, word)
-        XCTAssertFalse(text.string.contains("\u{200B}"))
-        XCTAssertGreaterThan(used.height, 40, "an over-long token wraps by character inside the column")
-    }
-
-    @MainActor
     func testLongSingleWordWrapsInsideTheColumn() {
         let word = String(repeating: "Transaction", count: 8)
         let one = laidOutTurnHeight("Hi")
@@ -790,6 +796,7 @@ final class PopupSizingTests: XCTestCase {
             "I'm sorry to hear that. I'll pass that along.",
         ]
         let estimated = PopupMetrics.panelHeight(turnTexts: texts, draft: "", showsNotice: false)
+        XCTAssertGreaterThan(estimated, 300, "the line estimate is the near-full flash")
         XCTAssertLessThan(estimated, PopupLayout.maxHeight)
         let measured = PopupMetrics.panelHeight(
             turnTexts: texts,

@@ -96,7 +96,8 @@ if [[ "$feature" == "popup-reply" ]]; then
     printf '%s\n' "not-ok" "popup-reply drives the long-reply fixture core, not --runtime real"
     exit 1
   fi
-  export COOKIE_CORE_COMMAND="node $ROOT/.cursor/skills/verify-cookie/bin/popup-long-reply-fake-core.mjs"
+  core_script="$ROOT/.cursor/skills/verify-cookie/bin/popup-long-reply-fake-core.mjs"
+  export COOKIE_CORE_COMMAND="node \"$core_script\""
 fi
 
 log() { printf '%s\n' "$*"; }
@@ -1241,8 +1242,8 @@ tell application "System Events"
     set rowHeight to (wTop + wHeight - mascotMid) * 2
     set rowTop to mascotTop - rowPad
     set gap to rowTop - replyBottom
-    if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= (wTop + wHeight + 4) then
-      set bottomPlace to "inside"
+    if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= rowTop then
+      set bottomPlace to "above"
     end if
   end tell
 end tell
@@ -1362,7 +1363,7 @@ def more_than_one_line(height):
     return height > 30
 ok = (
     56 <= row_height <= 72
-    and vals["bottom"] == "inside"
+    and vals["bottom"] == "above"
     and 4 < dot_width < 40
     and 36 < badge_width < 140
     and reply_width > badge_width * 2
@@ -1374,8 +1375,10 @@ ok = (
 )
 if mode == "long":
     ok = ok and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
+elif mode == "three":
+    # John's three exchanges settle near 260. The line estimate is about 303.
+    ok = ok and 120 < window_height < 290
 elif mode == "short":
-    # The long you line is on screen with the short cookie reply.
     ok = ok and more_than_one_line(you_height) and 80 < window_height < 260
 else:
     print("unknown mode " + mode)
@@ -1432,29 +1435,40 @@ PY
   fi
   log "empty height $empty_height row $empty_row"
   capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-empty.png
-  log "send short reply"
-  local you_long="hello from drive-mac. END-OF-REPLY-m1-popup. This you line is wider than the popup column and has to wrap so the tail stays visible."
-  send_chat "$you_long"
-  local ready=0
-  for attempt in $(seq 1 80); do
-    cookie_identified_value cookie.turn.cookie.0 > /tmp/cookie-drive-mac-short-chat.txt || true
-    cookie_identified_value cookie.turn.you.0 > /tmp/cookie-drive-mac-short-you.txt || true
-    if ! YOU_LONG="$you_long" python3 - /tmp/cookie-drive-mac-short-chat.txt /tmp/cookie-drive-mac-short-you.txt <<'PY'
+  log "send three short exchanges"
+  local you_lines=("hey cookie!" "say something long" "this ui is kinda chopped")
+  local index
+  for index in 0 1 2; do
+    send_chat "${you_lines[$index]}"
+    local turn_ready=0
+    local attempt
+    for attempt in $(seq 1 80); do
+      cookie_identified_value "cookie.turn.cookie.$index" > /tmp/cookie-drive-mac-short-chat.txt || true
+      cookie_identified_value "cookie.turn.you.$index" > /tmp/cookie-drive-mac-short-you.txt || true
+      if YOU_LINE="${you_lines[$index]}" python3 - /tmp/cookie-drive-mac-short-chat.txt /tmp/cookie-drive-mac-short-you.txt <<'PY'
 import os, pathlib, sys
 cookie = pathlib.Path(sys.argv[1]).read_text(errors="replace")
 you = pathlib.Path(sys.argv[2]).read_text(errors="replace")
 full = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
-you_full = os.environ["YOU_LONG"]
-cookie_ok = full in cookie and "Line 01" not in cookie
-you_ok = you_full in you and "END-OF-REPLY-m1-popup" in you
-sys.exit(0 if cookie_ok and you_ok else 1)
+sys.exit(0 if full in cookie and "Line 01" not in cookie and os.environ["YOU_LINE"] in you else 1)
 PY
-    then
+      then
+        turn_ready=1
+        break
+      fi
       sleep 0.25
-      continue
+    done
+    if [[ "$turn_ready" != "1" ]]; then
+      log "exchange $index"
+      cat /tmp/cookie-drive-mac-short-chat.txt 2>/dev/null || true
+      cat /tmp/cookie-drive-mac-short-you.txt 2>/dev/null || true
+      fail "exchange $index did not show the sentinel"
     fi
-    if popup_reply_metrics "$row_pad" cookie.turn.cookie.0 > /tmp/cookie-drive-mac-short-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
-      if popup_reply_metrics_ok short /tmp/cookie-drive-mac-short-metrics.txt; then
+  done
+  local ready=0
+  for attempt in $(seq 1 40); do
+    if popup_reply_metrics "$row_pad" cookie.turn.cookie.2 > /tmp/cookie-drive-mac-short-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if popup_reply_metrics_ok three /tmp/cookie-drive-mac-short-metrics.txt; then
         ready=1
         break
       fi
@@ -1462,21 +1476,19 @@ PY
     sleep 0.25
   done
   if [[ "$ready" != "1" ]]; then
-    log "short chat"
-    cat /tmp/cookie-drive-mac-short-chat.txt 2>/dev/null || true
-    log "short metrics"
+    log "three-exchange metrics"
     cat /tmp/cookie-drive-mac-short-metrics.txt 2>/dev/null || true
     cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
     dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
     cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
-    fail "short reply missed the wrap, the input-row height, or the gap"
+    fail "three exchanges missed the wrap, the input-row height, the gap, or the 290 pt cap"
   fi
   capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-short.png
   log "send long reply"
   send_chat
   ready=0
   for attempt in $(seq 1 80); do
-    cookie_identified_value cookie.turn.cookie.1 > /tmp/cookie-drive-mac-chat.txt || true
+    cookie_identified_value cookie.turn.cookie.3 > /tmp/cookie-drive-mac-chat.txt || true
     if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
@@ -1487,7 +1499,7 @@ PY
       sleep 0.25
       continue
     fi
-    if popup_reply_metrics "$row_pad" cookie.turn.cookie.1 > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+    if popup_reply_metrics "$row_pad" cookie.turn.cookie.3 > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
       if popup_reply_metrics_ok long /tmp/cookie-drive-mac-metrics.txt; then
         ready=1
         break

@@ -19,7 +19,8 @@ public enum CookieAX {
     public static func turnYou(_ index: Int) -> String { "cookie.turn.you.\(index)" }
     public static func turnCookie(_ index: Int) -> String { "cookie.turn.cookie.\(index)" }
     public static func badge(_ index: Int) -> String { "cookie.badge.on-device.\(index)" }
-    /// One on-device indicator in the input row. Not a pill on each reply.
+    /// The 8×8 on-device dot in the input row. Cookie replies also use
+    /// `badge(_:)` for a content-sized capsule with the same string.
     public static let onDeviceIndicator = "cookie.badge.on-device"
     public static let transcriptBottom = "cookie.popup.transcript-bottom"
 }

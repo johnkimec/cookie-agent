@@ -107,16 +107,20 @@ jobs:
 
           empty_w, empty_h = points("popup-empty.png")
           short_w, short_h = points("popup-short.png")
+          three_w, three_h = points("popup-three.png")
           long_w, long_h = points("popup-long.png")
-          if abs(empty_w - 560) > 2 or abs(short_w - 560) > 2 or abs(long_w - 560) > 2:
-              raise SystemExit(f"width {empty_w} {short_w} {long_w}")
+          if abs(empty_w - 560) > 2 or abs(short_w - 560) > 2 or abs(three_w - 560) > 2 or abs(long_w - 560) > 2:
+              raise SystemExit(f"width {empty_w} {short_w} {three_w} {long_w}")
           if not (40 < empty_h < 80):
               raise SystemExit(f"empty height {empty_h}")
-          if not (empty_h < short_h < 320):
+          if not (empty_h < short_h < 220):
               raise SystemExit(f"short height {short_h}")
+          # Measured three-exchange panel. The line estimate is about 303.
+          if not (180 < three_h < 290):
+              raise SystemExit(f"three height {three_h}")
           if abs(long_h - 320) > 1:
               raise SystemExit(f"long height {long_h}")
-          print(f"popup previews empty {empty_h:.0f} short {short_h:.0f} long {long_h:.0f}")
+          print(f"popup previews empty {empty_h:.0f} short {short_h:.0f} three {three_h:.0f} long {long_h:.0f}")
           PY
 
       - name: Upload popup previews

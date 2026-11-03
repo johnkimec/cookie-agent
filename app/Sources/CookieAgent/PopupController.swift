@@ -32,16 +32,26 @@ final class PopupHostingView: NSHostingView<PopupRoot> {
 /// width and word wrapping break a token that does not fit the column.
 enum ReplyTextLayout {
     static func constrain(_ view: NSView) {
-        if let text = view as? NSTextView, !(text is AskTextView) {
-            text.textContainer?.lineBreakMode = .byWordWrapping
-            text.textContainer?.maximumNumberOfLines = 0
-            let width = text.bounds.width
+        if let text = view as? NSTextView, !(text is AskTextView), let container = text.textContainer {
+            let inset = text.textContainerInset.width * 2
+            let padding = container.lineFragmentPadding * 2
+            let width = text.bounds.width - inset - padding
+            // Tracking would write the full view width back on the next
+            // layout and undo the inset. Set the container once, then only
+            // when the column actually changes.
             if width > 1 {
-                text.textContainer?.widthTracksTextView = true
-                text.textContainer?.containerSize = NSSize(
-                    width: width,
-                    height: CGFloat.greatestFiniteMagnitude
-                )
+                if container.lineBreakMode != .byWordWrapping {
+                    container.lineBreakMode = .byWordWrapping
+                }
+                if container.maximumNumberOfLines != 0 {
+                    container.maximumNumberOfLines = 0
+                }
+                if container.widthTracksTextView {
+                    container.widthTracksTextView = false
+                }
+                if abs(container.containerSize.width - width) > 0.5 {
+                    container.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+                }
             }
         }
         for subview in view.subviews {
@@ -426,7 +436,7 @@ struct PopupRoot: View {
     }
 
     private var fieldHeight: CGFloat {
-        PopupMetrics.clampedInputHeight(lineCount: PopupMetrics.inputLineCount(model.conversation.draft))
+        PopupMetrics.clampedInputHeight(lineCount: PopupMetrics.draftLineCount(model.conversation.draft))
     }
 
     private var inputRow: some View {
@@ -493,7 +503,8 @@ struct PopupRoot: View {
     }
 
     /// One status dot for the whole popup. The existing on-device string is
-    /// its accessibility label and tooltip. There is no per-reply pill.
+    /// its accessibility label and tooltip. Each cookie reply also shows that
+    /// string in a content-sized capsule.
     private var onDeviceIndicator: some View {
         ZStack {
             IdentifiedBox(

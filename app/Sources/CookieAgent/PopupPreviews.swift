@@ -6,7 +6,7 @@ import SwiftUI
 
 /// Offscreen popup renders for the macOS CI artifact. Set
 /// `COOKIE_RENDER_POPUP_PREVIEWS` to a directory and the app writes
-/// `popup-empty.png`, `popup-short.png`, and `popup-long.png`, then exits
+/// `popup-empty.png`, `popup-short.png`, `popup-three.png`, and `popup-long.png`, then exits
 /// before the core starts.
 ///
 /// `ImageRenderer` draws every `NSViewRepresentable` as a yellow prohibited
@@ -19,6 +19,7 @@ enum PopupPreviewRenderer {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try render(kind: "empty", model: emptyModel(), to: directory.appendingPathComponent("popup-empty.png"))
         try render(kind: "short", model: shortModel(), to: directory.appendingPathComponent("popup-short.png"))
+        try render(kind: "three", model: threeModel(), to: directory.appendingPathComponent("popup-three.png"))
         try render(kind: "long", model: longModel(), to: directory.appendingPathComponent("popup-long.png"))
     }
 
@@ -43,8 +44,18 @@ enum PopupPreviewRenderer {
         defer { window.close() }
         window.orderBack(nil)
         window.displayIfNeeded()
-        try waitUntilDrawn(kind: kind, in: host)
+        try waitUntilDrawn(kind: kind, in: host, model: model)
+        let measured = model.measuredTranscriptHeight
+        let fitted = PopupMetrics.panelHeight(
+            turnTexts: model.conversation.turns.map(\.text),
+            draft: model.conversation.draft,
+            showsNotice: false,
+            measuredTranscript: measured > 1 ? measured : nil
+        )
+        host.frame = NSRect(x: 0, y: 0, width: PopupLayout.width, height: fitted)
+        window.setContentSize(NSSize(width: PopupLayout.width, height: fitted))
         host.layoutSubtreeIfNeeded()
+        ReplyTextLayout.constrain(host)
         host.display()
         window.displayIfNeeded()
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
@@ -55,15 +66,16 @@ enum PopupPreviewRenderer {
             throw PreviewError("could not encode \(kind)")
         }
         try png.write(to: url)
-        print("popup preview \(kind) \(Int(height.rounded()))pt \(url.path)")
+        print("popup preview \(kind) \(Int(fitted.rounded()))pt \(url.path)")
     }
 
     /// Markdown parses in `.task`. A single layout pass snapshots an empty
     /// transcript, so spin the run loop until the cookie text is in a text view.
-    private static func waitUntilDrawn(kind: String, in host: NSView) throws {
+    private static func waitUntilDrawn(kind: String, in host: NSView, model: AppModel) throws {
         let needle: String? = switch kind {
         case "empty": nil
         case "short": "END-OF-REPLY-m1-popup"
+        case "three": "pass that along"
         default: "The transcript grows"
         }
         let deadline = Date().addingTimeInterval(5)
@@ -72,7 +84,9 @@ enum PopupPreviewRenderer {
             ReplyTextLayout.constrain(host)
             let field = view(identified: CookieAX.popupInput, in: host) != nil
             let button = view(identified: CookieAX.popupSend, in: host) != nil
-            if field, button, needle == nil || containsText(needle!, in: host) {
+            let measured = kind == "empty" || model.measuredTranscriptHeight > 1
+            let textReady = needle == nil || containsText(needle ?? "", in: host)
+            if field, button, measured, textReady {
                 return
             }
             // `.common` is kCFRunLoopCommonModes, which CFRunLoopRunSpecific
@@ -109,6 +123,31 @@ enum PopupPreviewRenderer {
                 index: 0,
                 role: .cookie,
                 text: "Einstein is best known for relativity. END-OF-REPLY-m1-popup",
+                streaming: false,
+                badge: CookieCopy.onDevice
+            ),
+        ])
+        return model
+    }
+
+    private static func threeModel() -> AppModel {
+        let model = emptyModel()
+        model.conversation = PopupConversation(turns: [
+            ChatTurn(index: 0, role: .you, text: "hey cookie!", streaming: false, badge: nil),
+            ChatTurn(index: 0, role: .cookie, text: "Hi! How can I help you?", streaming: false, badge: CookieCopy.onDevice),
+            ChatTurn(index: 1, role: .you, text: "say something long", streaming: false, badge: nil),
+            ChatTurn(
+                index: 1,
+                role: .cookie,
+                text: "The concept of TPS (Transactions per second) is how many commits a database finishes.",
+                streaming: false,
+                badge: CookieCopy.onDevice
+            ),
+            ChatTurn(index: 2, role: .you, text: "this ui is kinda chopped", streaming: false, badge: nil),
+            ChatTurn(
+                index: 2,
+                role: .cookie,
+                text: "I'm sorry to hear that. I'll pass that along.",
                 streaming: false,
                 badge: CookieCopy.onDevice
             ),

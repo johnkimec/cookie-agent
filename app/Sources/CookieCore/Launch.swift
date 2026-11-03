@@ -72,7 +72,7 @@ public struct CoreLaunch: Equatable, Sendable {
             env["COOKIE_EMBED_PORT"] = String(embedPort)
         }
         let command = env["COOKIE_CORE_COMMAND"].flatMap { $0.isEmpty ? nil : $0 } ?? defaultCommand
-        let parts = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let parts = splitCommand(command)
         let search = toolSearchPaths ?? Self.toolSearchPaths(
             environment: env,
             homeDirectory: homeDirectory
@@ -158,6 +158,36 @@ public struct CoreLaunch: Equatable, Sendable {
             dirs.append(extra)
         }
         return dirs
+    }
+
+    /// Whitespace splits the command, except inside single or double quotes,
+    /// so a worktree path with a space stays one argument.
+    public static func splitCommand(_ command: String) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        var quote: Character?
+        for character in command {
+            if let active = quote, character == active {
+                quote = nil
+                continue
+            }
+            if quote == nil, character == "\"" || character == "'" {
+                quote = character
+                continue
+            }
+            if quote == nil, character.isWhitespace {
+                if !current.isEmpty {
+                    parts.append(current)
+                    current = ""
+                }
+                continue
+            }
+            current.append(character)
+        }
+        if !current.isEmpty {
+            parts.append(current)
+        }
+        return parts
     }
 
     public static func resolveTool(_ name: String, searchPaths: [String]) -> String? {
