@@ -3,6 +3,7 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=drive-mac-pid.sh
 source "$BIN_DIR/drive-mac-pid.sh"
 
@@ -27,6 +28,34 @@ if [[ "$*" == "-axww -o pid=,comm=" ]]; then
 fi
 if [[ "$1" == "-ww" && "$2" == "-p" && "$4" == "-o" && "$5" == "comm=" ]]; then
   awk -F '|' -v pid="$3" '$1 == pid { print $2; exit }' "$FIXTURE/procs"
+  exit 0
+fi
+if [[ "$*" == "-axww -o pid=,ppid=,comm=" ]]; then
+  awk -F '|' '
+    {
+      pid = $1
+      ppid = $4
+      comm = $2
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", ppid)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", comm)
+      if (pid == "") next
+      print pid, ppid, comm
+    }
+  ' "$FIXTURE/procs"
+  exit 0
+fi
+if [[ "$*" == "-axww -o pid=,command=" ]]; then
+  awk -F '|' '
+    {
+      pid = $1
+      cmd = $5
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", cmd)
+      if (pid == "") next
+      print pid, cmd
+    }
+  ' "$FIXTURE/procs"
   exit 0
 fi
 printf 'unexpected ps %s\n' "$*" >&2
@@ -1517,6 +1546,199 @@ fi
 got="$(launch_model_path '~other/models/Qwen.gguf' 'fallback.gguf')"
 if [[ "$got" != "~other/models/Qwen.gguf" ]]; then
   printf 'other-user tilde was expanded to %s\n' "$got" >&2
+  exit 1
+fi
+
+# orphan_reap_check counts only llama-server processes this drive started.
+LLAMA="/opt/homebrew/bin/llama-server"
+JOHN_LOG="/Users/john/Library/Application Support/com.johnkimec.cookie-agent/logs/llama-server.log"
+JOHN_CMD="$LLAMA -m /Users/john/cookie-runtime/models/Qwen3.6-35B-A3B-Q4_K_M.gguf --host 127.0.0.1 --port 8080"
+DRIVE_DATA="$FIXTURE/drive-data"
+OTHER_DATA="$FIXTURE/drive-data-extra"
+OUR_LOG="$DRIVE_DATA/logs/llama-server.log"
+mkdir -p "$DRIVE_DATA/logs" "$OTHER_DATA/logs"
+
+normalize_pids() {
+  local line out=""
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ -z "$out" ]]; then
+      out="$line"
+    else
+      out="$out $line"
+    fi
+  done < <(printf '%s\n' "$1" | awk 'NF' | sort -n)
+  printf '%s\n' "$out"
+}
+
+expect_owned_llama() {
+  local label="$1" runtime="$2" chat="$3" embed="$4" want="$5" verdict="$6"
+  local got err status norm count
+  err="$(mktemp)"
+  : >"$SIGNALED"
+  status=0
+  got="$(drive_owned_llama_pids 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "$DRIVE_DATA" "$chat" "$embed" 2>"$err")" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf '%s: owned pids failed: %s\n' "$label" "$(cat "$err")" >&2
+    exit 1
+  fi
+  if [[ -s "$err" ]]; then
+    printf '%s: owned pids wrote a reason: %s\n' "$label" "$(cat "$err")" >&2
+    exit 1
+  fi
+  rm -f "$err"
+  norm="$(normalize_pids "$got")"
+  if [[ "$norm" != "$want" ]]; then
+    printf '%s: owned [%s], want [%s]\n' "$label" "${norm:-empty}" "${want:-empty}" >&2
+    exit 1
+  fi
+  count=0
+  if [[ -n "$norm" ]]; then
+    count="$(printf '%s\n' "$norm" | wc -w | tr -d ' ')"
+  fi
+  if [[ "$verdict" == "pass" ]]; then
+    if ! orphan_reap_within_limit "$runtime" "$count"; then
+      printf '%s: count %s should pass for %s\n' "$label" "$count" "$runtime" >&2
+      exit 1
+    fi
+  else
+    if orphan_reap_within_limit "$runtime" "$count"; then
+      printf '%s: count %s should fail for %s\n' "$label" "$count" "$runtime" >&2
+      exit 1
+    fi
+  fi
+  if [[ -s "$SIGNALED" ]]; then
+    printf '%s: a pid was signaled: %s\n' "$label" "$(cat "$SIGNALED")" >&2
+    exit 1
+  fi
+}
+
+expect_owned_closed() {
+  local label="$1" pid="$2" name="$3" bundle="$4" needle="${5:-}"
+  local got err status reason
+  err="$(mktemp)"
+  : >"$SIGNALED"
+  status=0
+  got="$(drive_owned_llama_pids "$pid" "$DRIVE_BIN" "$name" "$bundle" "$DRIVE_DATA" 18080 18081 2>"$err")" || status=$?
+  reason="$(cat "$err")"
+  rm -f "$err"
+  if [[ "$status" -eq 0 ]]; then
+    printf '%s: expected a closed failure\n' "$label" >&2
+    exit 1
+  fi
+  if [[ -n "$(printf '%s' "$got" | tr -d '[:space:]')" ]]; then
+    printf '%s: closed failure printed pids: %s\n' "$label" "$got" >&2
+    exit 1
+  fi
+  if [[ -z "$reason" ]]; then
+    printf '%s: closed failure had no reason\n' "$label" >&2
+    exit 1
+  fi
+  if [[ -n "$needle" && "$reason" != *"$needle"* ]]; then
+    printf '%s: reason [%s] does not contain %s\n' "$label" "$reason" "$needle" >&2
+    exit 1
+  fi
+  if [[ -s "$SIGNALED" ]]; then
+    printf '%s: closed failure signaled %s\n' "$label" "$(cat "$SIGNALED")" >&2
+    exit 1
+  fi
+}
+
+if ! orphan_reap_within_limit fake 0; then
+  printf 'fake count 0 should pass\n' >&2
+  exit 1
+fi
+if orphan_reap_within_limit fake 1; then
+  printf 'fake count 1 should fail\n' >&2
+  exit 1
+fi
+if ! orphan_reap_within_limit real 2; then
+  printf 'real count 2 should pass\n' >&2
+  exit 1
+fi
+if orphan_reap_within_limit real 3; then
+  printf 'real count 3 should fail\n' >&2
+  exit 1
+fi
+
+# (a) John's llama-server is running, including one reparented onto his log,
+# and the drive has no llama child. The check passes.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "910|$LLAMA|$LLAMA;$JOHN_LOG|1|$JOHN_CMD" \
+  "911|$LLAMA|$LLAMA|111|$JOHN_CMD"
+expect_owned_llama "a-john-reaped" fake 8080 8081 "" pass
+expect_owned_llama "a-john-reaped-real" real 8080 8081 "" pass
+
+# (b) A leftover drive llama-server whose parent chain reaches the drive,
+# with John's server still up. Fake mode fails.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "300|/usr/local/bin/node|/usr/local/bin/node|222|/usr/local/bin/node src/index.ts" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "901|$LLAMA|$LLAMA|300|$LLAMA --host 127.0.0.1 --port 8080"
+expect_owned_llama "b-leftover-chain" fake 8080 8081 "901" fail
+
+# (c) Reparented to pid 1. Data dir alone, then port alone. John's server
+# stays in the table and is not counted. Fake mode fails.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "902|$LLAMA|$LLAMA;$OUR_LOG|1|$LLAMA --host 127.0.0.1 --port 9999"
+expect_owned_llama "c-reparented-data-dir" fake 18080 18081 "902" fail
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "903|$LLAMA|$LLAMA|1|$LLAMA --host 127.0.0.1 --port 18080"
+expect_owned_llama "c-reparented-port" fake 18080 18081 "903" fail
+
+# (d) Unrelated llama-server processes are ignored: another parent, a
+# reparented server on a different port, a sibling data directory, and a
+# port token that only contains the drive port as a prefix.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "50|/usr/sbin/unrelated|/usr/sbin/unrelated|1|/usr/sbin/unrelated" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "904|$LLAMA|$LLAMA;$OTHER_DATA/logs/llama-server.log|50|$LLAMA --host 127.0.0.1 --port 7777" \
+  "907|$LLAMA|$LLAMA;$OTHER_DATA/logs/llama-server.log|1|$LLAMA --host 127.0.0.1 --port 9999" \
+  "908|$LLAMA|$LLAMA|1|$LLAMA --host 127.0.0.1 --port 180801"
+expect_owned_llama "d-unrelated" fake 18080 18081 "" pass
+
+# Real mode still fails when this drive owns a third server.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "901|$LLAMA|$LLAMA|222|$LLAMA --host 127.0.0.1 --port 8080" \
+  "902|$LLAMA|$LLAMA|222|$LLAMA --host 127.0.0.1 --port 8081" \
+  "903|$LLAMA|$LLAMA;$OUR_LOG|1|$LLAMA --host 127.0.0.1 --port 9999"
+expect_owned_llama "real-third" real 8080 8081 "901 902 903" fail
+
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN"
+expect_owned_closed "not-the-drive" 111 "$DRIVE_NAME" "$DRIVE_BUNDLE" "executable is not"
+expect_owned_closed "empty-identity" 222 "" "" "identity was not recorded"
+
+write_procs \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "906|$LLAMA|$LLAMA|4242|$LLAMA --host 127.0.0.1 --port 18080"
+expect_owned_closed "missing-parent" 222 "$DRIVE_NAME" "$DRIVE_BUNDLE" "906"
+
+status=0
+got="$(drive_owned_llama_pids 222 "$DRIVE_BIN" "$DRIVE_NAME" "$DRIVE_BUNDLE" "" 18080 18081 2>"$FIXTURE/empty-data.err")" || status=$?
+if [[ "$status" -eq 0 ]]; then
+  printf 'empty COOKIE_DATA_DIR was accepted\n' >&2
+  exit 1
+fi
+if [[ "$(cat "$FIXTURE/empty-data.err")" != *"COOKIE_DATA_DIR is empty"* ]]; then
+  printf 'empty data dir reason: %s\n' "$(cat "$FIXTURE/empty-data.err")" >&2
   exit 1
 fi
 

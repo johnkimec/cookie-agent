@@ -711,3 +711,338 @@ PY
   fi
   isolation_fail "$reason"
 }
+
+# Basename of a ps comm or path. The value may contain spaces (Cookie Agent.app).
+comm_basename() {
+  local name="$1"
+  name="${name#"${name%%[![:space:]]*}"}"
+  name="${name%"${name##*[![:space:]]}"}"
+  name="${name##*/}"
+  printf '%s\n' "$name"
+}
+
+# True when $1 is $2 or a path inside it. A missing realpath is not a match.
+path_is_under() {
+  local path="$1" root="$2" real
+  [[ -n "$path" && -n "$root" && "$root" != "/" ]] || return 1
+  real="$(real_path "$path" 2>/dev/null || true)"
+  [[ -n "$real" ]] || return 1
+  [[ "$real" == "$root" || "$real" == "$root"/* ]]
+}
+
+# John's product data directory. The per-run id ends in .drive.<hex>, so the
+# slash after the product id keeps that directory from matching.
+path_is_product_data() {
+  local path="$1" real
+  real="$(real_path "$path" 2>/dev/null || true)"
+  [[ -n "$real" ]] || return 1
+  case "$real" in
+    */com.johnkimec.cookie-agent|*/com.johnkimec.cookie-agent/*) return 0 ;;
+  esac
+  return 1
+}
+
+# --port as its own argv entry, the same shape isOurServer requires.
+command_has_port() {
+  local cmd="$1" port="$2"
+  [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "$cmd" | awk -v port="$port" '
+    BEGIN { found = 0 }
+    {
+      n = split($0, fields, /[[:space:]]+/)
+      for (i = 1; i < n; i++) {
+        if (fields[i] == "--port" && fields[i + 1] == port) found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+process_open_paths() {
+  local pid="$1"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  lsof -nP -p "$pid" -Fn 2>/dev/null | awk '/^n/ { sub(/^n/, ""); if ($0 != "") print }'
+}
+
+# under foreign product, each 0 or 1. under means a file in this data dir.
+llama_open_marks() {
+  local pid="$1" data_real="$2" path base under=0 foreign=0 product=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    if path_is_under "$path" "$data_real"; then
+      under=1
+    fi
+    base="$(comm_basename "$path")"
+    if [[ "$base" == "llama-server.log" || "$base" == "llama-embed.log" ]]; then
+      if ! path_is_under "$path" "$data_real"; then
+        foreign=1
+      fi
+    fi
+    if path_is_product_data "$path" && ! path_is_under "$path" "$data_real"; then
+      product=1
+    fi
+  done < <(process_open_paths "$pid")
+  printf '%s %s %s\n' "$under" "$foreign" "$product"
+}
+
+lookup_ppid_comm() {
+  local table="$1" want="$2" line pid rest
+  while IFS= read -r line; do
+    pid="${line%%$'\t'*}"
+    [[ "$pid" == "$want" ]] || continue
+    rest="${line#*$'\t'}"
+    printf '%s\n' "$rest"
+    return 0
+  done <<< "$table"
+  return 1
+}
+
+command_for_pid() {
+  local table="$1" want="$2" line pid cmd
+  while IFS= read -r line; do
+    pid="${line%%$'\t'*}"
+    [[ "$pid" == "$want" ]] || continue
+    cmd="${line#*$'\t'}"
+    printf '%s\n' "$cmd"
+    return 0
+  done <<< "$table"
+  return 1
+}
+
+# First line is "tree" or "root". Later lines are ancestor basenames.
+# tree: the drive pid is on the chain. root: the chain reached launchd, init,
+# or pid 0/1 without the drive pid (the parent already exited).
+# Return 1 when a ppid is missing, the chain cycles, or it is too deep.
+classify_llama_chain() {
+  local start_pid="$1" drive_pid="$2" table="$3"
+  local current row ppid comm base seen=" $start_pid " depth=0 ancestors=""
+  row="$(lookup_ppid_comm "$table" "$start_pid")" || return 1
+  current="${row%%$'\t'*}"
+  while [[ "$depth" -lt 64 ]]; do
+    depth=$((depth + 1))
+    if [[ ! "$current" =~ ^[0-9]+$ ]]; then
+      return 1
+    fi
+    if [[ "$current" == "$drive_pid" ]]; then
+      printf '%s\n' "tree"
+      return 0
+    fi
+    if [[ "$current" == "0" || "$current" == "1" ]]; then
+      printf '%s\n' "root"
+      if [[ -n "$ancestors" ]]; then
+        printf '%s\n' "$ancestors"
+      fi
+      return 0
+    fi
+    case " $seen " in
+      *" $current "*) return 1 ;;
+    esac
+    seen="$seen$current "
+    row="$(lookup_ppid_comm "$table" "$current")" || return 1
+    ppid="${row%%$'\t'*}"
+    comm="${row#*$'\t'}"
+    base="$(comm_basename "$comm")"
+    case "$base" in
+      launchd|init|systemd)
+        printf '%s\n' "root"
+        if [[ -n "$ancestors" ]]; then
+          printf '%s\n' "$ancestors"
+        fi
+        return 0
+        ;;
+    esac
+    if [[ -n "$base" ]]; then
+      if [[ -n "$ancestors" ]]; then
+        ancestors="${ancestors}"$'\n'"${base}"
+      else
+        ancestors="$base"
+      fi
+    fi
+    current="$ppid"
+  done
+  return 1
+}
+
+chain_has_product_app() {
+  local chain="$1" line first=1
+  while IFS= read -r line; do
+    if [[ "$first" -eq 1 ]]; then
+      first=0
+      continue
+    fi
+    [[ "$line" == "CookieAgent" ]] && return 0
+  done <<< "$chain"
+  return 1
+}
+
+# Print llama-server pids that belong to this drive. Return 1, and print no
+# pids, when the drive pid fails verify_drive_pid_reason or a llama-server
+# parent chain cannot be read. This function does not signal any process.
+#
+# A server counts when its parent chain reaches the verified drive pid, or
+# when that chain ends at launchd/init (the parent exited and the process
+# was reparented) and the process is still tied to this run: a file open
+# under COOKIE_DATA_DIR, or argv --port equal to the chat or embed port.
+# A reparented --port match is refused when an ancestor is CookieAgent, when
+# a llama log is open outside this data directory, or when a file is open
+# under the product data directory. The data directory is the reliable mark
+# after reparenting, because the product argv does not include it and the
+# log stays open. The port still catches an orphan whose only visible mark
+# is the port this drive passed.
+drive_owned_llama_pids() {
+  local drive_pid="$1"
+  local expected_bin="$2"
+  local expected_name="$3"
+  local expected_bundle="$4"
+  local data_dir="$5"
+  local chat_port="${6:-}"
+  local embed_port="${7:-}"
+  local reason data_real status
+  if [[ -z "$expected_name" || -z "$expected_bundle" ]]; then
+    printf '%s\n' "drive identity was not recorded" >&2
+    return 1
+  fi
+  reason="$(verify_drive_pid_reason "$drive_pid" "$expected_bin" "$expected_name" "$expected_bundle" || true)"
+  if [[ -n "$reason" ]]; then
+    printf '%s\n' "$reason" >&2
+    return 1
+  fi
+  if [[ -z "$data_dir" ]]; then
+    printf '%s\n' "COOKIE_DATA_DIR is empty" >&2
+    return 1
+  fi
+  data_real="$(real_path "$data_dir")" || {
+    printf '%s\n' "cannot realpath COOKIE_DATA_DIR" >&2
+    return 1
+  }
+  data_real="${data_real%/}"
+  if [[ -z "$data_real" || "$data_real" == "/" ]]; then
+    printf '%s\n' "cannot realpath COOKIE_DATA_DIR" >&2
+    return 1
+  fi
+  status=0
+  drive_owned_llama_collect "$drive_pid" "$data_real" "$chat_port" "$embed_port" || status=$?
+  return "$status"
+}
+
+drive_owned_llama_collect() {
+  local drive_pid="$1" data_real="$2" chat_port="$3" embed_port="$4"
+  local line pid comm base chain kind marks under foreign product cmd
+  local comm_raw cmd_raw comm_text cmd_text owned_lines="" added=" "
+  comm_raw="$(ps -axww -o pid=,ppid=,comm=)" || {
+    printf '%s\n' "cannot read the process table" >&2
+    return 1
+  }
+  cmd_raw="$(ps -axww -o pid=,command=)" || {
+    printf '%s\n' "cannot read the process table" >&2
+    return 1
+  }
+  comm_text="$(printf '%s\n' "$comm_raw" | awk '
+    {
+      if (!match($0, /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*/)) next
+      pid = $1
+      ppid = $2
+      comm = substr($0, RLENGTH + 1)
+      if (pid !~ /^[0-9]+$/ || ppid !~ /^[0-9]+$/) next
+      printf "%s\t%s\t%s\n", pid, ppid, comm
+    }
+  ')" || {
+    printf '%s\n' "cannot read the process table" >&2
+    return 1
+  }
+  cmd_text="$(printf '%s\n' "$cmd_raw" | awk '
+    {
+      if (!match($0, /^[[:space:]]*[0-9]+[[:space:]]*/)) next
+      pid = $1
+      cmd = substr($0, RLENGTH + 1)
+      if (pid !~ /^[0-9]+$/) next
+      printf "%s\t%s\n", pid, cmd
+    }
+  ')" || {
+    printf '%s\n' "cannot read the process table" >&2
+    return 1
+  }
+  if [[ -z "$comm_text" ]]; then
+    printf '%s\n' "cannot read the process table" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    pid="${line%%$'\t'*}"
+    comm="${line#*$'\t'}"
+    comm="${comm#*$'\t'}"
+    base="$(comm_basename "$comm")"
+    [[ "$base" == "llama-server" ]] || continue
+    case "$pid" in
+      ""|0|1) continue ;;
+    esac
+    [[ "$pid" == "$drive_pid" ]] && continue
+    case " $added " in
+      *" $pid "*) continue ;;
+    esac
+    chain="$(classify_llama_chain "$pid" "$drive_pid" "$comm_text")" || {
+      printf '%s\n' "llama-server pid $pid parent chain cannot be verified" >&2
+      return 1
+    }
+    kind="${chain%%$'\n'*}"
+    case "$kind" in
+      tree|root) ;;
+      *)
+        printf '%s\n' "llama-server pid $pid parent chain cannot be verified" >&2
+        return 1
+        ;;
+    esac
+    marks="$(llama_open_marks "$pid" "$data_real")"
+    under="${marks%% *}"
+    product="${marks##* }"
+    foreign="${marks#* }"
+    foreign="${foreign%% *}"
+    if [[ "$kind" == "tree" || "$under" == "1" ]]; then
+      added="$added$pid "
+      if [[ -z "$owned_lines" ]]; then
+        owned_lines="$pid"
+      else
+        owned_lines="${owned_lines}"$'\n'"${pid}"
+      fi
+      continue
+    fi
+    cmd="$(command_for_pid "$cmd_text" "$pid" || true)"
+    if command_has_port "$cmd" "$chat_port" || command_has_port "$cmd" "$embed_port"; then
+      if [[ "$foreign" == "1" || "$product" == "1" ]]; then
+        continue
+      fi
+      if chain_has_product_app "$chain"; then
+        continue
+      fi
+      added="$added$pid "
+      if [[ -z "$owned_lines" ]]; then
+        owned_lines="$pid"
+      else
+        owned_lines="${owned_lines}"$'\n'"${pid}"
+      fi
+    fi
+  done <<< "$comm_text"
+  if [[ -n "$owned_lines" ]]; then
+    printf '%s\n' "$owned_lines" | awk 'NF' | sort -n
+  fi
+  return 0
+}
+
+# Fake mode starts no llama-server, so any owned server fails. Real mode
+# allows the chat server and the embed server.
+orphan_reap_within_limit() {
+  local runtime="$1" count="$2" limit
+  [[ "$count" =~ ^[0-9]+$ ]] || return 1
+  if [[ "$runtime" == "real" ]]; then
+    limit=2
+  else
+    limit=1
+  fi
+  if [[ "$count" -gt "$limit" ]]; then
+    return 1
+  fi
+  if [[ "$runtime" != "real" && "$count" != "0" ]]; then
+    return 1
+  fi
+  return 0
+}
