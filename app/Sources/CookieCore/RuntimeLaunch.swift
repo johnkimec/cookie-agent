@@ -294,6 +294,49 @@ public func interpretHealth(status: Int, body: Data) -> RuntimeProbe {
     return .up
 }
 
+/// `<dataDir>/logs`, or `~/Library/Application Support/com.johnkimec.cookie-agent/logs`
+/// when `COOKIE_DATA_DIR` is unset. Callers that already know a data directory
+/// pass it here so a test does not inherit the product directory.
+public func shellLogDirectory(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+) -> URL {
+    let root: URL
+    if let raw = environment["COOKIE_DATA_DIR"], !raw.isEmpty {
+        root = URL(fileURLWithPath: raw, isDirectory: true)
+    } else {
+        root = CoreLaunch.defaultDataDirectory(home: homeDirectory)
+    }
+    return root.appendingPathComponent("logs", isDirectory: true)
+}
+
+/// True when `url` is the real home's `Library` or something inside it.
+/// A fake home under a temp directory is not this path.
+public func shellLogIsUnderHomeLibrary(
+    _ url: URL,
+    home: URL = FileManager.default.homeDirectoryForCurrentUser
+) -> Bool {
+    let library = home
+        .appendingPathComponent("Library", isDirectory: true)
+        .standardizedFileURL.path
+    let path = url.standardizedFileURL.path
+    return path == library || path.hasPrefix(library + "/")
+}
+
+/// `swift test` sets one of these. The guard reads the process environment,
+/// not the environment a caller passed into `logShell`.
+public func processIsRunningTests(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    if environment["XCTestConfigurationFilePath"] != nil { return true }
+    if environment["XCTestBundlePath"] != nil { return true }
+    if environment["XCTestSessionIdentifier"] != nil { return true }
+    let executable = CommandLine.arguments.first ?? ""
+    if (executable as NSString).lastPathComponent == "xctest" { return true }
+    if executable.contains(".xctest") { return true }
+    return false
+}
+
 public func logShell(
     _ message: String,
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -339,14 +382,13 @@ private enum ShellLogStore {
     ) {
         lock.lock()
         defer { lock.unlock() }
-        let root: URL
-        if let raw = environment["COOKIE_DATA_DIR"], !raw.isEmpty {
-            root = URL(fileURLWithPath: raw, isDirectory: true)
-        } else {
-            root = CoreLaunch.defaultDataDirectory(home: homeDirectory)
-        }
-        let dir = root.appendingPathComponent("logs", isDirectory: true)
+        let dir = shellLogDirectory(environment: environment, homeDirectory: homeDirectory)
         let file = dir.appendingPathComponent(name)
+        if processIsRunningTests(), shellLogIsUnderHomeLibrary(file) {
+            let note = "cookie-shell: skipped \(file.path); tests do not write under ~/Library\n"
+            FileHandle.standardError.write(Data(note.utf8))
+            return
+        }
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             if append, FileManager.default.fileExists(atPath: file.path) {
