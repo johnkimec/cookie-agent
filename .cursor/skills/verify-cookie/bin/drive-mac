@@ -1468,8 +1468,7 @@ run_popup_reply() {
   sleep 0.6
   log "measure empty popup"
   local empty_height="" empty_row=""
-  local attempt
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if popup_panel_metrics > /tmp/cookie-drive-mac-empty-metrics.txt 2>/tmp/cookie-drive-mac-empty.err; then
       if python3 - <<'PY'
 import pathlib, sys
@@ -1507,8 +1506,7 @@ PY
   for index in 0 1 2; do
     send_chat "${you_lines[$index]}"
     local turn_ready=0
-    local attempt
-    for attempt in $(seq 1 80); do
+    for _ in $(seq 1 80); do
       cookie_identified_value "cookie.turn.cookie.$index" > /tmp/cookie-drive-mac-short-chat.txt || true
       cookie_identified_value "cookie.turn.you.$index" > /tmp/cookie-drive-mac-short-you.txt || true
       if YOU_LINE="${you_lines[$index]}" python3 - /tmp/cookie-drive-mac-short-chat.txt /tmp/cookie-drive-mac-short-you.txt <<'PY'
@@ -1532,7 +1530,7 @@ PY
     fi
   done
   local ready=0
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if popup_reply_metrics "$row_pad" cookie.turn.cookie.2 > /tmp/cookie-drive-mac-short-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
       if popup_reply_metrics_ok three /tmp/cookie-drive-mac-short-metrics.txt; then
         ready=1
@@ -1553,7 +1551,7 @@ PY
   log "send long reply"
   send_chat
   ready=0
-  for attempt in $(seq 1 80); do
+  for _ in $(seq 1 80); do
     cookie_identified_value cookie.turn.cookie.3 > /tmp/cookie-drive-mac-chat.txt || true
     if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
 import pathlib, sys
