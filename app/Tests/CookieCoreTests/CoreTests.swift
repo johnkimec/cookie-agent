@@ -69,6 +69,8 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieAX.turnYou(0), "cookie.turn.you.0")
         XCTAssertEqual(CookieAX.turnCookie(1), "cookie.turn.cookie.1")
         XCTAssertEqual(CookieAX.badge(0), "cookie.badge.on-device.0")
+        XCTAssertEqual(CookieAX.onDeviceIndicator, "cookie.badge.on-device")
+        XCTAssertEqual(CookieAX.transcriptBottom, "cookie.popup.transcript-bottom")
         XCTAssertEqual(CookieCopy.ask, "Ask Cookie…")
         XCTAssertEqual(CookieCopy.localOnly, "Local-only mode")
         XCTAssertEqual(CookieCopy.quit, "Quit Cookie")
@@ -91,7 +93,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(ShellLaunchFailure.coreNotFound.statusLine, CookieCopy.coreNotFound)
         XCTAssertEqual(ShellLaunchFailure.pnpmNotFound.statusLine, CookieCopy.pnpmNotFound)
         XCTAssertEqual(PopupLayout.width, 560)
-        XCTAssertEqual(PopupLayout.maxHeight, 520)
+        XCTAssertEqual(PopupLayout.maxHeight, 320)
         XCTAssertEqual(PopupLayout.collapsedHeight, 64)
         XCTAssertEqual(PopupLayout.mascot, 40)
         XCTAssertEqual(PopupLayout.draftTTL, 600)
@@ -534,6 +536,63 @@ final class TerminationHopTests: XCTestCase {
             .appendingPathComponent("Library/Application Support/com.johnkimec.cookie-agent/logs/cookie-shell.log")
         let fallbackText = try String(contentsOf: fallback, encoding: .utf8)
         XCTAssertTrue(fallbackText.contains("cookie-shell: signals installed pid=7"))
+        XCTAssertFalse(shellLogIsUnderHomeLibrary(fallback))
+        XCTAssertTrue(shellLogIsUnderHomeLibrary(fallback, home: home))
+    }
+
+    func testTestsNeverWriteTheProductShellLog() throws {
+        XCTAssertTrue(processIsRunningTests())
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let productLog = CoreLaunch.defaultDataDirectory(home: home)
+            .appendingPathComponent("logs")
+            .appendingPathComponent("cookie-shell.log")
+        let before = try? Data(contentsOf: productLog)
+        logShell("runtime SIGKILL pid=100", environment: [:], homeDirectory: home)
+        let after = try? Data(contentsOf: productLog)
+        XCTAssertEqual(before, after)
+        XCTAssertTrue(shellLogIsUnderHomeLibrary(productLog, home: home))
+    }
+
+    func testSupervisorStopLogIsOutsideTheProductDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cookie-pid-kill-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let productLog = CoreLaunch.defaultDataDirectory(home: home)
+            .appendingPathComponent("logs")
+            .appendingPathComponent("cookie-shell.log")
+        let before = try? Data(contentsOf: productLog)
+        let launch = RuntimeLaunch.resolve(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/john", isDirectory: true),
+            dataDirectory: root.path,
+            recordsStablePid: false
+        )
+        let store = FileRuntimePidStore(path: launch.pidFile)
+        let launcher = ScriptedLauncher()
+        launcher.termKills = false
+        launcher.pidPath = launch.pidFile
+        let supervisor = RuntimeSupervisor(
+            launch: launch,
+            launcher: launcher,
+            health: ScriptedHealth(results: [.down, .down, .up]),
+            pidStore: store,
+            clock: ScriptedClock(),
+            pollInterval: 0
+        )
+        await supervisor.start()
+        await supervisor.stop()
+        let log = root.appendingPathComponent("logs/cookie-shell.log")
+        let text = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(text.contains("runtime SIGKILL pid="))
+        XCTAssertTrue(text.contains(root.path))
+        XCTAssertFalse(shellLogIsUnderHomeLibrary(log))
+        XCTAssertFalse(log.standardizedFileURL.path.hasPrefix(
+            CoreLaunch.defaultDataDirectory(home: home).standardizedFileURL.path
+        ))
+        let after = try? Data(contentsOf: productLog)
+        XCTAssertEqual(before, after)
     }
 
     /// A signal source calls this from a background queue. The block has to
