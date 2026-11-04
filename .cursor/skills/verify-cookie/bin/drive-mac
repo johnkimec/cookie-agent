@@ -897,7 +897,7 @@ send_chat() {
   local text="${1:-hello from drive-mac}"
   [[ "$text" != *\"* && "$text" != *$'\n'* ]] || fail "chat text cannot contain quotes or newlines"
   local script
-  script="$(cat <<'APPLESCRIPT'
+  IFS= read -r -d '' script <<'APPLESCRIPT' || true
 on axid(elem)
   tell application "System Events"
     try
@@ -958,7 +958,6 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
-)"
   script="${script//__CHAT_TEXT__/$text}"
   printf '%s\n' "$script" | osascript_run
 }
@@ -1135,7 +1134,7 @@ cookie_identified_value() {
   local turn_id="$1"
   [[ "$turn_id" =~ ^cookie\.turn\.(cookie|you)\.[0-9]+$ ]] || return 2
   local script
-  script="$(cat <<'APPLESCRIPT'
+  IFS= read -r -d '' script <<'APPLESCRIPT' || true
 on axid(elem)
   tell application "System Events"
     try
@@ -1212,7 +1211,6 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
-)"
   script="${script//__TURN_ID__/$turn_id}"
   printf '%s\n' "$script" | osascript_run
 }
@@ -1225,7 +1223,7 @@ popup_reply_metrics() {
   [[ "$turn_id" =~ ^cookie\.turn\.cookie\.[0-9]+$ ]] || return 2
   [[ "$you_id" =~ ^cookie\.turn\.you\.[0-9]+$ ]] || return 2
   local script
-  script="$(cat <<'APPLESCRIPT'
+  IFS= read -r -d '' script <<'APPLESCRIPT' || true
 on axid(elem)
   tell application "System Events"
     try
@@ -1313,7 +1311,6 @@ tell application "System Events"
 end tell
 return "replyHeight " & replyHeight & linefeed & "youHeight " & youHeight & linefeed & "youLeft " & youLeft & linefeed & "youWidth " & youWidth & linefeed & "dotWidth " & dotWidth & linefeed & "badgeWidth " & badgeWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
 APPLESCRIPT
-)"
   script="${script//__ROW_PAD__/$pad}"
   script="${script//__TURN_ID__/$turn_id}"
   script="${script//__YOU_ID__/$you_id}"
@@ -1435,15 +1432,14 @@ ok = (
     and 0 <= gap <= 16
     and frame_inside
     and you_inside
-    and more_than_one_line(reply_height)
 )
 if mode == "long":
-    ok = ok and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
+    ok = ok and more_than_one_line(reply_height) and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
 elif mode == "three":
-    # John's three exchanges settle near 260. The line estimate is about 303.
+    # One-line replies. Three of the two-line Einstein sentences filled the cap.
     ok = ok and 120 < window_height < 290
 elif mode == "short":
-    ok = ok and more_than_one_line(you_height) and 80 < window_height < 260
+    ok = ok and more_than_one_line(reply_height) and more_than_one_line(you_height) and 80 < window_height < 260
 else:
     print("unknown mode " + mode)
     sys.exit(1)
@@ -1513,7 +1509,7 @@ PY
 import os, pathlib, sys
 cookie = pathlib.Path(sys.argv[1]).read_text(errors="replace")
 you = pathlib.Path(sys.argv[2]).read_text(errors="replace")
-full = "Einstein is best known for relativity. END-OF-REPLY-m1-popup"
+full = "Hi. END-OF-REPLY-m1-popup"
 sys.exit(0 if full in cookie and "Line 01" not in cookie and os.environ["YOU_LINE"] in you else 1)
 PY
       then
@@ -1592,7 +1588,7 @@ PY
   mv /tmp/cookie-drive-mac-metrics-all.txt /tmp/cookie-drive-mac-metrics.txt
   dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || fail "popup accessibility read failed"
   local shell_log="$COOKIE_DATA_DIR/logs/cookie-shell.log"
-  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=Einstein is best known for relativity. END-OF-REPLY-m1-popup" >/dev/null; then
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=Hi. END-OF-REPLY-m1-popup" >/dev/null; then
     log "shell log"
     cat "$shell_log" 2>/dev/null || true
     fail "chat.done log is missing the short reply"

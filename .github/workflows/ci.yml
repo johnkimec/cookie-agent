@@ -55,6 +55,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Parse drive-mac with macOS bash 3.2
+        run: /bin/bash -n .cursor/skills/verify-cookie/bin/drive-mac
+
       - name: Lint drive-mac targeting
         run: .cursor/skills/verify-cookie/bin/lint-drive-mac-targeting
 

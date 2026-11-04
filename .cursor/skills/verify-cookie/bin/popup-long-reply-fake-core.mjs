@@ -13,9 +13,15 @@ if (!reply.includes("END-OF-REPLY-m1-popup") || !reply.includes("Einstein is bes
   process.exit(1);
 }
 
-const shortReply = "Einstein is best known for relativity. END-OF-REPLY-m1-popup";
-if (!shortReply.includes("END-OF-REPLY-m1-popup") || !shortReply.includes("Einstein is best known for")) {
-  process.stderr.write("popup short reply is missing the sentinel\n");
+// One line in the reply column. The two-line Einstein sentence made three
+// exchanges fill the 320 pt cap, so the under-290 check could not pass.
+const shortReply = "Hi. END-OF-REPLY-m1-popup";
+if (
+  !shortReply.includes("END-OF-REPLY-m1-popup") ||
+  shortReply.includes("\n") ||
+  shortReply.length > 40
+) {
+  process.stderr.write("popup short reply must be one line and include the sentinel\n");
   process.exit(1);
 }
 
