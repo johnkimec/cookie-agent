@@ -104,7 +104,9 @@ if mount --bind "$RH" "$ALIAS" 2>/dev/null; then
   run "ALIAS: data = alias home"                    refuse "$H" "$ALIAS"
   run "ALIAS: HOME = alias home"                    refuse "$ALIAS" "$D"
   run "ALIAS: HOME inside alias data dir"           refuse "$ALIAS/Library/Application Support/com.johnkimec.cookie-agent/x" "$D"
-  run "ALIAS: uppercase alias path"                 refuse "$H" "$T/SYSTEM/Volumes/Data/Users/samkim/Library/Application Support/com.johnkimec.cookie-agent"
+  # APFS folds SYSTEM onto the bind mount, so this spelling is the alias there.
+  # ext4 does not. Report a note either way instead of a Linux-only failure.
+  run "ALIAS: uppercase alias path"                 note   "$H" "$T/SYSTEM/Volumes/Data/Users/samkim/Library/Application Support/com.johnkimec.cookie-agent"
   run "ALIAS + spoofed startup HOME"                refuse "$H" "$ALIAS/Library/Application Support/com.johnkimec.cookie-agent" "$T/wrong-home"
   run "ALIAS: sibling prefix under alias"           allow  "$H" "$ALIAS/Library/Application Support/com.johnkimec.cookie-agent-old"
   mv "$RD" "$RD.moved"
