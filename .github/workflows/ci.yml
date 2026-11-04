@@ -24,6 +24,9 @@ jobs:
       - name: Lint drive-mac targeting
         run: .cursor/skills/verify-cookie/bin/lint-drive-mac-targeting
 
+      - name: Drive-mac parse guard
+        run: bash .cursor/skills/verify-cookie/bin/drive-mac-parse-guard-test
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
@@ -57,6 +60,9 @@ jobs:
 
       - name: Parse drive-mac with macOS bash 3.2
         run: /bin/bash -n .cursor/skills/verify-cookie/bin/drive-mac
+
+      - name: Drive-mac parse guard under bash 3.2
+        run: /bin/bash .cursor/skills/verify-cookie/bin/drive-mac-parse-guard-test
 
       - name: Lint drive-mac targeting
         run: .cursor/skills/verify-cookie/bin/lint-drive-mac-targeting

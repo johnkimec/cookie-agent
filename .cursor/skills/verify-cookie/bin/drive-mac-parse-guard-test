@@ -1,0 +1,58 @@
+#!/bin/bash
+# A syntax error after `trap cleanup EXIT` exits 0 on bash 3.2. The guard
+# parses the whole file before that trap and must exit non-zero.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+SOURCE="$ROOT/drive-mac"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-parse.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+python3 - "$SOURCE" "$tmp/drive-mac" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+guard = source.find("drive-mac does not parse under bash")
+trap_at = source.find("trap cleanup EXIT")
+if guard < 0 or trap_at < 0 or guard > trap_at:
+    sys.exit("parse guard is missing or follows the EXIT trap")
+# An apostrophe inside $(<<'...') is the bash 3.2 bug. A bare `if` is a
+# syntax error on bash 3.2 and bash 5, so this Linux run reaches the guard too.
+broken = source + """
+script="$(cat <<'APPLESCRIPT'
+set oldDelims to AppleScript's text item delimiters
+APPLESCRIPT
+)"
+if
+"""
+pathlib.Path(sys.argv[2]).write_text(broken)
+PY
+chmod +x "$tmp/drive-mac"
+
+# The Darwin check returns before the guard. Pretend this is macOS so the
+# guard runs on Linux as well.
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/uname" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "-s" ]; then
+  printf '%s\n' Darwin
+else
+  command uname "$@"
+fi
+EOF
+chmod +x "$tmp/bin/uname"
+
+set +e
+PATH="$tmp/bin:$PATH" "${BASH:-/bin/bash}" "$tmp/drive-mac" >"$tmp/out" 2>"$tmp/err"
+rc=$?
+set -e
+if [[ "$rc" -eq 0 ]]; then
+  printf '%s\n' "broken drive-mac exited 0" >&2
+  cat "$tmp/err" >&2
+  exit 1
+fi
+if ! grep -F "drive-mac does not parse under bash" "$tmp/err" >/dev/null; then
+  printf '%s\n' "broken drive-mac exited $rc without the parse message" >&2
+  cat "$tmp/err" >&2
+  exit 1
+fi
+printf '%s\n' "parse guard ok rc=$rc"

@@ -9,6 +9,13 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
+# bash 3.2 runs the EXIT trap after a syntax error and exits 0. Parse first,
+# before any trap is installed.
+if ! "${BASH:-/bin/bash}" -n "$0"; then
+  printf '%s\n' "drive-mac does not parse under bash ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 usage() {
   echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
@@ -1375,7 +1382,7 @@ SWIFT
   fi
 }
 
-# mode is "short" or "long". The second argument is the metrics file.
+# mode is "three" or "long". The second argument is the metrics file.
 popup_reply_metrics_ok() {
   local mode="$1"
   local file="$2"
@@ -1436,10 +1443,9 @@ ok = (
 if mode == "long":
     ok = ok and more_than_one_line(reply_height) and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
 elif mode == "three":
-    # One-line replies. Three of the two-line Einstein sentences filled the cap.
-    ok = ok and 120 < window_height < 290
-elif mode == "short":
-    ok = ok and more_than_one_line(reply_height) and more_than_one_line(you_height) and 80 < window_height < 260
+    # One-line replies measure under the 281 pt line estimate. 270 stays
+    # above the 248 pt three-exchange preview and below that estimate.
+    ok = ok and 120 < window_height < 270
 else:
     print("unknown mode " + mode)
     sys.exit(1)
@@ -1541,7 +1547,7 @@ PY
     cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
     dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
     cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
-    fail "three exchanges missed the wrap, the input-row height, the gap, or the 290 pt cap"
+    fail "three exchanges missed the input-row height, the gap, or the 270 pt ceiling"
   fi
   capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-short.png
   log "send long reply"
