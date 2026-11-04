@@ -7,6 +7,11 @@ import type { Memory } from "./types.ts";
 export type Retrieve = (
   query: string,
   signal?: AbortSignal,
+  /**
+   * Turn ids already in the recent-history window.
+   * Drop them before the top-8 cut so that cut stays full of other hits.
+   */
+  omitTurnIds?: ReadonlySet<string>,
 ) => Promise<Memory[]>;
 
 /** Substring match over a fixed list. Enough to pin the function shape. */

@@ -1,4 +1,7 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2154
 # Sourced by drive-mac on macOS. Each recipe asserts one planned sub-feature.
+# feature, evidence, and the drive helpers are assigned by drive-mac before this file is sourced.
 # Status stays planned until Sergey runs the recipe and keeps the evidence.
 
 SCRIPTS="$ROOT/.cursor/skills/verify-cookie/bin/scripts"
@@ -67,8 +70,7 @@ quit_focused() {
     return 0
   fi
   osascript_run "$SCRIPTS/quit-cookie.applescript" || true
-  local attempt
-  for attempt in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
       wait "$APP_PID" 2>/dev/null || true
       APP_PID=""
@@ -109,13 +111,13 @@ use_fake_core() {
 }
 
 start_up_stub() {
-  local node_bin attempt pid
+  local node_bin pid
   node_bin="$(command -v node || true)"
   [[ -n "$node_bin" ]] || fail "node is not on PATH"
   require_port_free
   "$node_bin" "$STUB_JS" --mode up --port 18080 >"$evidence/stub.log" 2>&1 &
   STUB_PID=$!
-  for attempt in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     if curl -sf -m 1 "http://127.0.0.1:18080/health" >/dev/null; then
       note "up stub pid=$STUB_PID"
       return 0
@@ -155,8 +157,7 @@ menu_label() {
 wait_menu_contains() {
   local needle="$1"
   local tries="${2:-40}"
-  local attempt
-  for attempt in $(seq 1 "$tries"); do
+  for _ in $(seq 1 "$tries"); do
     if read_menu >"$evidence/menu.txt" 2>"$evidence/menu.err"; then
       if grep -F "$needle" "$evidence/menu.txt" >/dev/null; then
         return 0
@@ -170,8 +171,8 @@ wait_menu_contains() {
 wait_label() {
   local want="$1"
   local tries="${2:-40}"
-  local attempt label
-  for attempt in $(seq 1 "$tries"); do
+  local label
+  for _ in $(seq 1 "$tries"); do
     label="$(menu_label || true)"
     printf '%s\n' "$label" >"$evidence/label.txt"
     if [[ "$label" == "$want" ]]; then
@@ -392,10 +393,10 @@ hotkey_registered() {
 toggle_hotkey() {
   local want="$1"
   local why="$2"
-  local attempt state
+  local state
   guard_popup_hotkey_send "${APP_PID:-}" "${evidence:-}"
   send_key_code 49 option hotkey
-  for attempt in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     state="$(popup_is_open)"
     if [[ "$state" == "$want" ]]; then
       note "⌥Space $why -> $state"
@@ -477,8 +478,7 @@ recipe_popup_input() {
   sleep 0.2
   dump_ax "$evidence/ax-newline.txt"
   assert_ax input-equals "$evidence/ax-newline.txt" 'alpha\n' forbid-you || fail "Shift-Return did not insert a newline"
-  local press
-  for press in 1 2 3; do
+  for _ in 1 2 3; do
     press_action "Shift Return"
     sleep 0.15
   done
@@ -510,8 +510,7 @@ recipe_popup_input() {
 wait_cookie_turn() {
   local dest="$1"
   local tries="$2"
-  local attempt
-  for attempt in $(seq 1 "$tries"); do
+  for _ in $(seq 1 "$tries"); do
     if osascript_run "$SCRIPTS/popup-dump.applescript" >"$dest"; then
       if grep -F $'cookie.turn.cookie.0\t' "$dest" >/dev/null; then
         return 0
@@ -577,8 +576,8 @@ recipe_popup_stream() {
   sleep 0.2
   osascript_run "$SCRIPTS/popup-action.applescript" confirm
   : >"$evidence/samples.txt"
-  local attempt shot_prefix=0 state
-  for attempt in $(seq 1 50); do
+  local shot_prefix=0 state
+  for _ in $(seq 1 50); do
     menu_label >"$evidence/label.txt" || true
     osascript_run "$SCRIPTS/popup-dump.applescript" >"$evidence/ax.txt" || true
     state="$(assert_ax sample-line "$evidence/label.txt" "$evidence/ax.txt" "$FAKE_REPLY")"
@@ -648,8 +647,8 @@ recipe_status_loading() {
   require_port_free
   install_fault_wrapper loading
   focused_launch
-  local attempt label count
-  for attempt in $(seq 1 60); do
+  local label count
+  for _ in $(seq 1 60); do
     label="$(menu_label || true)"
     printf '%s\n' "$label" >"$evidence/label.txt"
     read_menu >"$evidence/menu.txt" 2>"$evidence/menu.err" || true
@@ -683,8 +682,8 @@ recipe_status_down() {
   require_port_free
   install_fault_wrapper down
   focused_launch
-  local attempt label count=0
-  for attempt in $(seq 1 70); do
+  local label count=0
+  for _ in $(seq 1 70); do
     label="$(menu_label || true)"
     printf '%s\n' "$label" >"$evidence/label.txt"
     read_menu >"$evidence/menu.txt" 2>"$evidence/menu.err" || true
@@ -714,9 +713,9 @@ recipe_status_down() {
 }
 
 assert_fault_stub_gone() {
-  local pid attempt
+  local pid
   pid="$(pid_file_pid || true)"
-  for attempt in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     if [[ -z "$pid" ]] || ! pid_is_fault_stub "$pid"; then
       break
     fi
@@ -750,8 +749,7 @@ recipe_status_offline_chat() {
     fail "glyph was offline while the runtime was up"
   fi
   open_popup
-  local attempt
-  for attempt in 1 2 3; do
+  for _ in 1 2 3; do
     set_field "hello from drive-mac"
     sleep 0.3
     osascript_run "$SCRIPTS/popup-action.applescript" confirm || true
@@ -804,8 +802,8 @@ recipe_status_local_only() {
   require_port_free
   install_fault_wrapper loading
   focused_launch
-  local attempt label count
-  for attempt in $(seq 1 60); do
+  local label count
+  for _ in $(seq 1 60); do
     label="$(menu_label || true)"
     read_menu >"$evidence/menu-loading.txt" 2>"$evidence/menu.err" || true
     if [[ "$label" == "Cookie, loading" ]] && grep -F "$STATUS_LOADING" "$evidence/menu-loading.txt" >/dev/null; then
@@ -825,7 +823,7 @@ recipe_status_local_only() {
   require_port_free
   install_fault_wrapper down
   focused_launch
-  for attempt in $(seq 1 70); do
+  for _ in $(seq 1 70); do
     label="$(menu_label || true)"
     read_menu >"$evidence/menu-down.txt" 2>"$evidence/menu.err" || true
     count="$(spawn_count | tr -d '[:space:]')"

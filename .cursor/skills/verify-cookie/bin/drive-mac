@@ -9,8 +9,15 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
+# bash 3.2 runs the EXIT trap after a syntax error and exits 0. Parse first,
+# before any trap is installed.
+if ! "${BASH:-/bin/bash}" -n "$0"; then
+  printf '%s\n' "drive-mac does not parse under bash ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 usage() {
-  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|all|self-check|menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only] [--runtime fake|real] [--evidence dir]" >&2
+  echo "usage: drive-mac [menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check|menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only] [--runtime fake|real] [--evidence dir]" >&2
   exit 2
 }
 
@@ -20,7 +27,7 @@ evidence=""
 focused=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    menu-bar-icon|hotkey-popup|chat|all|self-check)
+    menu-bar-icon|hotkey-popup|chat|popup-reply|all|self-check)
       feature="$1"
       ;;
     menu-local-only|menu-option-click|menu-thinking|popup-hotkey|popup-escape|popup-click-outside|popup-option-click|popup-input|popup-draft|popup-layout|chat-popup-reply|chat-talking-pose|status-loading|status-down|status-offline-chat|status-local-only)
@@ -71,6 +78,16 @@ ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 DRIVE_BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=drive-mac-pid.sh
 source "$DRIVE_BIN_DIR/drive-mac-pid.sh"
+# Captured before any launch replaces HOME. An empty HOME falls through to
+# dscl, getent, or pwd.getpwuid so the comparison target stays the account home.
+REAL_HOME="${HOME:-}"
+if [[ -z "$REAL_HOME" ]]; then
+  REAL_HOME="$(directory_service_home || true)"
+fi
+if [[ -z "$REAL_HOME" ]]; then
+  printf '%s\n' "not-ok" "refusing to launch: cannot resolve the real home" >&2
+  exit 4
+fi
 DRIVE_PROCESS_LIB="$DRIVE_BIN_DIR/cookie-drive-process.applescript"
 APP="${COOKIE_APP:-"$ROOT/dist/Cookie Agent.app"}"
 BIN="$APP/Contents/MacOS/CookieAgent"
@@ -79,7 +96,6 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 SOURCE_APP="$APP"
-SOURCE_BIN="$BIN"
 
 export COOKIE_DATA_DIR="$data"
 export COOKIE_CORE_CWD="${COOKIE_CORE_CWD:-$ROOT}"
@@ -89,6 +105,14 @@ else
   export COOKIE_LLAMA_PORT=18080
   export COOKIE_EMBED_PORT=18081
   export COOKIE_CORE_COMMAND="${COOKIE_CORE_COMMAND:-pnpm --filter @cookie-agent/core fake-core}"
+fi
+if [[ "$feature" == "popup-reply" ]]; then
+  if [[ "$runtime" != "fake" ]]; then
+    printf '%s\n' "not-ok" "popup-reply drives the long-reply fixture core, not --runtime real"
+    exit 1
+  fi
+  core_script="$ROOT/.cursor/skills/verify-cookie/bin/popup-long-reply-fake-core.mjs"
+  export COOKIE_CORE_COMMAND="node \"$core_script\""
 fi
 
 log() { printf '%s\n' "$*"; }
@@ -106,6 +130,7 @@ stop_pid() {
   local expected_bin="${2:-}"
   local expected_name="${3:-}"
   local expected_bundle="${4:-}"
+  local cohort="${5:-}"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   [[ "$pid" -ge 2 ]] || return 0
   if [[ "$pid" == "$$" ]]; then
@@ -116,26 +141,67 @@ stop_pid() {
     return 0
   fi
   local reason
-  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" || true)"
+  # Re-check immediately before each signal. The poll below can outlive the
+  # drive process, and the kernel can reuse that pid.
+  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" "$cohort" || true)"
   if [[ -n "$reason" ]]; then
     log "not signaling pid $pid: $reason"
     return 0
   fi
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-    local attempt
-    for attempt in $(seq 1 40); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.5
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    wait "$pid" 2>/dev/null || true
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
   fi
+  reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" "$cohort" || true)"
+  if [[ -n "$reason" ]]; then
+    log "not signaling pid $pid: $reason"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    reason="$(verify_drive_pid_reason "$pid" "$expected_bin" "$expected_name" "$expected_bundle" "$cohort" || true)"
+    if [[ -n "$reason" ]]; then
+      log "not signaling pid $pid: $reason"
+      return 0
+    fi
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+# kill -9 and kill -TERM of the launched pid go through the same check.
+# A pid that fails verify_drive_pid_reason is not signaled.
+signal_verified_app_pid() {
+  local signal="$1"
+  local reason
+  if [[ -z "${DRIVE_PROCESS_NAME:-}" || -z "${DRIVE_BUNDLE_ID:-}" ]]; then
+    log "not signaling pid ${APP_PID:-empty}: identity was not recorded"
+    return 1
+  fi
+  reason="$(verify_drive_pid_reason "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" || true)"
+  if [[ -n "$reason" ]]; then
+    log "not signaling pid $APP_PID: $reason"
+    return 1
+  fi
+  case "$signal" in
+    -9)
+      kill -9 "$APP_PID" || return 1
+      ;;
+    -TERM)
+      kill -TERM "$APP_PID" || return 1
+      ;;
+    *)
+      log "not signaling pid $APP_PID: unsupported signal ${signal}"
+      return 1
+      ;;
+  esac
 }
 DECOY_DATA=""
 DRIVE_DATA=""
+ISOLATE_ROOT=""
 STUB_PID=""
 pid_is_fault_stub() {
   local pid="$1"
@@ -151,8 +217,7 @@ stop_stub_pid() {
     return 0
   fi
   kill "$pid" 2>/dev/null || true
-  local attempt
-  for attempt in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     pid_alive "$pid" || return 0
     sleep 0.2
   done
@@ -187,6 +252,125 @@ cleanup() {
   if [[ -n "$DRIVE_DATA" && "$(drive_temp_data_dir "$DRIVE_DATA")" == "$DRIVE_DATA" ]]; then
     rm -rf "$DRIVE_DATA"
   fi
+  # Per-run HOME and open-clean COOKIE_DATA_DIR. The marker keeps a bad
+  # value from removing the real home. Success and failure both hit this trap.
+  if [[ -n "${ISOLATE_ROOT:-}" ]]; then
+    case "$ISOLATE_ROOT" in
+      *"/cookie-drive-isolate."*)
+        remove_isolate_root "$ISOLATE_ROOT"
+        ;;
+      *)
+        log "not removing isolate root: $ISOLATE_ROOT"
+        ;;
+    esac
+  fi
+  sweep_drive_preference_plists
+}
+
+# The temp HOME hides ~/Library/pnpm and ~/cookie-runtime. Keep those lookups
+# on the real home so the core and the weights still resolve.
+launch_path_with_user_tools() {
+  local path="$1"
+  local extra
+  for extra in \
+    "$REAL_HOME/Library/pnpm" \
+    "$REAL_HOME/.local/share/pnpm"
+  do
+    [[ -d "$extra" ]] || continue
+    case ":$path:" in
+      *":$extra:"*) ;;
+      *) path="$path:$extra" ;;
+    esac
+  done
+  printf '%s\n' "$path"
+}
+
+launch_model_path() {
+  local override="$1"
+  local filename="$2"
+  if [[ -n "$override" ]]; then
+    # CFFIXED_USER_HOME would expand a leading ~/ to the temp home.
+    # Keep the tilde literal. A pattern of ~ is expanded by ${var#~/}.
+    # shellcheck disable=SC2088 # literal tilde, expanded against REAL_HOME below
+    local tilde_prefix='~/'
+    case "$override" in
+      "$tilde_prefix"*)
+        override="$REAL_HOME/${override#"$tilde_prefix"}"
+        ;;
+    esac
+    printf '%s\n' "$override"
+    return 0
+  fi
+  printf '%s\n' "$REAL_HOME/cookie-runtime/models/$filename"
+}
+
+# CFFIXED_USER_HOME moves homeDirectoryForCurrentUser. $HOME does not.
+# PNPM_HOME and COREPACK_HOME stay on the real home so a version mismatch
+# does not download into the isolate home.
+real_pnpm_home() {
+  if [[ -n "${PNPM_HOME:-}" ]]; then
+    printf '%s\n' "$PNPM_HOME"
+    return 0
+  fi
+  printf '%s\n' "$REAL_HOME/Library/pnpm"
+}
+
+real_corepack_home() {
+  if [[ -n "${COREPACK_HOME:-}" ]]; then
+    printf '%s\n' "$COREPACK_HOME"
+    return 0
+  fi
+  printf '%s\n' "$REAL_HOME/.cache/node/corepack"
+}
+
+sweep_drive_preference_plists() {
+  local home
+  remove_drive_preference_plists "$REAL_HOME"
+  while IFS= read -r home; do
+    [[ -n "$home" ]] || continue
+    if [[ "$home" == "$REAL_HOME" ]]; then
+      continue
+    fi
+    remove_drive_preference_plists "$home"
+  done < <(account_homes || true)
+}
+
+real_drive_plist_present() {
+  local home
+  if drive_preference_plist_present "$REAL_HOME"; then
+    return 0
+  fi
+  while IFS= read -r home; do
+    [[ -n "$home" ]] || continue
+    if [[ "$home" == "$REAL_HOME" ]]; then
+      continue
+    fi
+    if drive_preference_plist_present "$home"; then
+      return 0
+    fi
+  done < <(account_homes || true)
+  return 1
+}
+
+# Identity-verified pids only. A pid that fails verify_drive_pid_reason is
+# left alone. Several copies of this run's executable are stopped together.
+# A pid outside that set still fails the check closed, so it is not signaled.
+stop_verified_drive_pids() {
+  local candidate why cohort=""
+  for candidate in "$@"; do
+    [[ "$candidate" =~ ^[0-9]+$ ]] || continue
+    cohort="${cohort} ${candidate}"
+  done
+  for candidate in "$@"; do
+    [[ "$candidate" =~ ^[0-9]+$ ]] || continue
+    why="$(verify_drive_pid_reason "$candidate" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" "$cohort" || true)"
+    if [[ -n "$why" ]]; then
+      log "not signaling pid $candidate: $why"
+      continue
+    fi
+    APP_PID="$candidate"
+    stop_pid "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" "$cohort"
+  done
 }
 trap cleanup EXIT
 
@@ -256,19 +440,50 @@ current_target_pid() {
 
 launch_verified() {
   # $1 binary, $2 app|decoy, $3 per-run process name, $4 per-run bundle id.
-  local bin="$1" which="$2" name="$3" bundle="$4" existing attempt reason pid
+  local bin="$1" which="$2" name="$3" bundle="$4" existing reason pid
+  local launch_home launch_data launch_path model embed
   existing="$(pids_for_executable "$bin" "$name" | tr '\n' ' ')"
   if [[ -n "${existing// /}" ]]; then
     fail "refusing to launch: $bin already running as pid ${existing}"
   fi
+  # The caller already set COOKIE_DATA_DIR. The child still gets a per-run
+  # home, and that data directory is asserted before the binary starts.
+  ensure_isolate_root
+  isolate_dir home
+  launch_home="$ISOLATE_LAST"
+  launch_data="$COOKIE_DATA_DIR"
+  assert_isolated_data_dir "$launch_home" "$launch_data"
+  launch_path="$(launch_path_with_user_tools "${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}")"
+  model="$(launch_model_path "${COOKIE_MODEL_PATH:-}" "Qwen3.6-35B-A3B-Q4_K_M.gguf")"
+  embed="$(launch_model_path "${COOKIE_EMBED_MODEL_PATH:-}" "nomic-embed-text-v1.5.Q8_0.gguf")"
+  local pnpm_home corepack_home
+  pnpm_home="$(real_pnpm_home)"
+  corepack_home="$(real_corepack_home)"
+  log "launch home=$launch_home data=$launch_data"
   if [[ "$focused" == "1" && -n "${evidence:-}" ]]; then
-    "$bin" >>"$evidence/app-stdout.txt" 2>>"$evidence/app-stderr.txt" &
+    HOME="$launch_home" \
+      CFFIXED_USER_HOME="$launch_home" \
+      COOKIE_DATA_DIR="$launch_data" \
+      COOKIE_MODEL_PATH="$model" \
+      COOKIE_EMBED_MODEL_PATH="$embed" \
+      PNPM_HOME="$pnpm_home" \
+      COREPACK_HOME="$corepack_home" \
+      PATH="$launch_path" \
+      "$bin" >>"$evidence/app-stdout.txt" 2>>"$evidence/app-stderr.txt" &
   else
-    "$bin" &
+    HOME="$launch_home" \
+      CFFIXED_USER_HOME="$launch_home" \
+      COOKIE_DATA_DIR="$launch_data" \
+      COOKIE_MODEL_PATH="$model" \
+      COOKIE_EMBED_MODEL_PATH="$embed" \
+      PNPM_HOME="$pnpm_home" \
+      COREPACK_HOME="$corepack_home" \
+      PATH="$launch_path" \
+      "$bin" &
   fi
   pid=$!
   reason=""
-  for attempt in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     reason="$(verify_drive_pid_reason "$pid" "$bin" "$name" "$bundle" || true)"
     if [[ -z "$reason" ]]; then
       remember_launched "$which" "$pid" "$bin" "$name" "$bundle"
@@ -500,8 +715,8 @@ PY
 }
 
 wait_health() {
-  local port="$1" attempt
-  for attempt in $(seq 1 40); do
+  local port="$1"
+  for _ in $(seq 1 40); do
     if health_ok "$port"; then
       return 0
     fi
@@ -585,10 +800,6 @@ core_child_cwd() {
     done
   done
   return 1
-}
-
-open_support_dir() {
-  printf '%s\n' "$HOME/Library/Application Support/com.johnkimec.cookie-agent"
 }
 
 # Resolve the process by the pid and per-run identity this drive launched.
@@ -761,7 +972,10 @@ PY
 # Set the field through AX. System Events keystrokes go to the frontmost
 # app, not this non-activating panel. AXConfirm is the field's Return.
 send_chat() {
-  osascript_run <<'APPLESCRIPT'
+  local text="${1:-hello from drive-mac}"
+  [[ "$text" != *\"* && "$text" != *$'\n'* ]] || fail "chat text cannot contain quotes or newlines"
+  local script
+  IFS= read -r -d '' script <<'APPLESCRIPT' || true
 on axid(elem)
   tell application "System Events"
     try
@@ -808,7 +1022,7 @@ tell application "System Events"
       if theId is "cookie.popup.send" then set sendElem to elem
     end repeat
     if inputElem is missing value then error "missing cookie.popup.input"
-    set value of inputElem to "hello from drive-mac"
+    set value of inputElem to "__CHAT_TEXT__"
     delay 0.2
     set confirmed to false
     try
@@ -822,6 +1036,8 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
+  script="${script//__CHAT_TEXT__/$text}"
+  printf '%s\n' "$script" | osascript_run
 }
 
 cookie_turn_value() {
@@ -911,6 +1127,594 @@ end tell
 APPLESCRIPT
 }
 
+popup_layout_constant() {
+  local name="$1"
+  python3 - "$ROOT/app/Sources/CookieCore/Presentation.swift" "$name" <<'PY'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+name = sys.argv[2]
+match = re.search(
+    rf"static let {re.escape(name)}: CGFloat = ([0-9]+(?:\.[0-9]+)?)",
+    text,
+)
+if not match:
+    sys.exit(1)
+print(match.group(1))
+PY
+}
+
+popup_window_height() {
+  osascript_run <<'APPLESCRIPT'
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set windowHeight to item 2 of (get size of popupWindow)
+    return windowHeight
+  end tell
+end tell
+APPLESCRIPT
+}
+
+popup_panel_metrics() {
+  osascript_run <<'APPLESCRIPT'
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set mascotElem to missing value
+    repeat with elem in nodes
+      if my axid(elem) is "cookie.popup.mascot" then set mascotElem to elem
+    end repeat
+    if mascotElem is missing value then error "missing cookie.popup.mascot"
+    set windowHeight to item 2 of (get size of popupWindow)
+    set wTop to item 2 of (get position of popupWindow)
+    set mascotTop to item 2 of (get position of mascotElem)
+    set mascotHeight to item 2 of (get size of mascotElem)
+    set mascotMid to mascotTop + (mascotHeight / 2)
+    set rowHeight to (wTop + windowHeight - mascotMid) * 2
+    return "windowHeight " & windowHeight & linefeed & "rowHeight " & rowHeight
+  end tell
+end tell
+APPLESCRIPT
+}
+
+cookie_identified_value() {
+  local turn_id="$1"
+  [[ "$turn_id" =~ ^cookie\.turn\.(cookie|you)\.[0-9]+$ ]] || return 2
+  local script
+  IFS= read -r -d '' script <<'APPLESCRIPT' || true
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+on coerceToString(rawValue)
+  if rawValue is missing value then return ""
+  set oldDelims to AppleScript's text item delimiters
+  try
+    if class of rawValue is list then
+      set AppleScript's text item delimiters to " "
+      set joined to rawValue as string
+      set AppleScript's text item delimiters to oldDelims
+      return joined
+    end if
+    set AppleScript's text item delimiters to oldDelims
+    return rawValue as string
+  on error
+    set AppleScript's text item delimiters to oldDelims
+    return ""
+  end try
+end coerceToString
+
+on axtext(elem)
+  set rawValue to missing value
+  set rawName to missing value
+  set rawDescription to missing value
+  tell application "System Events"
+    try
+      set rawValue to value of elem
+    end try
+    try
+      set rawName to name of elem
+    end try
+    try
+      set rawDescription to description of elem
+    end try
+  end tell
+  set fromValue to my coerceToString(rawValue)
+  if fromValue is not "" and fromValue is not "cookie" then return fromValue
+  set fromName to my coerceToString(rawName)
+  if fromName is not "" and fromName is not "cookie" then return fromName
+  set fromDescription to my coerceToString(rawDescription)
+  if fromDescription is not "" and fromDescription is not "cookie" then return fromDescription
+  return ""
+end axtext
+
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  tell cookieProc
+    set popupWindow to missing value
+    repeat with candidate in windows
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then return "missing-window"
+    set nodes to entire contents of popupWindow
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is "__TURN_ID__" then
+        set theValue to my axtext(elem)
+        if theValue is not "" and theValue is not "cookie" then
+          return theId & tab & theValue
+        end if
+      end if
+    end repeat
+    return "waiting"
+  end tell
+end tell
+APPLESCRIPT
+  script="${script//__TURN_ID__/$turn_id}"
+  printf '%s\n' "$script" | osascript_run
+}
+
+popup_reply_metrics() {
+  local pad="$1"
+  local turn_id="$2"
+  local you_id="${turn_id/cookie.turn.cookie./cookie.turn.you.}"
+  [[ "$pad" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 2
+  [[ "$turn_id" =~ ^cookie\.turn\.cookie\.[0-9]+$ ]] || return 2
+  [[ "$you_id" =~ ^cookie\.turn\.you\.[0-9]+$ ]] || return 2
+  local script
+  IFS= read -r -d '' script <<'APPLESCRIPT' || true
+on axid(elem)
+  tell application "System Events"
+    try
+      return value of attribute "AXIdentifier" of elem
+    on error
+      return ""
+    end try
+  end tell
+end axid
+
+set replyHeight to 0
+set dotWidth to 0
+set badgeWidth to 0
+set inputHeight to 0
+set windowHeight to 0
+set bottomPlace to "outside"
+set cookieProc to my cookieDriveProcess()
+tell application "System Events"
+  set drivePid to unix id of cookieProc
+  tell cookieProc
+    if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+    set popupWindow to missing value
+    repeat with candidate in windows
+      if (unix id of cookieProc) is not drivePid then error "window owner pid is not the drive pid"
+      try
+        if name of candidate is "Ask Cookie…" then set popupWindow to candidate
+      end try
+    end repeat
+    if popupWindow is missing value then error "no Ask Cookie window"
+    set nodes to entire contents of popupWindow
+    set replyElem to missing value
+    set youElem to missing value
+    set dotElem to missing value
+    set badgeElem to missing value
+    set inputElem to missing value
+    set bottomElem to missing value
+    set mascotElem to missing value
+    repeat with elem in nodes
+      set theId to my axid(elem)
+      if theId is "cookie.badge.on-device.0" and badgeElem is missing value then set badgeElem to elem
+      if theId is "__TURN_ID__" and replyElem is missing value then set replyElem to elem
+      if theId is "__YOU_ID__" and youElem is missing value then set youElem to elem
+      if theId is "cookie.badge.on-device" and dotElem is missing value then set dotElem to elem
+      if theId is "cookie.popup.input" and inputElem is missing value then set inputElem to elem
+      if theId is "cookie.popup.transcript-bottom" and bottomElem is missing value then set bottomElem to elem
+      if theId is "cookie.popup.mascot" and mascotElem is missing value then set mascotElem to elem
+    end repeat
+    if replyElem is missing value then error "missing __TURN_ID__"
+    if youElem is missing value then error "missing __YOU_ID__"
+    if dotElem is missing value then error "missing cookie.badge.on-device"
+    if badgeElem is missing value then error "missing cookie.badge.on-device.0"
+    if inputElem is missing value then error "missing cookie.popup.input"
+    if bottomElem is missing value then error "missing cookie.popup.transcript-bottom"
+    if mascotElem is missing value then error "missing cookie.popup.mascot"
+    set replyLeft to item 1 of (get position of replyElem)
+    set replyHeight to item 2 of (get size of replyElem)
+    set replyWidth to item 1 of (get size of replyElem)
+    set youLeft to item 1 of (get position of youElem)
+    set youHeight to item 2 of (get size of youElem)
+    set youWidth to item 1 of (get size of youElem)
+    set dotWidth to item 1 of (get size of dotElem)
+    set badgeWidth to item 1 of (get size of badgeElem)
+    set inputHeight to item 2 of (get size of inputElem)
+    set windowHeight to item 2 of (get size of popupWindow)
+    set bLeft to item 1 of (get position of bottomElem)
+    set bTop to item 2 of (get position of bottomElem)
+    set bWidth to item 1 of (get size of bottomElem)
+    set bHeight to item 2 of (get size of bottomElem)
+    set wLeft to item 1 of (get position of popupWindow)
+    set wTop to item 2 of (get position of popupWindow)
+    set wWidth to item 1 of (get size of popupWindow)
+    set wHeight to item 2 of (get size of popupWindow)
+    set replyBottom to (item 2 of (get position of replyElem)) + replyHeight
+    set rowPad to __ROW_PAD__
+    set mascotTop to item 2 of (get position of mascotElem)
+    set mascotHeight to item 2 of (get size of mascotElem)
+    set mascotMid to mascotTop + (mascotHeight / 2)
+    set rowHeight to (wTop + wHeight - mascotMid) * 2
+    set rowTop to mascotTop - rowPad
+    set gap to rowTop - replyBottom
+    if bLeft >= wLeft and (bLeft + bWidth) <= (wLeft + wWidth + 4) and bTop >= wTop and (bTop + bHeight) <= rowTop then
+      set bottomPlace to "above"
+    end if
+  end tell
+end tell
+return "replyHeight " & replyHeight & linefeed & "youHeight " & youHeight & linefeed & "youLeft " & youLeft & linefeed & "youWidth " & youWidth & linefeed & "dotWidth " & dotWidth & linefeed & "badgeWidth " & badgeWidth & linefeed & "inputHeight " & inputHeight & linefeed & "windowHeight " & windowHeight & linefeed & "bottom " & bottomPlace & linefeed & "gap " & gap & linefeed & "rowHeight " & rowHeight & linefeed & "replyLeft " & replyLeft & linefeed & "replyWidth " & replyWidth & linefeed & "windowLeft " & wLeft & linefeed & "windowWidth " & wWidth
+APPLESCRIPT
+  script="${script//__ROW_PAD__/$pad}"
+  script="${script//__TURN_ID__/$turn_id}"
+  script="${script//__YOU_ID__/$you_id}"
+  printf '%s\n' "$script" | osascript_run
+}
+
+# CGWindowList for this drive pid only. screencapture -l needs that window id.
+# A full-display capture misses a panel on another display.
+capture_drive_window() {
+  local pid="$1"
+  local dest="$2"
+  local dir src wid
+  [[ "$pid" =~ ^[0-9]+$ ]] || fail "screencapture needs the drive pid"
+  command -v swift >/dev/null || fail "swift is required to read the drive window id"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/cookie-drive-window.XXXXXX")"
+  src="$dir/main.swift"
+  cat >"$src" <<'SWIFT'
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count == 2, let pid = Int(args[1]), pid >= 2 else {
+    fputs("drive pid missing\n", stderr)
+    exit(2)
+}
+let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+func number(_ value: Any?) -> Double? {
+    if let n = value as? Double { return n }
+    if let n = value as? Int { return Double(n) }
+    if let n = value as? NSNumber { return n.doubleValue }
+    return nil
+}
+var bestID = 0
+var bestArea = 0.0
+for window in info {
+    guard let owner = number(window[kCGWindowOwnerPID as String]), Int(owner) == pid else { continue }
+    guard let windowID = number(window[kCGWindowNumber as String]), windowID > 0 else { continue }
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = number(bounds["Width"]) ?? 0
+    let height = number(bounds["Height"]) ?? 0
+    let area = width * height
+    if width < 200 || height < 40 || area <= bestArea { continue }
+    bestArea = area
+    bestID = Int(windowID)
+}
+if bestID == 0 {
+    fputs("no on-screen window for drive pid \(pid)\n", stderr)
+    exit(1)
+}
+print(bestID)
+SWIFT
+  if ! wid="$(swift "$src" "$pid")"; then
+    rm -rf "$dir"
+    fail "no on-screen window for drive pid $pid"
+  fi
+  rm -rf "$dir"
+  wid="$(printf '%s' "$wid" | tr -d '[:space:]')"
+  [[ "$wid" =~ ^[0-9]+$ ]] || fail "no on-screen window for drive pid $pid"
+  log "popup window id=$wid pid=$pid"
+  if ! screencapture -x -l"$wid" "$dest"; then
+    fail "screencapture -l$wid wrote no popup image"
+  fi
+}
+
+# mode is "three" or "long". The second argument is the metrics file.
+popup_reply_metrics_ok() {
+  local mode="$1"
+  local file="$2"
+  POPUP_METRICS_MODE="$mode" python3 - "$file" <<'PY'
+import os, pathlib, sys
+vals = {}
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    parts = line.split(" ", 1)
+    if len(parts) == 2:
+        vals[parts[0]] = parts[1].strip()
+need = [
+    "replyHeight", "youHeight", "youLeft", "youWidth", "dotWidth", "badgeWidth",
+    "inputHeight", "windowHeight", "bottom", "gap",
+    "rowHeight", "replyLeft", "replyWidth", "windowLeft", "windowWidth",
+]
+missing = [key for key in need if key not in vals]
+if missing:
+    print("missing " + ", ".join(missing))
+    sys.exit(1)
+reply_height = float(vals["replyHeight"])
+you_height = float(vals["youHeight"])
+you_left = float(vals["youLeft"])
+you_width = float(vals["youWidth"])
+dot_width = float(vals["dotWidth"])
+badge_width = float(vals["badgeWidth"])
+input_height = float(vals["inputHeight"])
+window_height = float(vals["windowHeight"])
+gap = float(vals["gap"])
+row_height = float(vals["rowHeight"])
+reply_left = float(vals["replyLeft"])
+reply_width = float(vals["replyWidth"])
+window_left = float(vals["windowLeft"])
+window_width = float(vals["windowWidth"])
+max_height = float(os.environ["POPUP_MAX_HEIGHT"])
+mode = os.environ["POPUP_METRICS_MODE"]
+frame_inside = (
+    reply_left + 1 >= window_left
+    and reply_left + reply_width <= window_left + window_width + 4
+)
+you_inside = (
+    you_left + 1 >= window_left
+    and you_left + you_width <= window_left + window_width + 4
+)
+# A clipped single line measured about 20pt. Taller than that is more than one line.
+def more_than_one_line(height):
+    return height > 30
+ok = (
+    56 <= row_height <= 72
+    and vals["bottom"] == "above"
+    and 4 < dot_width < 40
+    and 36 < badge_width < 140
+    and reply_width > badge_width * 2
+    and input_height < 48
+    and 0 <= gap <= 16
+    and frame_inside
+    and you_inside
+)
+if mode == "long":
+    ok = ok and more_than_one_line(reply_height) and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
+elif mode == "three":
+    # One-line replies measure under the 281 pt line estimate. 270 stays
+    # above the 248 pt three-exchange preview and below that estimate.
+    ok = ok and 120 < window_height < 270
+else:
+    print("unknown mode " + mode)
+    sys.exit(1)
+if not ok:
+    print(mode)
+    for key in need:
+        print(key, vals[key])
+    sys.exit(1)
+print(mode + " metrics ok")
+PY
+}
+
+run_popup_reply() {
+  local max_height row_pad
+  max_height="$(popup_layout_constant maxHeight)" || fail "PopupLayout.maxHeight is missing"
+  row_pad="$(popup_layout_constant inputRowVerticalPadding)" || fail "PopupLayout.inputRowVerticalPadding is missing"
+  export POPUP_MAX_HEIGHT="$max_height"
+  log "open via Ask Cookie…"
+  open_via_ask
+  sleep 0.6
+  log "measure empty popup"
+  local empty_height="" empty_row=""
+  for _ in $(seq 1 40); do
+    if popup_panel_metrics > /tmp/cookie-drive-mac-empty-metrics.txt 2>/tmp/cookie-drive-mac-empty.err; then
+      if python3 - <<'PY'
+import pathlib, sys
+vals = {}
+for line in pathlib.Path("/tmp/cookie-drive-mac-empty-metrics.txt").read_text().splitlines():
+    parts = line.split(" ", 1)
+    if len(parts) == 2:
+        vals[parts[0]] = parts[1].strip()
+if "windowHeight" not in vals or "rowHeight" not in vals:
+    sys.exit(1)
+window_height = float(vals["windowHeight"])
+row_height = float(vals["rowHeight"])
+sys.exit(0 if window_height < 80 and 56 <= row_height <= 72 else 1)
+PY
+      then
+        empty_height="$(awk '$1 == "windowHeight" { print $2 }' /tmp/cookie-drive-mac-empty-metrics.txt)"
+        empty_row="$(awk '$1 == "rowHeight" { print $2 }' /tmp/cookie-drive-mac-empty-metrics.txt)"
+        break
+      fi
+    fi
+    empty_height=""
+    sleep 0.25
+  done
+  if [[ -z "$empty_height" ]]; then
+    log "empty popup"
+    cat /tmp/cookie-drive-mac-empty.err 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-empty-metrics.txt 2>/dev/null || true
+    fail "empty popup is not under 80 pt or the input row is over 72 pt"
+  fi
+  log "empty height $empty_height row $empty_row"
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-empty.png
+  log "send three short exchanges"
+  local you_lines=("hey cookie!" "say something long" "this ui is kinda chopped")
+  local index
+  for index in 0 1 2; do
+    send_chat "${you_lines[$index]}"
+    local turn_ready=0
+    for _ in $(seq 1 80); do
+      cookie_identified_value "cookie.turn.cookie.$index" > /tmp/cookie-drive-mac-short-chat.txt || true
+      cookie_identified_value "cookie.turn.you.$index" > /tmp/cookie-drive-mac-short-you.txt || true
+      if YOU_LINE="${you_lines[$index]}" python3 - /tmp/cookie-drive-mac-short-chat.txt /tmp/cookie-drive-mac-short-you.txt <<'PY'
+import os, pathlib, sys
+cookie = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+you = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+full = "Hi. END-OF-REPLY-m1-popup"
+sys.exit(0 if full in cookie and "Line 01" not in cookie and os.environ["YOU_LINE"] in you else 1)
+PY
+      then
+        turn_ready=1
+        break
+      fi
+      sleep 0.25
+    done
+    if [[ "$turn_ready" != "1" ]]; then
+      log "exchange $index"
+      cat /tmp/cookie-drive-mac-short-chat.txt 2>/dev/null || true
+      cat /tmp/cookie-drive-mac-short-you.txt 2>/dev/null || true
+      fail "exchange $index did not show the sentinel"
+    fi
+  done
+  local ready=0
+  for _ in $(seq 1 40); do
+    if popup_reply_metrics "$row_pad" cookie.turn.cookie.2 > /tmp/cookie-drive-mac-short-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if popup_reply_metrics_ok three /tmp/cookie-drive-mac-short-metrics.txt; then
+        ready=1
+        break
+      fi
+    fi
+    sleep 0.25
+  done
+  if [[ "$ready" != "1" ]]; then
+    log "three-exchange metrics"
+    cat /tmp/cookie-drive-mac-short-metrics.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
+    dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
+    cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
+    fail "three exchanges missed the input-row height, the gap, or the 270 pt ceiling"
+  fi
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-short.png
+  log "send long reply"
+  send_chat
+  ready=0
+  for _ in $(seq 1 80); do
+    cookie_identified_value cookie.turn.cookie.3 > /tmp/cookie-drive-mac-chat.txt || true
+    if ! python3 - /tmp/cookie-drive-mac-chat.txt <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+ok = "END-OF-REPLY-m1-popup" in text and "Einstein is best known for" in text and "Line 24" in text
+sys.exit(0 if ok else 1)
+PY
+    then
+      sleep 0.25
+      continue
+    fi
+    if popup_reply_metrics "$row_pad" cookie.turn.cookie.3 > /tmp/cookie-drive-mac-metrics.txt 2>/tmp/cookie-drive-mac-metrics.err; then
+      if popup_reply_metrics_ok long /tmp/cookie-drive-mac-metrics.txt; then
+        ready=1
+        break
+      fi
+    fi
+    sleep 0.25
+  done
+  if [[ "$ready" != "1" ]]; then
+    log "chat value"
+    cat /tmp/cookie-drive-mac-chat.txt 2>/dev/null || true
+    log "metrics"
+    cat /tmp/cookie-drive-mac-metrics.txt 2>/dev/null || true
+    cat /tmp/cookie-drive-mac-metrics.err 2>/dev/null || true
+    dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || true
+    cat /tmp/cookie-drive-mac-ax.txt 2>/dev/null || true
+    fail "popup reply missed the height cap, the input-row gap, or the bottom marker"
+  fi
+  {
+    printf 'emptyHeight %s\n' "$empty_height"
+    printf 'emptyRowHeight %s\n' "$empty_row"
+    printf '%s\n' "--- short"
+    cat /tmp/cookie-drive-mac-short-metrics.txt
+    printf '%s\n' "--- long"
+    cat /tmp/cookie-drive-mac-metrics.txt
+  } > /tmp/cookie-drive-mac-metrics-all.txt
+  mv /tmp/cookie-drive-mac-metrics-all.txt /tmp/cookie-drive-mac-metrics.txt
+  dump_popup_ax > /tmp/cookie-drive-mac-ax.txt || fail "popup accessibility read failed"
+  local shell_log="$COOKIE_DATA_DIR/logs/cookie-shell.log"
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=Hi. END-OF-REPLY-m1-popup" >/dev/null; then
+    log "shell log"
+    cat "$shell_log" 2>/dev/null || true
+    fail "chat.done log is missing the short reply"
+  fi
+  if ! grep -F "chat.done" "$shell_log" | grep -F "accumulated=" | grep -F "Line 24" | grep -F "END-OF-REPLY-m1-popup" >/dev/null; then
+    log "shell log"
+    cat "$shell_log" 2>/dev/null || true
+    fail "chat.done log is missing the full accumulated reply"
+  fi
+  capture_drive_window "$APP_PID" /tmp/cookie-drive-mac-popup-long.png
+  cp /tmp/cookie-drive-mac-popup-long.png /tmp/cookie-drive-mac-popup.png
+  for shot in popup-empty popup-short popup-long popup; do
+    if [[ ! -s "/tmp/cookie-drive-mac-${shot}.png" ]]; then
+      fail "screencapture wrote no ${shot}.png"
+    fi
+  done
+  {
+    printf '%s\n' "--- short"
+    cat /tmp/cookie-drive-mac-short-chat.txt
+    printf '%s\n' "--- long"
+    cat /tmp/cookie-drive-mac-chat.txt
+  } > /tmp/cookie-drive-mac-chat-all.txt
+  mv /tmp/cookie-drive-mac-chat-all.txt /tmp/cookie-drive-mac-chat.txt
+  if [[ -n "$evidence" ]]; then
+    mkdir -p "$evidence"
+    {
+      printf '%s\n' "drive-mac popup-reply --runtime fake"
+      printf '%s\n' "COOKIE_DATA_DIR=$COOKIE_DATA_DIR"
+      printf '%s\n' "COOKIE_LLAMA_PORT=${COOKIE_LLAMA_PORT:-}"
+      printf '%s\n' "resolvedPort=${PORT}"
+      printf '%s\n' "COOKIE_CORE_COMMAND=${COOKIE_CORE_COMMAND:-}"
+    } > "$evidence/command.txt"
+    cp /tmp/cookie-drive-mac-menu.txt "$evidence/menu.txt"
+    cp /tmp/cookie-drive-mac-ax.txt "$evidence/ax.txt"
+    cp /tmp/cookie-drive-mac-chat.txt "$evidence/chat.txt"
+    cp /tmp/cookie-drive-mac-metrics.txt "$evidence/metrics.txt"
+    cp /tmp/cookie-drive-mac-popup-empty.png "$evidence/popup-empty.png"
+    cp /tmp/cookie-drive-mac-popup-short.png "$evidence/popup-short.png"
+    cp /tmp/cookie-drive-mac-popup-long.png "$evidence/popup-long.png"
+    cp /tmp/cookie-drive-mac-popup.png "$evidence/popup.png"
+    cp "$shell_log" "$evidence/cookie-shell.log"
+    if [[ ! -s "$evidence/chat.txt" || ! -s "$evidence/popup-long.png" || ! -s "$evidence/metrics.txt" ]]; then
+      fail "evidence is missing chat.txt, metrics.txt, or popup-long.png"
+    fi
+  fi
+  log "metrics"
+  cat /tmp/cookie-drive-mac-metrics.txt
+  log "popup-reply ok"
+  log "Mac proof is pending. Leave the sub-features planned until verify-evidence/m1-popup-reply exists."
+}
+
 close_popup() {
   osascript_run <<'APPLESCRIPT'
 on axid(elem)
@@ -977,8 +1781,7 @@ option_click_status() {
 }
 
 wait_for_menu() {
-  local attempt
-  for attempt in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
       return 0
     fi
@@ -988,8 +1791,7 @@ wait_for_menu() {
 }
 
 wait_for_runtime_up() {
-  local attempt
-  for attempt in $(seq 1 120); do
+  for _ in $(seq 1 120); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
       if python3 - <<'PY'
 import pathlib, sys
@@ -1075,8 +1877,8 @@ APPLESCRIPT
 
 wait_observe() {
   local pid="$1" bin="$2" name="$3" bundle="$4"
-  local attempt line got
-  for attempt in $(seq 1 40); do
+  local line got
+  for _ in $(seq 1 40); do
     line="$(with_target "$pid" "$bin" "$name" "$bundle" observe_status 2>/dev/null || true)"
     got="$(status_field "$line" 1)"
     if [[ "$got" == "$pid" ]]; then
@@ -1097,7 +1899,7 @@ run_self_check() {
     fail "self-check is fake-core only"
   fi
   prepare_drive_bundle "$SOURCE_APP"
-  local decoy_app="$PREPARED_APP" decoy_bin="$PREPARED_BIN"
+  local decoy_bin="$PREPARED_BIN"
   local decoy_name="$PREPARED_PROCESS_NAME" decoy_bundle="$PREPARED_BUNDLE_ID"
   install_prepared_identity "$SOURCE_APP"
   if [[ "$DRIVE_PROCESS_NAME" == "$decoy_name" || "$DRIVE_BUNDLE_ID" == "$decoy_bundle" ]]; then
@@ -1210,6 +2012,11 @@ if missing:
     sys.exit(1)
 print("menu strings ok")
 PY
+fi
+
+if [[ "$feature" == "popup-reply" ]]; then
+  run_popup_reply
+  exit 0
 fi
 
 drive_popup=0
@@ -1343,8 +2150,8 @@ if [[ "$feature" == "menu-bar-icon" || "$feature" == "hotkey-popup" || "$feature
 fi
 
 relaunch_app() {
-  local attempt gone=0
-  for attempt in $(seq 1 40); do
+  local gone=0
+  for _ in $(seq 1 40); do
     if [[ -z "$(pids_for_executable "$BIN" "$DRIVE_PROCESS_NAME" | tr -d '[:space:]')" ]]; then
       gone=1
       break
@@ -1377,7 +2184,9 @@ orphan_reap_check() {
     old_embed="$(pid_in_file "$COOKIE_DATA_DIR/logs/llama-embed.pid" || true)"
   fi
   log "orphan-reap signal 9 ${APP_PID} pidfile=${old_pid:-none} embed=${old_embed:-none}"
-  kill -9 "$APP_PID" 2>/dev/null || true
+  # kill -9 skips applicationShouldTerminate. Verify first, and do not signal
+  # a pid that fails that check.
+  signal_verified_app_pid -9 || fail "refusing to signal pid ${APP_PID}"
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
   sleep 0.5
@@ -1515,12 +2324,12 @@ dump_shell_log_since() {
   tail -c +$((mark + 1)) "$file" || true
 }
 
-# Finder and `open` pass no COOKIE_* variables and a minimal PATH.
-# LaunchServices does not keep this shell's environment. env -i is the
-# same shape John gets from `open -n`.
+# Finder and `open` pass a minimal PATH and drop this shell's COOKIE_* variables.
+# env -i is that shape, plus the per-run HOME and COOKIE_DATA_DIR this launch
+# creates so the app cannot open the real cookie.db.
 open_clean_check() {
-  local attempt gone=0
-  for attempt in $(seq 1 40); do
+  local gone=0
+  for _ in $(seq 1 40); do
     if [[ -z "$(pids_for_executable "$BIN" "$DRIVE_PROCESS_NAME" | tr -d '[:space:]')" ]]; then
       gone=1
       break
@@ -1534,7 +2343,7 @@ open_clean_check() {
   local others
   others="$(cookieagent_comm_pids | tr '\n' ' ')"
   if [[ -n "${others// /}" ]]; then
-    log "open-clean skipped: another CookieAgent is running (pid ${others}); not launching into Application Support and not signaling those pids"
+    log "open-clean skipped: another CookieAgent is running (pid ${others}); not launching and not signaling those pids"
     if [[ -n "$evidence" ]]; then
       mkdir -p "$evidence"
       {
@@ -1552,58 +2361,98 @@ open_clean_check() {
     open_clean_status=3
     return 0
   fi
-  local support port_before shell_log log_mark
-  support="$(open_support_dir)"
+  local isolate_home isolate_data support port_before shell_log log_mark
+  local launch_path model embed
+  ensure_isolate_root
+  isolate_dir home
+  isolate_home="$ISOLATE_LAST"
+  isolate_dir data
+  isolate_data="$ISOLATE_LAST"
+  assert_isolated_data_dir "$isolate_home" "$isolate_data"
+  support="$isolate_data"
   shell_log="$support/logs/cookie-shell.log"
   log_mark="$(shell_log_bytes "$shell_log")"
   port_before=0
   if port_listening 8080; then
     port_before=1
   fi
-  log "open -n clean env support=$support existing=none"
+  launch_path="$(launch_path_with_user_tools "/usr/bin:/bin:/usr/sbin:/sbin")"
+  model="$(launch_model_path "${COOKIE_MODEL_PATH:-}" "Qwen3.6-35B-A3B-Q4_K_M.gguf")"
+  embed="$(launch_model_path "${COOKIE_EMBED_MODEL_PATH:-}" "nomic-embed-text-v1.5.Q8_0.gguf")"
+  local pnpm_home corepack_home
+  pnpm_home="$(real_pnpm_home)"
+  corepack_home="$(real_corepack_home)"
+  sweep_drive_preference_plists
+  log "open -n clean env home=$isolate_home data=$isolate_data existing=none"
+  # env -i is the Finder-shaped environment. --env is what LaunchServices
+  # applies to the new process. CFFIXED_USER_HOME hides the real home, so
+  # the model paths and PATH have to be --env too or the weights are looked
+  # up under that temp home. This launch passes COOKIE_DATA_DIR, so the
+  # log must say dataDirSource=environment. It does not cover the default
+  # data directory or the stable ~/cookie-runtime pid.
   env -i \
-    HOME="$HOME" \
+    HOME="$isolate_home" \
+    CFFIXED_USER_HOME="$isolate_home" \
+    COOKIE_DATA_DIR="$isolate_data" \
+    COOKIE_MODEL_PATH="$model" \
+    COOKIE_EMBED_MODEL_PATH="$embed" \
+    PNPM_HOME="$pnpm_home" \
+    COREPACK_HOME="$corepack_home" \
     USER="${USER:-$(id -un)}" \
     LOGNAME="${USER:-$(id -un)}" \
     TMPDIR="${TMPDIR:-/tmp}" \
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-    /usr/bin/open -n "$APP"
-  local pid current fresh="" count=0
-  for attempt in $(seq 1 40); do
-    current="$(comm_pids_named "$DRIVE_PROCESS_NAME" | tr '\n' ' ')"
-    fresh=""
+    PATH="$launch_path" \
+    /usr/bin/open -n \
+      --env "HOME=$isolate_home" \
+      --env "CFFIXED_USER_HOME=$isolate_home" \
+      --env "COOKIE_DATA_DIR=$isolate_data" \
+      --env "COOKIE_MODEL_PATH=$model" \
+      --env "COOKIE_EMBED_MODEL_PATH=$embed" \
+      --env "PATH=$launch_path" \
+      --env "PNPM_HOME=$pnpm_home" \
+      --env "COREPACK_HOME=$corepack_home" \
+      "$APP"
+  local pid count=0
+  local fresh_pids=()
+  for _ in $(seq 1 40); do
+    fresh_pids=()
     count=0
-    for pid in $current; do
-      [[ -n "$pid" ]] || continue
-      fresh="$fresh $pid"
+    while IFS= read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      fresh_pids+=("$pid")
       count=$((count + 1))
-    done
+    done < <(comm_pids_named "$DRIVE_PROCESS_NAME")
     if [[ "$count" -eq 1 ]]; then
       break
     fi
     if [[ "$count" -gt 1 ]]; then
       log_cookie_processes
-      fail "open started more than one process:$fresh"
+      stop_verified_drive_pids "${fresh_pids[@]}"
+      fail "open started more than one process:${fresh_pids[*]}"
     fi
-    fresh=""
+    fresh_pids=()
     count=0
     sleep 0.25
   done
   if [[ "$count" -ne 1 ]]; then
     log_cookie_processes
+    if [[ "${#fresh_pids[@]}" -gt 0 ]]; then
+      stop_verified_drive_pids "${fresh_pids[@]}"
+    fi
     fail "open did not start a new instance of $BIN"
   fi
   local new_pid reason
-  new_pid="${fresh# }"
+  new_pid="${fresh_pids[0]}"
   reason="$(verify_drive_pid_reason "$new_pid" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" || true)"
   if [[ -n "$reason" ]]; then
     log_cookie_processes
+    stop_verified_drive_pids "$new_pid"
     fail "refusing to drive open pid: $reason"
   fi
   APP_PID="$new_pid"
   log "open pid=$APP_PID process=$DRIVE_PROCESS_NAME bundle=$DRIVE_BUNDLE_ID"
   local ready=0
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if [[ -f "$shell_log" ]] && tail -c +$((log_mark + 1)) "$shell_log" 2>/dev/null | grep -E "signals installed pid=${APP_PID}([^0-9]|$)" >/dev/null; then
       ready=1
       break
@@ -1614,6 +2463,21 @@ open_clean_check() {
     dump_shell_log_since "$shell_log" "$log_mark"
     fail "signals installed line did not appear for pid $APP_PID"
   fi
+  local launch_text=""
+  launch_text="$(tail -c +$((log_mark + 1)) "$shell_log" 2>/dev/null || true)"
+  if ! printf '%s\n' "$launch_text" | grep -F "dataDir=${isolate_data} dataDirSource=environment" >/dev/null; then
+    dump_shell_log_since "$shell_log" "$log_mark"
+    stop_pid "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID"
+    APP_PID=""
+    fail "open launch dataDir is not ${isolate_data} from the environment"
+  fi
+  log "open dataDir=${isolate_data} dataDirSource=environment"
+  if real_drive_plist_present; then
+    stop_pid "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID"
+    APP_PID=""
+    sweep_drive_preference_plists
+    fail "a drive preference plist was written under the real home"
+  fi
   local recorded=""
   if [[ -f "$support/logs/cookie-agent.pid" ]]; then
     recorded="$(awk 'NF >= 1 { print $1; exit }' "$support/logs/cookie-agent.pid")"
@@ -1623,7 +2487,7 @@ open_clean_check() {
   fi
   log "signals installed pid=$APP_PID"
   local cwd="" menu_text=""
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if read_menu > /tmp/cookie-drive-mac-menu.txt 2>/tmp/cookie-drive-mac-menu.err; then
       menu_text="$(cat /tmp/cookie-drive-mac-menu.txt || true)"
       case "$menu_text" in
@@ -1701,9 +2565,9 @@ open_clean_check() {
   signal_mark="$(shell_log_bytes "$shell_log")"
   log_cookie_processes
   log "SIGTERM target pid=$APP_PID pidfile=${owned:-none} embed=${embed_owned:-none} port=$term_port embedPort=$embed_term_port"
-  kill -TERM "$APP_PID" || true
+  signal_verified_app_pid -TERM || fail "refusing to signal pid ${APP_PID}"
   local exited=0
-  for attempt in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
       exited=1
       break

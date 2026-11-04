@@ -70,6 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let renderingPreviews = MainActor.assumeIsolated {
+            self.renderPopupPreviewsIfRequested()
+        }
+        if renderingPreviews {
+            return
+        }
         NSApp.setActivationPolicy(.accessory)
         let popup = PopupController(model: model)
         self.popup = popup
@@ -101,5 +107,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /// Writes the three popup PNGs and exits. Returns false when the
+    /// environment variable is unset so a normal launch continues.
+    @MainActor
+    private func renderPopupPreviewsIfRequested() -> Bool {
+        guard let raw = ProcessInfo.processInfo.environment["COOKIE_RENDER_POPUP_PREVIEWS"],
+              !raw.isEmpty else {
+            return false
+        }
+        let directory = URL(fileURLWithPath: raw, isDirectory: true)
+        do {
+            try PopupPreviewRenderer.write(to: directory)
+        } catch {
+            fputs("popup previews: \(error)\n", stderr)
+            exit(1)
+        }
+        exit(0)
     }
 }

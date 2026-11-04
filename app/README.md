@@ -56,6 +56,7 @@ Quit with the menu item `Quit Cookie`. The global hotkey is ⌥Space. Another ap
 | Loading line | `cookie.popup.loading` | `Loading the model…` |
 | You turn | `cookie.turn.you.<n>` | `you` |
 | Cookie turn | `cookie.turn.cookie.<n>` | `cookie` |
+| Badge | `cookie.badge.on-device.<n>` | `on-device` |
 | On-device dot | `cookie.badge.on-device` | `on-device` |
 
 Turn indexes start at 0 for each role, so the first reply is `cookie.turn.cookie.0`. Each identifier is on exactly one AppKit element: the text view, a reply field, the send button, or the mascot box. The hosting view does not publish those views again. A SwiftUI modifier on `Text` is not what System Events reads.
