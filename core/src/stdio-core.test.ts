@@ -276,8 +276,9 @@ describe("stdio core", () => {
         endedAt: null,
         summary: null,
       });
-      store.appendTurn(seedTurn("t1", "picnic alpha", 1));
-      store.appendTurn(seedTurn("t2", "picnic beta", 2));
+      const seededAt = Date.now();
+      store.appendTurn(seedTurn("t1", "picnic alpha", seededAt));
+      store.appendTurn(seedTurn("t2", "picnic beta", seededAt + 1));
       store.close();
       const client = new StdioClient({
         COOKIE_LLAMA_PORT: String(llama.port),

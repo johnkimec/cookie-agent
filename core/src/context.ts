@@ -1,4 +1,5 @@
 import { CHARS_PER_TOKEN, estimateTokens } from "./memory/chunk.ts";
+import { localDay, readTimeZone } from "./memory/schedule.ts";
 import type { Memory, TurnRecord } from "./memory/types.ts";
 
 const ELLIPSIS = "…";
@@ -97,7 +98,7 @@ export function renderRetrieved(
  * Long text is centered on `matchText`, with ellipses on cut edges.
  */
 export function retrievedLine(memory: Memory, room: number): string {
-  const day = formatLocalDay(memory.createdAt);
+  const day = retrievedDay(memory.createdAt);
   const label =
     day === null ? `[${memory.source}]` : `[${day}] [${memory.source}]`;
   const prefix = `- ${label} `;
@@ -113,8 +114,11 @@ export function retrievedLine(memory: Memory, room: number): string {
   return `${prefix}${body}`;
 }
 
-/** Local `YYYY-MM-DD`. Uses local date fields, not the UTC date. */
-export function formatLocalDay(createdAt: number | undefined): string | null {
+/**
+ * Local `YYYY-MM-DD` from `localDay` and `readTimeZone`.
+ * A missing or non-finite timestamp has no prefix.
+ */
+export function retrievedDay(createdAt: number | undefined): string | null {
   if (createdAt === undefined || !Number.isFinite(createdAt)) {
     return null;
   }
@@ -122,10 +126,7 @@ export function formatLocalDay(createdAt: number | undefined): string | null {
   if (Number.isNaN(date.getTime())) {
     return null;
   }
-  const year = String(date.getFullYear()).padStart(4, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return localDay(createdAt, readTimeZone());
 }
 
 /**
