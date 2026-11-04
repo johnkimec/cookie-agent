@@ -758,17 +758,69 @@ command_has_port() {
   '
 }
 
+# Fail closed before any count. A missing or broken lsof would drop the
+# open-file exclusions and leave only the port rule.
+require_lsof() {
+  local err_file status=0
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '%s\n' "lsof is not on PATH" >&2
+    return 1
+  fi
+  err_file="$(mktemp "${TMPDIR:-/tmp}/cookie-drive-lsof.XXXXXX")" || {
+    printf '%s\n' "lsof failed" >&2
+    return 1
+  }
+  lsof -nP -p "$$" -Fn >/dev/null 2>"$err_file" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf '%s\n' "lsof failed" >&2
+    if [[ -s "$err_file" ]]; then
+      cat "$err_file" >&2
+    fi
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  return 0
+}
+
+# lsof -Fn names. Only absolute paths (a leading /). A relative socket or pipe
+# name realpath's against cwd, so a check started inside COOKIE_DATA_DIR would
+# treat John's server as inside this run's data directory.
 process_open_paths() {
-  local pid="$1"
+  local pid="$1" names status err_file
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
-  lsof -nP -p "$pid" -Fn 2>/dev/null | awk '/^n/ { sub(/^n/, ""); if ($0 != "") print }'
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '%s\n' "lsof is not on PATH" >&2
+    return 1
+  fi
+  err_file="$(mktemp "${TMPDIR:-/tmp}/cookie-drive-lsof.XXXXXX")" || {
+    printf '%s\n' "lsof failed for pid $pid" >&2
+    return 1
+  }
+  status=0
+  names="$(lsof -nP -p "$pid" -Fn 2>"$err_file")" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf '%s\n' "lsof failed for pid $pid" >&2
+    if [[ -s "$err_file" ]]; then
+      cat "$err_file" >&2
+    fi
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  printf '%s\n' "$names" | awk '/^n/ { sub(/^n/, ""); if ($0 ~ /^\//) print }'
 }
 
 # under foreign product, each 0 or 1. under means a file in this data dir.
 llama_open_marks() {
-  local pid="$1" data_real="$2" path base under=0 foreign=0 product=0
+  local pid="$1" data_real="$2" path base under=0 foreign=0 product=0 names
+  names="$(process_open_paths "$pid")" || return 1
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
+    case "$path" in
+      /*) ;;
+      *) continue ;;
+    esac
     if path_is_under "$path" "$data_real"; then
       under=1
     fi
@@ -781,7 +833,7 @@ llama_open_marks() {
     if path_is_product_data "$path" && ! path_is_under "$path" "$data_real"; then
       product=1
     fi
-  done < <(process_open_paths "$pid")
+  done <<< "$names"
   printf '%s %s %s\n' "$under" "$foreign" "$product"
 }
 
@@ -810,8 +862,9 @@ command_for_pid() {
 }
 
 # First line is "tree" or "root". Later lines are ancestor basenames.
-# tree: the drive pid is on the chain. root: the chain reached launchd, init,
-# or pid 0/1 without the drive pid (the parent already exited).
+# tree: the drive pid is on the chain. root: the process is outside the
+# drive's process tree (the walk reached pid 0, pid 1, launchd, init, or
+# systemd without the drive pid).
 # Return 1 when a ppid is missing, the chain cycles, or it is too deep.
 classify_llama_chain() {
   local start_pid="$1" drive_pid="$2" table="$3"
@@ -880,15 +933,14 @@ chain_has_product_app() {
 # parent chain cannot be read. This function does not signal any process.
 #
 # A server counts when its parent chain reaches the verified drive pid, or
-# when that chain ends at launchd/init (the parent exited and the process
-# was reparented) and the process is still tied to this run: a file open
-# under COOKIE_DATA_DIR, or argv --port equal to the chat or embed port.
-# A reparented --port match is refused when an ancestor is CookieAgent, when
-# a llama log is open outside this data directory, or when a file is open
-# under the product data directory. The data directory is the reliable mark
-# after reparenting, because the product argv does not include it and the
-# log stays open. The port still catches an orphan whose only visible mark
-# is the port this drive passed.
+# when it is outside the drive's process tree and still tied to this run: a
+# file open under COOKIE_DATA_DIR, argv --port equal to the chat or embed
+# port, or a pid recorded in this run's llama-server.pid or llama-embed.pid
+# that is still llama-server. A --port match is refused when an ancestor is
+# CookieAgent, when a llama log is open outside this data directory, or when
+# a file is open under the product data directory. lsof names that do not
+# start with / are ignored. If lsof is missing or exits non-zero, this
+# returns 1 and prints no pids.
 drive_owned_llama_pids() {
   local drive_pid="$1"
   local expected_bin="$2"
@@ -898,6 +950,7 @@ drive_owned_llama_pids() {
   local chat_port="${6:-}"
   local embed_port="${7:-}"
   local reason data_real status
+  require_lsof || return 1
   if [[ -z "$expected_name" || -z "$expected_bundle" ]]; then
     printf '%s\n' "drive identity was not recorded" >&2
     return 1
@@ -925,10 +978,30 @@ drive_owned_llama_pids() {
   return "$status"
 }
 
+# A pid from this run's pid file counts when that process is still llama-server.
+# A dead pid, or a pid reused by another executable, does not.
+pidfile_llama_pid() {
+  local file="$1" drive_pid="$2" table="$3" pid rest comm base
+  [[ -f "$file" ]] || return 0
+  pid="$(awk 'NF >= 1 { print $1; exit }' "$file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  [[ "$pid" == "$drive_pid" ]] && return 0
+  rest="$(lookup_ppid_comm "$table" "$pid" || true)"
+  [[ -n "$rest" ]] || return 0
+  comm="${rest#*$'\t'}"
+  base="$(comm_basename "$comm")"
+  [[ "$base" == "llama-server" ]] || return 0
+  printf '%s\n' "$pid"
+}
+
 drive_owned_llama_collect() {
   local drive_pid="$1" data_real="$2" chat_port="$3" embed_port="$4"
-  local line pid comm base chain kind marks under foreign product cmd
+  local line pid comm base chain kind marks under foreign product cmd file
   local comm_raw cmd_raw comm_text cmd_text owned_lines="" added=" "
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '%s\n' "lsof is not on PATH" >&2
+    return 1
+  fi
   comm_raw="$(ps -axww -o pid=,ppid=,comm=)" || {
     printf '%s\n' "cannot read the process table" >&2
     return 1
@@ -992,7 +1065,7 @@ drive_owned_llama_collect() {
         return 1
         ;;
     esac
-    marks="$(llama_open_marks "$pid" "$data_real")"
+    marks="$(llama_open_marks "$pid" "$data_real")" || return 1
     under="${marks%% *}"
     product="${marks##* }"
     foreign="${marks#* }"
@@ -1022,6 +1095,19 @@ drive_owned_llama_collect() {
       fi
     fi
   done <<< "$comm_text"
+  for file in "$data_real/logs/llama-server.pid" "$data_real/logs/llama-embed.pid"; do
+    pid="$(pidfile_llama_pid "$file" "$drive_pid" "$comm_text" || true)"
+    [[ -n "$pid" ]] || continue
+    case " $added " in
+      *" $pid "*) continue ;;
+    esac
+    added="$added$pid "
+    if [[ -z "$owned_lines" ]]; then
+      owned_lines="$pid"
+    else
+      owned_lines="${owned_lines}"$'\n'"${pid}"
+    fi
+  done
   if [[ -n "$owned_lines" ]]; then
     printf '%s\n' "$owned_lines" | awk 'NF' | sort -n
   fi

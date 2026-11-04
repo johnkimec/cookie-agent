@@ -1661,7 +1661,7 @@ if orphan_reap_within_limit real 3; then
   exit 1
 fi
 
-# (a) John's llama-server is running, including one reparented onto his log,
+# (a) John's llama-server is running, including one outside the drive's process tree on his log,
 # and the drive has no llama child. The check passes.
 write_procs \
   "111|$JOHN|$JOHN|1|$JOHN" \
@@ -1682,7 +1682,7 @@ write_procs \
   "901|$LLAMA|$LLAMA|300|$LLAMA --host 127.0.0.1 --port 8080"
 expect_owned_llama "b-leftover-chain" fake 8080 8081 "901" fail
 
-# (c) Reparented to pid 1. Data dir alone, then port alone. John's server
+# (c) Outside the drive's process tree. Data dir alone, then port alone. John's server
 # stays in the table and is not counted. Fake mode fails.
 write_procs \
   "111|$JOHN|$JOHN|1|$JOHN" \
@@ -1698,7 +1698,7 @@ write_procs \
 expect_owned_llama "c-reparented-port" fake 18080 18081 "903" fail
 
 # (d) Unrelated llama-server processes are ignored: another parent, a
-# reparented server on a different port, a sibling data directory, and a
+# server outside the drive's process tree on a different port, a sibling data directory, and a
 # port token that only contains the drive port as a prefix.
 write_procs \
   "111|$JOHN|$JOHN|1|$JOHN" \
@@ -1741,6 +1741,75 @@ if [[ "$(cat "$FIXTURE/empty-data.err")" != *"COOKIE_DATA_DIR is empty"* ]]; the
   printf 'empty data dir reason: %s\n' "$(cat "$FIXTURE/empty-data.err")" >&2
   exit 1
 fi
+
+# Relative socket and pipe names must not resolve against cwd. From inside
+# the data directory they would otherwise look like this run's files.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "920|$LLAMA|socket;pipe;llama-server.log;127.0.0.1:8080|1|$LLAMA --host 127.0.0.1 --port 9999"
+(
+  cd "$DRIVE_DATA" || exit 1
+  expect_owned_llama "cwd-relative-lsof" fake 18080 18081 "" pass
+)
+
+# lsof missing: exclusion rules must not disappear into a port-only count.
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD"
+mv "$FIXTURE/bin/lsof" "$FIXTURE/lsof.hidden"
+set +e
+(
+  set -euo pipefail
+  nolsof="$(mktemp -d)"
+  for cmd in awk python3 mktemp cat rm mv cp chmod grep sort tr sed; do
+    src="$(command -v "$cmd" || true)"
+    if [[ -n "$src" ]]; then
+      ln -s "$src" "$nolsof/$cmd"
+    fi
+  done
+  ln -s "$FIXTURE/bin/ps" "$nolsof/ps"
+  PATH="$nolsof"
+  export PATH
+  if command -v lsof >/dev/null 2>&1; then
+    printf 'lsof is still on PATH\n' >&2
+    exit 1
+  fi
+  expect_owned_closed "lsof-missing" 222 "$DRIVE_NAME" "$DRIVE_BUNDLE" "lsof is not on PATH"
+)
+lsof_status=$?
+set -e
+mv "$FIXTURE/lsof.hidden" "$FIXTURE/bin/lsof"
+if [[ "$lsof_status" -ne 0 ]]; then
+  exit "$lsof_status"
+fi
+
+# lsof itself errors. Same fail-closed result.
+cp "$FIXTURE/bin/lsof" "$FIXTURE/lsof.good"
+cat >"$FIXTURE/bin/lsof" <<'EOF'
+#!/bin/bash
+printf '%s\n' "lsof: permission denied" >&2
+exit 1
+EOF
+chmod +x "$FIXTURE/bin/lsof"
+expect_owned_closed "lsof-failed" 222 "$DRIVE_NAME" "$DRIVE_BUNDLE" "lsof failed"
+cp "$FIXTURE/lsof.good" "$FIXTURE/bin/lsof"
+chmod +x "$FIXTURE/bin/lsof"
+rm -f "$FIXTURE/lsof.good"
+
+# Stale pid file: log closed and port changed, but the recorded pid is still
+# llama-server. A reused pid that is not llama-server is not counted.
+printf '%s\n' 930 >"$DRIVE_DATA/logs/llama-server.pid"
+printf '%s\n' 50 >"$DRIVE_DATA/logs/llama-embed.pid"
+write_procs \
+  "111|$JOHN|$JOHN|1|$JOHN" \
+  "222|$DRIVE_BIN|$DRIVE_BIN|1|$DRIVE_BIN" \
+  "50|/usr/sbin/unrelated|/usr/sbin/unrelated|1|/usr/sbin/unrelated" \
+  "900|$LLAMA|$LLAMA;$JOHN_LOG|111|$JOHN_CMD" \
+  "930|$LLAMA|$LLAMA|1|$LLAMA --host 127.0.0.1 --port 9999"
+expect_owned_llama "stale-pidfile" fake 18080 18081 "930" fail
+rm -f "$DRIVE_DATA/logs/llama-server.pid" "$DRIVE_DATA/logs/llama-embed.pid"
 
 # N1: SIGTERM lands, the pid stays alive, then it is reused by John's
 # CookieAgent before the SIGKILL. The escalation is not sent.
