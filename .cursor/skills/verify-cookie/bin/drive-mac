@@ -76,6 +76,7 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 DRIVE_BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=drive-mac-pid.sh
 source "$DRIVE_BIN_DIR/drive-mac-pid.sh"
 # Captured before any launch replaces HOME. An empty HOME falls through to
@@ -677,16 +678,6 @@ PORT_BEFORE=0
 if port_listening "$PORT"; then
   PORT_BEFORE=1
 fi
-
-llama_server_pids() {
-  ps -ax -o pid=,command= | awk '
-    /llama-server/ && $0 !~ /awk/ && $0 !~ /drive-mac/ { print $1 }
-  '
-}
-
-llama_server_count() {
-  llama_server_pids | wc -l | tr -d ' '
-}
 
 pid_file_pid() {
   local file="$COOKIE_DATA_DIR/logs/llama-server.pid"
@@ -2175,9 +2166,15 @@ relaunch_app() {
 # kill -9 skips applicationShouldTerminate, so a server we launched is
 # orphaned until the next launch reaps it. Fake mode has no llama-server.
 # Real mode runs the chat server and the embedding server, so two processes
-# is the ceiling.
+# is the ceiling. The count is this drive only: descendants of the verified
+# drive pid, or a server outside the drive's process tree that still has this
+# run's COOKIE_DATA_DIR open, was started with this run's chat or embed
+# port, or is still llama-server in this run's pid file. John's llama-server
+# is not counted. The check does not signal any
+# pid except the drive app, and that signal already went through
+# verify_drive_pid_reason.
 orphan_reap_check() {
-  local old_pid old_embed count limit
+  local old_pid old_embed count owned
   old_pid="$(pid_file_pid || true)"
   old_embed=""
   if [[ "$runtime" == "real" ]]; then
@@ -2191,18 +2188,17 @@ orphan_reap_check() {
   APP_PID=""
   sleep 0.5
   relaunch_app
-  count="$(llama_server_count)"
-  if [[ "$runtime" == "real" ]]; then
-    limit=2
-  else
-    limit=1
+  owned="$(drive_owned_llama_pids "$APP_PID" "$BIN" "$DRIVE_PROCESS_NAME" "$DRIVE_BUNDLE_ID" "$COOKIE_DATA_DIR" "$PORT" "$EMBED_PORT")" || fail "orphan reap could not identify this drive's llama-server processes"
+  count=0
+  if [[ -n "${owned//[[:space:]]/}" ]]; then
+    count="$(printf '%s\n' "$owned" | awk 'NF { n++ } END { print n + 0 }')"
   fi
   log "orphan-reap llama-server count ${count}"
-  if [[ "$count" -gt "$limit" ]]; then
-    fail "orphan reap left ${count} llama-server processes: $(llama_server_pids | tr '\n' ' ')"
-  fi
-  if [[ "$runtime" == "fake" && "$count" != "0" ]]; then
-    fail "fake runtime has llama-server after relaunch"
+  if ! orphan_reap_within_limit "$runtime" "$count"; then
+    if [[ "$runtime" == "fake" && "$count" -le 1 ]]; then
+      fail "fake runtime has llama-server after relaunch"
+    fi
+    fail "orphan reap left ${count} llama-server processes: $(printf '%s\n' "$owned" | tr '\n' ' ')"
   fi
   if [[ -n "$old_pid" ]] && pid_is_llama "$old_pid"; then
     if [[ "$runtime" != "real" && "$count" != "1" ]]; then
