@@ -1,6 +1,6 @@
 # Development status
 
-Updated 2026-11-12. The running Cookie was not signaled, and its Application Support database was not opened. `package-app.sh` was not run.
+Updated 2026-11-12. Cookie was quit and the October 25 dist app was deleted. Its Application Support database was not opened. `package-app.sh` was not run.
 
 ## 1. Current main, checkout, and installed app
 
@@ -10,7 +10,7 @@ Updated 2026-11-12. The running Cookie was not signaled, and its Application Sup
 | Working tree | No stashes. One worktree: this checkout. |
 | Main CI on `283ff9b` | [run 42157595317](https://github.com/johnkimec/cookie-agent/actions/runs/42157595317) failed before any job started. Annotation: "The job was not started because your account is locked due to a billing issue." All five jobs. Not a test failure. |
 | Local check of #35 | `drive-mac-pid-test` at `b94e53d` exited 0 (`drive-mac pid test ok`). It skipped the bind-mount cases (`SKIP bind mount (not root)`). Fixture `ps` and `lsof` only. No app launch. |
-| Running app | Unchanged. Process 70767 is still `dist/Cookie Agent.app` (mtime 2026-10-25 19:33:52). llama-server still on `127.0.0.1:8080` and `:8081`. No git SHA in the binary. `e957eca` remains an unproven fit for that build time. |
+| Running app | None. On 2026-11-12 the October 25 `dist/Cookie Agent.app` and `dist/Cookie Agent.app.bak-f866370` were deleted after Cookie quit. Its llama-server processes on ports 8080 and 8081 exited with it. `dist/` is empty. Application Support was not opened or deleted. |
 
 ## 2. Open pull requests
 
@@ -24,7 +24,7 @@ Lesson resolution on #13 is done. Each of `L-2026-11-03-133`, `134`, and `135` a
 
 ## 3. Work to preserve
 
-- Running app, `dist/Cookie Agent.app`, `dist/Cookie Agent.app.bak-f866370`, and `~/Library/Application Support/com.johnkimec.cookie-agent`. Do not run `package-app.sh` in this checkout.
+- `~/Library/Application Support/com.johnkimec.cookie-agent` was not touched. `dist/` is empty. A future build still belongs in a separate worktree: `package-app.sh` in this checkout writes `dist/Cookie Agent.app`.
 - Remote branch `cursor/drive-mac-ax-cleanup-c391` (`e7fbb8d`), even though #26 is closed. Leftovers not on main: `CookieSkipHotkey`, `CookieApplicationSupportFolder`, `lsregister -u`, a total keystroke ban, owned embed reap, and the click-outside guard. None were extracted.
 - Remote `cursor/drive-mac-recipes-1711` still exists after the merge. No open pull request points at it.
 - Gitignored `verify-evidence/` and `dist/`. Merged pull-request branches were deleted on 2026-11-11. `main` was not changed by that delete.
@@ -40,11 +40,11 @@ Lesson resolution on #13 is done. Each of `L-2026-11-03-133`, `134`, and `135` a
 
 - A new PR for a #26 leftover, if you later want one. The option-space recipe on #13 conflicts with a total keystroke ban.
 - Planned Mac sub-features, `memory-recall`, `memory-no-egress`, and the design-doc known issues N3, N4, R5-9, and R5-10.
-- Rebuild the menu-bar app from current main. The running binary does not include #35 or the earlier memory and popup merges.
+- Build the menu-bar app from current main in a separate worktree, when you want to see it. Nothing is installed now.
 
 **Done this pass**
 
-- #35 merged. Offline pid test passed. Live app left running.
+- #35 merged. Offline pid test passed. The October 25 dist app was later deleted.
 - #26 closed, branch retained.
 - #13 merged as `e54fe03` without CI running. The pid test passed before that merge. The Mac recipes were not driven.
 
