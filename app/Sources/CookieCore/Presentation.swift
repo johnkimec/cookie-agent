@@ -102,6 +102,23 @@ public func resolvedDraftTTL(environment: [String: String]) -> TimeInterval {
     return value
 }
 
+/// Custom accessibility actions that replay Shift-Return, ⌘K, and Up.
+/// System Events keystrokes go to the frontmost app, not this panel.
+/// Unset leaves the field's actions unchanged.
+public func cookieDriveKeysEnabled(environment: [String: String]) -> Bool {
+    environment["COOKIE_DRIVE_KEYS"] == "1"
+}
+
+/// Where Shift-Return should insert after an accessibility set.
+/// System Events replaces the field text and does not leave the caret
+/// where typing would. Unset returns nil so the setter stays as it is.
+public func driveCaretLocation(textLength: Int, environment: [String: String]) -> Int? {
+    guard cookieDriveKeysEnabled(environment: environment), textLength >= 0 else {
+        return nil
+    }
+    return textLength
+}
+
 public enum MenuGlyph: String, Equatable, Sendable {
     case idle
     case listening
