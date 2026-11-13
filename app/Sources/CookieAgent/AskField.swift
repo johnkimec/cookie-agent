@@ -61,7 +61,7 @@ struct AskField: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.importsGraphics = false
-        textView.font = .systemFont(ofSize: 15)
+        textView.font = CookieFont.fieldNSFont
         textView.textColor = .labelColor
         textView.drawsBackground = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -244,7 +244,7 @@ final class AskTextView: NSTextView {
         guard string.isEmpty else { return }
         let attributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.placeholderTextColor,
-            .font: font ?? NSFont.systemFont(ofSize: 15),
+            .font: font ?? CookieFont.fieldNSFont,
         ]
         let rect = NSRect(
             x: textContainerInset.width + 5,
@@ -324,19 +324,17 @@ private final class WrappingLabel: NSTextField {
 struct IdentifiedButton: NSViewRepresentable {
     var title: String
     var identifier: String
+    /// Drawn on the key. The spoken label stays `title` (`⏎` or `Stop`).
+    var keycap: String
     var enabled: Bool = true
+    /// A ready key with a draft, or Stop, draws at full strength.
+    var emphasized: Bool = false
     var action: () -> Void
 
-    /// The button's title size. Without this, SwiftUI treats the control as
-    /// flexible and it takes half the row: on the Mac it measured 227×137
-    /// inside the 160 pt long-reply row, and 227 pt wide even when empty.
+    /// A fixed key. Without this, SwiftUI treats the control as flexible and
+    /// it takes half the row.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView button: NSButton, context: Context) -> CGSize? {
-        let intrinsic = button.intrinsicContentSize
-        let width: CGFloat = intrinsic.width > 1 && intrinsic.width < 10_000 ? intrinsic.width : 28
-        let height: CGFloat = intrinsic.height > 1 && intrinsic.height < 10_000
-            ? intrinsic.height
-            : PopupMetrics.inputLineHeight
-        return CGSize(width: width.rounded(.up), height: height.rounded(.up))
+        CGSize(width: 36, height: 24)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -344,11 +342,9 @@ struct IdentifiedButton: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.press))
+        let button = KeycapButton(title: keycap, target: context.coordinator, action: #selector(Coordinator.press))
         button.setButtonType(.momentaryPushIn)
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.font = .systemFont(ofSize: NSFont.systemFontSize)
+        applyChrome(button)
         button.isEnabled = enabled
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentHuggingPriority(.required, for: .vertical)
@@ -362,10 +358,25 @@ struct IdentifiedButton: NSViewRepresentable {
 
     func updateNSView(_ button: NSButton, context: Context) {
         context.coordinator.action = action
-        button.title = title
+        applyChrome(button)
         button.isEnabled = enabled
         button.setAccessibilityIdentifier(identifier)
         button.setAccessibilityLabel(title)
+    }
+
+    /// The key draws `keycap`. The spoken string stays the accessibility label.
+    /// An empty title would make System Events describe the control as blank
+    /// instead of `⏎` or `Stop`.
+    private func applyChrome(_ button: NSButton) {
+        button.font = CookieFont.metaNSFont
+        button.image = nil
+        button.imagePosition = .noImage
+        button.title = keycap
+        button.isBordered = false
+        button.alphaValue = emphasized && enabled ? 1 : 0.55
+        if let key = button as? KeycapButton {
+            key.emphasized = emphasized && enabled
+        }
     }
 
     final class Coordinator: NSObject {
@@ -378,6 +389,37 @@ struct IdentifiedButton: NSViewRepresentable {
         @objc func press() {
             action()
         }
+    }
+}
+
+/// Draws the send key. The title is the glyph (`⏎` or `esc`). The accessibility
+/// label is set by `IdentifiedButton` and is what System Events reads.
+final class KeycapButton: NSButton {
+    var emphasized = false
+
+    override func draw(_ dirtyRect: NSRect) {
+        let stroke = NSColor.labelColor.withAlphaComponent(emphasized ? 0.55 : 0.3)
+        let face = bounds.insetBy(dx: 1, dy: 1.5)
+        let key = NSBezierPath(roundedRect: face, xRadius: 6, yRadius: 6)
+        stroke.setStroke()
+        key.lineWidth = 1
+        key.stroke()
+        let lip = NSBezierPath()
+        lip.move(to: NSPoint(x: face.minX + 4, y: face.minY + 1))
+        lip.line(to: NSPoint(x: face.maxX - 4, y: face.minY + 1))
+        lip.lineWidth = 1
+        lip.stroke()
+        let color = emphasized ? NSColor.labelColor : NSColor.secondaryLabelColor
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? CookieFont.metaNSFont,
+            .foregroundColor: color,
+        ]
+        let size = title.size(withAttributes: attributes)
+        let origin = NSPoint(
+            x: (bounds.width - size.width) / 2,
+            y: (bounds.height - size.height) / 2 - 1
+        )
+        title.draw(at: origin, withAttributes: attributes)
     }
 }
 

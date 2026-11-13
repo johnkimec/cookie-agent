@@ -1505,9 +1505,10 @@ ok = (
 if mode == "long":
     ok = ok and more_than_one_line(reply_height) and abs(window_height - max_height) <= 1 and window_height - row_height >= 240
 elif mode == "three":
-    # One-line replies measure under the 281 pt line estimate. 270 stays
-    # above the 248 pt three-exchange preview and below that estimate.
-    ok = ok and 120 < window_height < 270
+    # Stacked pairs are taller than the old side-by-side rows. They still
+    # have to settle under the cap. 320 means the transcript was stretched
+    # or the line estimate stuck.
+    ok = ok and 120 < window_height < max_height
 else:
     print("unknown mode " + mode)
     sys.exit(1)

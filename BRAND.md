@@ -6,7 +6,7 @@ It does not cover:
 
 - the name **Cookie**
 - the white maltipoo mascot
-- mascot artwork, including Rive files (`.riv`), pose exports, menu-bar glyphs, and the app icon
+- mascot artwork, including Rive files (`.riv`), pose exports, menu-bar glyphs, the path drawing in `app/Sources/CookieAgent/CookieMark.swift`, and the app icon
 
 Those are reserved by John Kim. All rights reserved.
 

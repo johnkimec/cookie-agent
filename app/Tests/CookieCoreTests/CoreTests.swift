@@ -69,6 +69,7 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(CookieAX.turnYou(0), "cookie.turn.you.0")
         XCTAssertEqual(CookieAX.turnCookie(1), "cookie.turn.cookie.1")
         XCTAssertEqual(CookieAX.badge(0), "cookie.badge.on-device.0")
+        XCTAssertEqual(CookieAX.badgeCloud(0), "cookie.badge.cloud.0")
         XCTAssertEqual(CookieAX.onDeviceIndicator, "cookie.badge.on-device")
         XCTAssertEqual(CookieAX.transcriptBottom, "cookie.popup.transcript-bottom")
         XCTAssertEqual(CookieCopy.ask, "Ask Cookie…")

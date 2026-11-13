@@ -616,22 +616,18 @@ private final class DeltaHold: @unchecked Sendable {
     }
 }
 
-/// The cookie turn at the popup width: role label, spacing, and 16 pt padding,
-/// matching `TurnRow` inside the transcript.
+/// A cookie reply at the popup width: the transcript's 16 pt horizontal
+/// padding, matching `TurnRow` without the old role column.
 @MainActor
 private func laidOutTurnHeight(_ text: String) -> CGFloat {
-    let row = HStack(alignment: .top, spacing: 12) {
-        Text("cookie")
-            .font(.body.monospaced())
-            .frame(width: 64, alignment: .leading)
-        Text(text)
-            .font(.body)
-            .lineLimit(nil)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    .padding(16)
-    .frame(width: PopupLayout.width, alignment: .topLeading)
+    let row = Text(text)
+        .font(.body)
+        .lineLimit(nil)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(width: PopupLayout.width, alignment: .topLeading)
 
     let host = NSHostingView(rootView: row)
     host.sizingOptions = [.intrinsicContentSize]
@@ -673,7 +669,7 @@ final class PopupSizingTests: XCTestCase {
             showsNotice: false,
             measuredTranscript: 72
         )
-        XCTAssertEqual(measured, PopupLayout.collapsedHeight + 72 + 1)
+        XCTAssertEqual(measured, PopupGeometry.panelHeight(transcriptContent: 72))
         XCTAssertLessThan(measured, PopupLayout.maxHeight)
     }
 
@@ -804,8 +800,8 @@ final class PopupSizingTests: XCTestCase {
             showsNotice: false,
             measuredTranscript: 150
         )
-        XCTAssertEqual(measured, PopupLayout.collapsedHeight + 150 + 1)
-        XCTAssertLessThan(measured, 230)
+        XCTAssertEqual(measured, PopupGeometry.panelHeight(transcriptContent: 150))
+        XCTAssertLessThan(measured, 280)
         XCTAssertGreaterThan(PopupLayout.maxHeight - measured, 40)
     }
 }

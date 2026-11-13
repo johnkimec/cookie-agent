@@ -19,8 +19,11 @@ public enum CookieAX {
     public static func turnYou(_ index: Int) -> String { "cookie.turn.you.\(index)" }
     public static func turnCookie(_ index: Int) -> String { "cookie.turn.cookie.\(index)" }
     public static func badge(_ index: Int) -> String { "cookie.badge.on-device.\(index)" }
-    /// The 8×8 on-device dot in the input row. Cookie replies also use
-    /// `badge(_:)` for a content-sized capsule with the same string.
+    /// A reply that left the machine. The on-device id stays `badge(_:)`.
+    public static func badgeCloud(_ index: Int) -> String { "cookie.badge.cloud.\(index)" }
+    /// The 8×8 on-device element in the input row. It has no green fill.
+    /// A finished cookie reply uses `badge(_:)` for a content-sized label
+    /// under the text. A cloud reply uses `badgeCloud(_:)`.
     public static let onDeviceIndicator = "cookie.badge.on-device"
     public static let transcriptBottom = "cookie.popup.transcript-bottom"
 }

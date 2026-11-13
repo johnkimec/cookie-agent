@@ -33,6 +33,9 @@ let package = Package(
                 "CookieProtocol",
                 "CookieCore",
                 .product(name: "SwiftStreamingMarkdown", package: "SwiftStreamingMarkdown"),
+            ],
+            resources: [
+                .copy("Resources/cookie-mascot.png"),
             ]
         ),
         .testTarget(

@@ -10,7 +10,7 @@
 - `popup-option-click` opens the popup from an option-click on the menu-bar icon. `status: planned`
 - `popup-input` shows the field `Ask Cookie…`. Return sends. Shift-Return inserts a newline. ⌘K clears the field. Up edits the last message. `status: planned`
 - `popup-input-grow` shows one line when the field is empty, grows with the draft up to 8 lines, then scrolls inside the field. Return still sends. ⌘K still clears. `status: planned`
-- `popup-on-device-dot` shows one `on-device` indicator in the input row while the runtime is up (`cookie.badge.on-device`). The cookie reply's `on-device` capsule is content-sized and under 140 pt wide. `status: planned`
+- `popup-on-device-dot` shows one `on-device` indicator in the input row while the runtime is up (`cookie.badge.on-device`). The element is 8×8 and has no green fill. The cookie reply's `on-device` label sits under the reply, content-sized and under 140 pt wide. `status: planned`
 - `popup-nonactivating` leaves the previously frontmost app frontmost. Verified by Sergey on the Mac, 2026-10-25, commit c89adc6. `status: verified (verify-evidence/m0-mac-real/)`
 - `popup-draft` keeps an unsent draft for 10 minutes after the popup closes. `status: planned`
 - `popup-layout` is 560 pt wide, centred in the upper third of the active screen, with a 40 pt Cookie at the left of the input row. `status: planned`

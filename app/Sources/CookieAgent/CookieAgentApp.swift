@@ -8,6 +8,7 @@ struct CookieApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
+        CookieFont.register(in: Bundle.module)
         QuitSignals.install()
         NSApplication.shared.setActivationPolicy(.accessory)
     }

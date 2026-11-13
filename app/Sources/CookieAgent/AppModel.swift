@@ -17,9 +17,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     var onPopup: ((Bool) -> Void)?
     var onLayout: (() -> Void)?
-    /// Laid-out transcript height, including its insets. Zero until the
-    /// scroll content reports one. The panel uses it so a short reply does
-    /// not keep the line-count estimate's extra space.
+    /// Height of the stacked pairs, without the transcript's vertical padding.
+    /// Zero until the scroll content reports one. The panel adds that padding
+    /// so a short reply does not keep the line-count estimate's extra space.
     var measuredTranscriptHeight: CGFloat = 0
 
     func noteTranscriptHeight(_ height: CGFloat) {

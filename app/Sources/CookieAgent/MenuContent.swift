@@ -43,7 +43,7 @@ struct MenuGlyphLabel: View {
             replyInFlight: model.conversation.replyInFlight
         )
         let label = menuVoiceOver(glyph)
-        Image(nsImage: GlyphImage.make(glyph))
+        Image(nsImage: CookieGlyph.image(for: CookiePose(menu: glyph)))
             .resizable()
             .frame(width: 18, height: 18)
             .accessibilityLabel(label)
@@ -54,54 +54,6 @@ struct MenuGlyphLabel: View {
             .onChange(of: label) { _, _ in
                 StatusItemAccess.apply(label: label)
             }
-    }
-}
-
-enum GlyphImage {
-    static func make(_ glyph: MenuGlyph) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-            NSColor.black.set()
-            let head = NSRect(x: 4.5, y: 3.5, width: 9, height: 9)
-            let path = NSBezierPath(ovalIn: head)
-            path.lineWidth = 1.35
-            switch glyph {
-            case .loading:
-                path.setLineDash([1.15, 1.35], count: 2, phase: 0)
-                path.stroke()
-            case .down:
-                path.stroke()
-                ears(raised: false)
-                let slash = NSBezierPath()
-                slash.move(to: NSPoint(x: 3, y: 2))
-                slash.line(to: NSPoint(x: 15, y: 16))
-                slash.lineWidth = 1.35
-                slash.stroke()
-            case .listening:
-                path.stroke()
-                ears(raised: true)
-            case .thinking:
-                path.stroke()
-                ears(raised: false)
-                NSBezierPath(ovalIn: NSRect(x: 12.2, y: 13.2, width: 2.1, height: 2.1)).fill()
-                NSBezierPath(ovalIn: NSRect(x: 15, y: 14.6, width: 1.7, height: 1.7)).fill()
-            case .idle:
-                path.stroke()
-                ears(raised: false)
-            }
-            return true
-        }
-        image.isTemplate = true
-        return image
-    }
-
-    private static func ears(raised: Bool) {
-        let y: CGFloat = raised ? 8.5 : 1.6
-        let left = NSBezierPath(ovalIn: NSRect(x: 2.2, y: y, width: 3.2, height: 6.4))
-        let right = NSBezierPath(ovalIn: NSRect(x: 12.6, y: y, width: 3.2, height: 6.4))
-        left.lineWidth = 1.2
-        right.lineWidth = 1.2
-        left.stroke()
-        right.stroke()
     }
 }
 

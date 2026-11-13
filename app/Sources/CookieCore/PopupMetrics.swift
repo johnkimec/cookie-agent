@@ -66,8 +66,13 @@ public enum PopupMetrics {
         let input = inputRowHeight(draft: draft, showsNotice: showsNotice)
         guard !turnTexts.isEmpty else { return min(PopupLayout.maxHeight, input) }
         let transcript: CGFloat
+        // The measurement is the stacked pairs without their vertical padding.
+        // Adding that padding here is what keeps the first line inside the panel.
         if let measuredTranscript, measuredTranscript > 1 {
-            transcript = measuredTranscript
+            return PopupGeometry.panelHeight(
+                transcriptContent: measuredTranscript,
+                inputRowHeight: input
+            )
         } else {
             var lines = 0
             for text in turnTexts {

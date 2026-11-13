@@ -142,12 +142,15 @@ final class PopupInputRowTests: XCTestCase {
         }
         XCTAssertTrue(textContains("pass that along", in: host), "markdown did not render the cookie rows")
         XCTAssertLessThanOrEqual(probe.row, 72)
-        let panel = probe.transcript + probe.row + 1
+        let panel = PopupGeometry.panelHeight(
+            transcriptContent: probe.transcript,
+            inputRowHeight: probe.row
+        )
         let estimate = PopupMetrics.panelHeight(turnTexts: lines, draft: "", showsNotice: false)
         XCTAssertGreaterThan(estimate, 300, "the line estimate is the near-full flash")
         XCTAssertGreaterThan(panel, 180)
-        XCTAssertLessThan(panel, 290, "settled three exchanges stay under the 303 pt estimate")
-        XCTAssertLessThan(panel, estimate - 10)
+        XCTAssertLessThan(panel, PopupLayout.maxHeight, "settled three exchanges stay under the cap")
+        XCTAssertLessThan(panel, estimate)
     }
 
     func testRealCookieRowWraps() throws {
@@ -196,7 +199,8 @@ final class PopupInputRowTests: XCTestCase {
             "inline math was neither an attachment nor text"
         )
         let width = textView.textContainer?.containerSize.width ?? 10_000
-        XCTAssertLessThanOrEqual(width, PopupLayout.width - 32 - 64)
+        XCTAssertGreaterThan(width, 300, "the reply uses the column")
+        XCTAssertLessThanOrEqual(width, PopupLayout.width - 32)
         XCTAssertEqual(textView.textContainer?.lineBreakMode, .byWordWrapping)
     }
 
@@ -210,8 +214,9 @@ final class PopupInputRowTests: XCTestCase {
             "I'm sorry to hear that. I'll pass that along.",
         ]
         let model = AppModel()
-        // Three short exchanges settle near 260. The line estimate is 303.
-        let settledTranscript: CGFloat = 195
+        // Unpadded stack for a panel near 260. Padding is 24, the divider is 1,
+        // and the row is 64: 171 + 24 + 1 + 64 = 260. The line estimate is 303.
+        let settledTranscript: CGFloat = 171
         model.measuredTranscriptHeight = settledTranscript
         let settled = panelFrame(lines: lines, measured: model.measuredTranscriptHeight)
         let epsilon: CGFloat = 1

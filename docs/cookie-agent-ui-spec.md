@@ -226,21 +226,23 @@ A standard `MenuBarExtra` menu. Option-click the icon to open the popup directly
 ### 6.2 Hotkey popup
 
 - **Window:** Non-activating `NSPanel` (as in the design doc), floating level, centred in the upper third of the active screen.
-- **Size:** 560 pt wide. With no reply the panel is the input row, 64 pt tall (under 80 pt): the 22 pt field, the 40 pt Cookie, and one 8×8 on-device dot. The window height is the transcript plus that row plus the divider. It reaches `PopupLayout.maxHeight`, 320 pt, only when the content would pass it, and then the transcript scrolls inside and stays pinned to the bottom. 320 pt is the upper third of a 13-inch MacBook (default canvas 1470×956 pt; after the menu bar that band is about 300 pt) and still fits that band on a 14-inch display. That is the input row plus about eleven 22 pt lines. The last transcript line sits 8 pt above the input row. The follow-bottom marker occupies that inset and does not leave a blank band. The input row is exactly that 64 pt height for a one-line draft, in one row; the transcript does not leave a gap above it. Reply text wraps inside the column, including a long single token, markdown, and the inline math in that paragraph.
+- **Size:** 560 pt wide. With no reply the panel is the input row, 64 pt tall (under 80 pt): the 22 pt field, the 40 pt Cookie, and one 8×8 on-device element with no green fill. The window height is the transcript plus that row plus the divider. It reaches `PopupLayout.maxHeight`, 320 pt, only when the content would pass it, and then the transcript scrolls inside and stays pinned to the bottom. 320 pt is the upper third of a 13-inch MacBook (default canvas 1470×956 pt; after the menu bar that band is about 300 pt) and still fits that band on a 14-inch display. That is the input row plus about eleven 22 pt lines. The last transcript line sits 8 pt above the input row. The follow-bottom marker occupies that inset and does not leave a blank band. The input row is exactly that 64 pt height for a one-line draft, in one row; the transcript does not leave a gap above it. Reply text wraps inside the column, including a long single token, markdown, and the inline math in that paragraph.
 - **Cookie:** A 40 pt animated head at the left of the input row, driven by the state table. It's the only animated thing in the panel.
 - **Open/close:** ⌥Space toggles it (rebindable) and Esc closes it. Clicking outside closes it unless an action card is pending. The draft is kept for 10 minutes.
 - **Input:** Single line that grows to 5 lines. ⏎ sends, ⇧⏎ adds a newline, ↑ edits the last message, ⌘K clears.
 - **Screen chip:** Shows something like "Safari · Lab 4 handout" when you use ⌥⇧Space or type "this". Click the chip to drop it. Without the chip, no screen content goes into the prompt.
-- **On-device dot:** One 8×8 dot in the input row while the runtime is up, labelled `on-device`. A cookie reply also shows that same string in a content-sized capsule. The capsule uses `fixedSize`, stays under 140 pt wide, and does not take width from the reply text.
+- **On-device mark:** One 8×8 element in the input row while the runtime is up, labelled `on-device`, with no green fill. A finished cookie reply shows that same string in a content-sized label under the text. The label stays under 140 pt wide and does not take width from the reply. A reply that left the machine says `cloud`.
+
+Your line is secondary text above the reply. Cookie’s reply is the full column. The words `you` and `cookie` stay the accessibility labels. The send control is a keycap reading `⏎`, or `esc` while a reply is arriving. Its accessibility label is still `⏎`, or `Stop` while a reply is arriving.
 
 ```text
 ┌────────────────────────────────────────────────────────┐
 │ [▣ Safari · Lab 4 handout  ×]          on-device ◦      │  context chip + 8 pt on-device dot
 ├────────────────────────────────────────────────────────┤
-│ you     what's the setup time in table 3?               │
+│              what's the setup time in table 3?         │  your line, trailing bubble
 │                                                        │
-│ cookie  2.1 ns min at 3.3 V (row "tSU"). The 1.8 V      │
-│         column is blank in this PDF.                    │
+│ 2.1 ns min at 3.3 V (row "tSU"). The 1.8 V             │  cookie, leading
+│ column is blank in this PDF.              on-device    │
 │                                                        │
 │ ┌ ACTION · T1 ─────────────────────────────────────┐   │
 │ │ Add reminder "Check tSU at 1.8 V" · Tomorrow 9am │   │
@@ -249,7 +251,7 @@ A standard `MenuBarExtra` menu. Option-click the icon to open the popup directly
 │ │ ☐ Don't ask again for reminders                  │   │  T1 only; never shown for T2
 │ └──────────────────────────────────────────────────┘   │
 ├────────────────────────────────────────────────────────┤
-│ (•ᴥ•)  Ask Cookie…                              ⏎      │  animated Cookie, 40 pt
+│ (•ᴥ•)  Ask Cookie…                              ↑      │  animated Cookie, 40 pt, circular send
 └────────────────────────────────────────────────────────┘
 ```
 
